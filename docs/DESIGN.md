@@ -11,7 +11,7 @@ A self-hosted manga pipeline typically has three tiers, mirroring the *arr/media
 | qBittorrent / SABnzbd | Suwayomi / Tranga | download client — fetch the bytes |
 | **Sonarr / Radarr** | **mangarr** | **organizer — watch downloads, classify, rename, file into the library, trigger a scan** |
 | Plex / Jellyfin | Kavita | serve + read |
-| metadata agents | Komf | enrich metadata once it's in the server |
+| Kometa (Plex Meta Manager) | Komf | enrich metadata in the server (covers, summaries, tags) |
 
 The organizer tier does not exist for scanlation-sourced manga. Downloaders (Suwayomi, Tranga) write tidy-but-flat output organized **by source/tool**, while readers (Kavita) want content organized **by content type** (manga / manhwa / manhua) with type-appropriate reading direction. Nothing bridges the two.
 
