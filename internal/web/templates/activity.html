@@ -9,9 +9,7 @@
     Rescan now
   </button>
 </h1>
-{{if not .Items}}
-  <p class="empty">No activity recorded yet.</p>
-{{else}}
+{{if .Items}}
 <table>
   <thead><tr>
     <th>Time</th>
@@ -30,5 +28,7 @@
   {{end}}
   </tbody>
 </table>
+{{else}}
+  <p class="empty">No activity recorded yet.</p>
 {{end}}
 {{end}}

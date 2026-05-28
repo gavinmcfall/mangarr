@@ -5,9 +5,7 @@
 <p style="font-size:.875rem; color:#555; margin-bottom:1rem;">
   These series could not be classified automatically. Pick a type to remember the choice and re-file on next scan.
 </p>
-{{if not .Items}}
-  <p class="empty">No unmatched series. All series have been classified.</p>
-{{else}}
+{{if .Items}}
 <table>
   <thead><tr>
     <th>Title</th>
@@ -38,5 +36,7 @@
   {{end}}
   </tbody>
 </table>
+{{else}}
+  <p class="empty">No unmatched series. All series have been classified.</p>
 {{end}}
 {{end}}

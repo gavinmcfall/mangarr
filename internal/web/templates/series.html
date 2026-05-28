@@ -10,9 +10,7 @@
   </button>
   <span id="rescan-msg" style="float:right; margin-right:.5rem; font-size:.85rem; color:#155724;"></span>
 </h1>
-{{if not .Items}}
-  <p class="empty">No series discovered yet. Make sure your download roots are configured and click "Rescan now".</p>
-{{else}}
+{{if .Items}}
 <table>
   <thead><tr>
     <th>Title</th>
@@ -49,5 +47,7 @@
   {{end}}
   </tbody>
 </table>
+{{else}}
+  <p class="empty">No series discovered yet. Make sure your download roots are configured and click "Rescan now".</p>
 {{end}}
 {{end}}

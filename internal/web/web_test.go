@@ -62,6 +62,20 @@ type fakeRunner struct{ called int }
 
 func (r *fakeRunner) RunOnce() error { r.called++; return nil }
 
+// newEmptyHandler builds a Handler with a store that returns no series,
+// no unmatched, and no activity. Used to exercise the empty-state templates.
+func newEmptyHandler() *Handler {
+	st := &fakeStore{
+		series:   nil,
+		activity: nil,
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	return NewHandler(st, &fakeRunner{})
+}
+
 // newTestHandler builds a Handler with test fixtures.
 func newTestHandler() (*Handler, *fakeStore, *fakeRunner) {
 	st := &fakeStore{
@@ -321,5 +335,61 @@ func TestSaveSettingsFormPost(t *testing.T) {
 	}
 	if st.settings.KavitaAPIKey != "test-key" {
 		t.Fatalf("want KavitaAPIKey=test-key, got %q", st.settings.KavitaAPIKey)
+	}
+}
+
+// ---- empty-state tests: prove the `<p class="empty">` element renders when
+// the store returns no items, and the `<table>` does NOT render. Guards
+// against regression of the broken `not` helper that previously hid the
+// empty-state.
+
+func TestSeriesPageEmptyStateRenders(t *testing.T) {
+	h := newEmptyHandler()
+	req := httptest.NewRequest(http.MethodGet, "/series", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "No series discovered yet") {
+		t.Fatalf("series empty-state text not in body:\n%s", body)
+	}
+	if strings.Contains(body, "<table") {
+		t.Fatalf("series table should NOT render with no items; body:\n%s", body)
+	}
+}
+
+func TestUnmatchedPageEmptyStateRenders(t *testing.T) {
+	h := newEmptyHandler()
+	req := httptest.NewRequest(http.MethodGet, "/unmatched", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "No unmatched series") {
+		t.Fatalf("unmatched empty-state text not in body:\n%s", body)
+	}
+	if strings.Contains(body, "<table") {
+		t.Fatalf("unmatched table should NOT render with no items")
+	}
+}
+
+func TestActivityPageEmptyStateRenders(t *testing.T) {
+	h := newEmptyHandler()
+	req := httptest.NewRequest(http.MethodGet, "/activity", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "No activity recorded yet") {
+		t.Fatalf("activity empty-state text not in body:\n%s", body)
+	}
+	if strings.Contains(body, "<table") {
+		t.Fatalf("activity table should NOT render with no items")
 	}
 }

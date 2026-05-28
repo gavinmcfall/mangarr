@@ -119,28 +119,19 @@ func parsePageTemplates() map[string]*template.Template {
 }
 
 // templateFuncs returns the custom template functions used in .html files.
+//
+// We deliberately do NOT define a "not" helper here — html/template already
+// evaluates slice truthiness correctly (nil/empty → false), so templates use
+// native `{{if .Items}}...{{else}}empty-state{{end}}` instead. A custom `not`
+// helper that takes interface{} was previously broken because non-nil slices
+// boxed in interface{} fall to a default-return-false branch, silently
+// hiding the empty-state.
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
 		// lower converts any string-like value to lowercase.
 		// Uses fmt.Sprintf to handle named string types (model.ContentType, model.Status).
 		"lower": func(v interface{}) string {
 			return strings.ToLower(fmt.Sprintf("%s", v))
-		},
-		// not returns true for nil, empty string, zero int, and false bool.
-		"not": func(v interface{}) bool {
-			if v == nil {
-				return true
-			}
-			switch val := v.(type) {
-			case bool:
-				return !val
-			case int:
-				return val == 0
-			case string:
-				return val == ""
-			default:
-				return false
-			}
 		},
 	}
 }
@@ -455,5 +446,8 @@ func html(s string) string {
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	s = strings.ReplaceAll(s, `"`, "&#34;")
+	// Escape single quotes too — defence-in-depth so the helper is safe if
+	// future code places a value inside a single-quoted attribute.
+	s = strings.ReplaceAll(s, "'", "&#39;")
 	return s
 }
