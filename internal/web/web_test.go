@@ -154,6 +154,22 @@ func TestSettingsPageReturns200(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
 	}
+	body := rr.Body.String()
+	// Assert the form rendered to the END (not corrupted mid-render by a
+	// template panic, which previously returned 200 with a half-baked body).
+	if !strings.Contains(body, `name="root_manga"`) {
+		t.Fatalf("settings form did not render root_manga input; body:\n%s", body)
+	}
+	if !strings.Contains(body, `name="kavita_lib_manhua"`) {
+		t.Fatalf("settings form did not render kavita_lib_manhua input (renders near the end)")
+	}
+	if !strings.Contains(body, "Save settings") {
+		t.Fatalf("settings form submit button missing — render incomplete")
+	}
+	// Template execution errors must NOT leak into the rendered body.
+	if strings.Contains(body, "executing") || strings.Contains(body, "error calling") {
+		t.Fatalf("settings page contains template-error text in body:\n%s", body)
+	}
 }
 
 func TestRootRedirectsToSeries(t *testing.T) {
@@ -307,14 +323,16 @@ func TestAPIReclassifySetsType(t *testing.T) {
 func TestSaveSettingsFormPost(t *testing.T) {
 	h, st, _ := newTestHandler()
 	form := url.Values{
-		"file_mode":       {"copy"},
-		"rename_scheme":   {"{series}/{series} - Ch.{chapter}.cbz"},
-		"poll_minutes":    {"60"},
-		"kavita_base_url": {"http://kavita:5000"},
-		"kavita_api_key":  {"test-key"},
-		"root_manga":      {"/lib/Manga"},
-		"root_manhwa":     {"/lib/Manhwa"},
-		"root_manhua":     {""},
+		"file_mode":         {"copy"},
+		"rename_scheme":     {"{series}/{series} - Ch.{chapter}.cbz"},
+		"poll_minutes":      {"60"},
+		"kavita_base_url":   {"http://kavita:5000"},
+		"kavita_api_key":    {"test-key"},
+		"root_manga":        {"/lib/Manga"},
+		"root_manhwa":       {"/lib/Manhwa"},
+		"root_manhua":       {""},
+		"kavita_lib_manga":  {"7"},
+		"kavita_lib_manhwa": {"9"},
 	}
 	req := httptest.NewRequest(http.MethodPost, "/settings",
 		strings.NewReader(form.Encode()))
@@ -336,6 +354,57 @@ func TestSaveSettingsFormPost(t *testing.T) {
 	if st.settings.KavitaAPIKey != "test-key" {
 		t.Fatalf("want KavitaAPIKey=test-key, got %q", st.settings.KavitaAPIKey)
 	}
+	if st.settings.KavitaLibIDsByType[model.TypeManga] != 7 {
+		t.Fatalf("want KavitaLibIDsByType[Manga]=7, got %d", st.settings.KavitaLibIDsByType[model.TypeManga])
+	}
+
+	// Round-trip: GET /settings and assert the rendered form pre-populates
+	// the values we just saved. Guards against any future template type-mismatch
+	// regression — if the template panics, the inputs will be empty/missing.
+	req2 := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("follow-up GET /settings: want 200, got %d", rr2.Code)
+	}
+	body := rr2.Body.String()
+	if !strings.Contains(body, `value="/lib/Manga"`) {
+		t.Fatalf("rendered settings form does not contain saved manga root; body excerpt:\n%s",
+			snippet(body, "root_manga", 120))
+	}
+	if !strings.Contains(body, `value="/lib/Manhwa"`) {
+		t.Fatalf("rendered settings form does not contain saved manhwa root")
+	}
+	if !strings.Contains(body, `value="60"`) {
+		t.Fatalf("rendered settings form does not contain saved poll_minutes=60")
+	}
+	if !strings.Contains(body, `value="7"`) {
+		t.Fatalf("rendered settings form does not contain saved kavita_lib_manga=7")
+	}
+	if !strings.Contains(body, `value="test-key"`) {
+		t.Fatalf("rendered settings form does not contain saved kavita_api_key")
+	}
+}
+
+// snippet returns up to `n` chars surrounding the first occurrence of `marker` in s,
+// used to make form-render failure messages legible.
+func snippet(s, marker string, n int) string {
+	i := strings.Index(s, marker)
+	if i < 0 {
+		if len(s) < n {
+			return s
+		}
+		return s[:n]
+	}
+	start := i - n/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + n
+	if end > len(s) {
+		end = len(s)
+	}
+	return s[start:end]
 }
 
 // ---- empty-state tests: prove the `<p class="empty">` element renders when

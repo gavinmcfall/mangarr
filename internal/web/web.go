@@ -145,12 +145,26 @@ type pageData struct {
 	Error string
 }
 
+// settingsPageData holds pre-extracted plain fields for the Settings template.
+//
+// We deliberately AVOID using {{index .Settings.LibraryRoots "Manga"}} in
+// the template: html/template's reflect-based call requires the key arg type
+// to match exactly, and "Manga" is a string literal while LibraryRoots is
+// keyed by model.ContentType. The reflection panic returns HTTP 200 with a
+// half-rendered body — a silent UX break. Extract values in Go where types
+// are checked at compile time, then pass plain strings/ints to the template.
 type settingsPageData struct {
-	Page         string
-	Settings     model.Settings
-	KavitaAPIKey string
-	Flash        string
-	Error        string
+	Page            string
+	Settings        model.Settings
+	KavitaAPIKey    string
+	Flash           string
+	Error           string
+	RootManga       string
+	RootManhwa      string
+	RootManhua      string
+	KavitaLibManga  int64
+	KavitaLibManhwa int64
+	KavitaLibManhua int64
 }
 
 // ---- HTML page handlers ----
@@ -188,6 +202,9 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if settings.LibraryRoots == nil {
+		settings.LibraryRoots = map[model.ContentType]string{}
+	}
 	if settings.KavitaLibIDsByType == nil {
 		settings.KavitaLibIDsByType = map[model.ContentType]int64{}
 	}
@@ -196,11 +213,20 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 	if flash == "1" {
 		flashMsg = "Settings saved."
 	}
+	// Pre-extract values typed-keyed by model.ContentType into plain fields,
+	// so the template can use {{.RootManga}} etc. with no reflection-time
+	// type mismatch. See settingsPageData doc comment.
 	h.render(w, "settings.html", settingsPageData{
-		Page:         "settings",
-		Settings:     settings,
-		KavitaAPIKey: settings.KavitaAPIKey,
-		Flash:        flashMsg,
+		Page:            "settings",
+		Settings:        settings,
+		KavitaAPIKey:    settings.KavitaAPIKey,
+		Flash:           flashMsg,
+		RootManga:       settings.LibraryRoots[model.TypeManga],
+		RootManhwa:      settings.LibraryRoots[model.TypeManhwa],
+		RootManhua:      settings.LibraryRoots[model.TypeManhua],
+		KavitaLibManga:  settings.KavitaLibIDsByType[model.TypeManga],
+		KavitaLibManhwa: settings.KavitaLibIDsByType[model.TypeManhwa],
+		KavitaLibManhua: settings.KavitaLibIDsByType[model.TypeManhua],
 	})
 }
 

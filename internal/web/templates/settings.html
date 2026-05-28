@@ -28,17 +28,17 @@
   <h2 style="font-size:1.1rem; margin:1.5rem 0 .5rem;">Library roots</h2>
   <div class="form-row">
     <label>Manga root path</label>
-    <input type="text" name="root_manga" value="{{index .Settings.LibraryRoots "Manga"}}"
+    <input type="text" name="root_manga" value="{{.RootManga}}"
       placeholder="/media/Library/Books/Manga">
   </div>
   <div class="form-row">
     <label>Manhwa root path</label>
-    <input type="text" name="root_manhwa" value="{{index .Settings.LibraryRoots "Manhwa"}}"
+    <input type="text" name="root_manhwa" value="{{.RootManhwa}}"
       placeholder="/media/Library/Books/Manhwa">
   </div>
   <div class="form-row">
     <label>Manhua root path</label>
-    <input type="text" name="root_manhua" value="{{index .Settings.LibraryRoots "Manhua"}}"
+    <input type="text" name="root_manhua" value="{{.RootManhua}}"
       placeholder="/media/Library/Books/Manhua">
   </div>
 
@@ -55,17 +55,17 @@
   </div>
   <div class="form-row">
     <label>Manga library ID (Kavita)</label>
-    <input type="number" name="kavita_lib_manga" value="{{index .Settings.KavitaLibIDsByType "Manga"}}"
+    <input type="number" name="kavita_lib_manga" value="{{.KavitaLibManga}}"
       placeholder="1" style="width:8rem;">
   </div>
   <div class="form-row">
     <label>Manhwa library ID (Kavita)</label>
-    <input type="number" name="kavita_lib_manhwa" value="{{index .Settings.KavitaLibIDsByType "Manhwa"}}"
+    <input type="number" name="kavita_lib_manhwa" value="{{.KavitaLibManhwa}}"
       placeholder="2" style="width:8rem;">
   </div>
   <div class="form-row">
     <label>Manhua library ID (Kavita)</label>
-    <input type="number" name="kavita_lib_manhua" value="{{index .Settings.KavitaLibIDsByType "Manhua"}}"
+    <input type="number" name="kavita_lib_manhua" value="{{.KavitaLibManhua}}"
       placeholder="3" style="width:8rem;">
   </div>
 
