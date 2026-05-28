@@ -30,7 +30,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/model"
 )
 
-//go:embed templates/*.html static/htmx.min.js
+//go:embed templates/*.html static/htmx.min.js static/mangarr.css
 var assets embed.FS
 
 // Store is the subset of store.Store the web package needs.
@@ -386,21 +386,21 @@ func (h *Handler) apiReclassify(w http.ResponseWriter, r *http.Request) {
 	// Render the row fragment inline (not a full page).
 	row := fmt.Sprintf(`<tr>
   <td>%s</td>
-  <td><span class="badge badge-%s">%s</span></td>
-  <td>%s</td>
-  <td>%d</td>
-  <td><span class="badge badge-%s">%s</span></td>
-  <td>
-    <form class="inline"
+  <td><span class="pill pill-%s">%s</span></td>
+  <td class="td-dim">%s</td>
+  <td class="td-dim">%d</td>
+  <td><span class="pill pill-%s">%s</span></td>
+  <td class="td-right">
+    <form class="reclassify-form"
       hx-post="/api/series/%d/reclassify"
       hx-target="closest tr"
       hx-swap="outerHTML">
-      <select name="type" style="width:auto; padding:.2rem .4rem; font-size:.8rem;">
+      <select name="type" class="reclassify-select">
         <option value="Manga"%s>Manga</option>
         <option value="Manhwa"%s>Manhwa</option>
         <option value="Manhua"%s>Manhua</option>
       </select>
-      <button type="submit" class="btn-sm" style="margin-left:.3rem">Set</button>
+      <button type="submit" class="btn-sm">Set</button>
     </form>
   </td>
 </tr>`,

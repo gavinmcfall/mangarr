@@ -1,42 +1,56 @@
 {{template "base" .}}
 {{define "title"}}Unmatched{{end}}
 {{define "content"}}
-<h1>Unmatched Series</h1>
-<p style="font-size:.875rem; color:#555; margin-bottom:1rem;">
-  These series could not be classified automatically. Pick a type to remember the choice and re-file on next scan.
-</p>
+<header class="page-header">
+  <div style="display:flex;align-items:baseline;gap:0;">
+    <h1 class="page-title">Unmatched</h1>
+    <span class="page-subtitle">Series AniList couldn&#39;t classify — pick a type to file them.</span>
+  </div>
+</header>
+<div class="page-body">
+  <div class="content-container">
 {{if .Items}}
+<div class="data-table-wrap">
 <table>
   <thead><tr>
     <th>Title</th>
     <th>Source</th>
     <th>Chapters</th>
-    <th>Assign type</th>
+    <th class="td-right">Assign type</th>
   </tr></thead>
   <tbody>
   {{range .Items}}
   <tr id="unmatched-{{.ID}}">
     <td>{{.Title}}</td>
-    <td>{{.Source}}</td>
-    <td>{{.ChapterCount}}</td>
-    <td>
-      <form class="inline"
+    <td class="td-dim">{{.Source}}</td>
+    <td class="td-dim">{{.ChapterCount}}</td>
+    <td class="td-right">
+      <form class="reclassify-form"
         hx-post="/api/series/{{.ID}}/reclassify"
         hx-target="#unmatched-{{.ID}}"
         hx-swap="delete">
-        <select name="type" style="width:auto; padding:.2rem .4rem; font-size:.8rem;">
+        <select name="type" class="reclassify-select">
           <option value="Manga">Manga</option>
           <option value="Manhwa">Manhwa</option>
           <option value="Manhua">Manhua</option>
         </select>
-        <button type="submit" class="btn-sm" style="margin-left:.3rem">Assign</button>
+        <button type="submit" class="btn-sm">Assign</button>
       </form>
     </td>
   </tr>
   {{end}}
   </tbody>
 </table>
+</div>
 {{else}}
-  <p class="empty">No unmatched series. All series have been classified.</p>
+<div class="empty-state">
+  <!-- Checkmark / thumbs-up: everything matched -->
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+  </svg>
+  <p>No unmatched series. All series have been classified.</p>
+</div>
 {{end}}
+  </div>
+</div>
 {{end}}
