@@ -1,6 +1,7 @@
 package filer
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -55,6 +56,15 @@ func (f *Filer) File(series, srcDir, dstRoot string) error {
 		rel := RenderName(f.Scheme, series, e.Name())
 		dst := filepath.Join(dstRoot, rel)
 
+		// Security: the series title comes from untrusted ComicInfo.xml.
+		// filepath.Join cleans embedded "../" segments, so a crafted title
+		// like "../../../../etc/cron.d" would escape the library root.
+		// Reject any rendered path that does not stay under dstRoot.
+		cleanRoot := filepath.Clean(dstRoot) + string(os.PathSeparator)
+		if !strings.HasPrefix(filepath.Clean(dst)+string(os.PathSeparator), cleanRoot) {
+			return fmt.Errorf("filer: rendered path %q escapes library root %q", dst, dstRoot)
+		}
+
 		// Idempotency: destination already exists → skip.
 		if _, err := os.Stat(dst); err == nil {
 			continue
@@ -102,23 +112,26 @@ func (f *Filer) place(src, dst string) error {
 	}
 }
 
-// copyFile copies src to dst atomically enough for our use-case:
-// it writes to dst directly (no temp+rename) since the idempotency check
-// above ensures dst does not exist yet.
-func copyFile(src, dst string) error {
+// copyFile copies src to dst. It uses a named return (err) so the cleanup
+// closure observes failures from BOTH io.Copy and out.Close(): if the copy
+// or the final flush/close fails, the incomplete destination is removed so
+// that idempotency still holds on the next run (a half-written .cbz must not
+// be mistaken for "already filed" via the os.Stat skip in File).
+//
+// It writes to dst directly (no temp+rename) since the idempotency check in
+// File ensures dst does not exist yet.
+func copyFile(src, dst string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer in.Close() // source is closed regardless of outcome
 
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		// If copy fails partway through, clean up the incomplete destination
-		// so that idempotency still holds on the next run.
 		if err != nil {
 			_ = os.Remove(dst)
 		}
@@ -127,6 +140,8 @@ func copyFile(src, dst string) error {
 	if _, err = io.Copy(out, in); err != nil {
 		return err
 	}
-	return out.Close()
+	// Assign to the named return so a Close failure triggers cleanup above.
+	err = out.Close()
+	return err
 }
 

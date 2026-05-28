@@ -95,6 +95,55 @@ func TestFileMoveMode(t *testing.T) {
 	}
 }
 
+func TestFileRejectsPathTraversal(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "dl", "Evil")
+	dstRoot := filepath.Join(tmp, "lib", "Manga")
+	os.MkdirAll(src, 0o755)
+	os.MkdirAll(dstRoot, 0o755)
+	os.WriteFile(filepath.Join(src, "Ch. 001.cbz"), []byte("evil"), 0o644)
+
+	// Malicious series title (as could come from a crafted ComicInfo.xml).
+	malicious := "../../../../etc/cron.d"
+	f := &Filer{Mode: model.ModeCopy, Scheme: "{series}/{series} - Ch.{chapter}.cbz"}
+	err := f.File(malicious, src, dstRoot)
+	if err == nil {
+		t.Fatalf("expected error rejecting path traversal, got nil")
+	}
+
+	// Nothing must have been written outside the library root. The crafted
+	// title would resolve (after Join cleans the "../") to a sibling of the
+	// temp dir's tree; verify that escape target was never created.
+	escaped := filepath.Join(tmp, "etc", "cron.d")
+	if _, statErr := os.Stat(escaped); !os.IsNotExist(statErr) {
+		t.Fatalf("file escaped library root: %v exists (stat err=%v)", escaped, statErr)
+	}
+	// The library root itself must remain empty after a rejected traversal.
+	if entries, _ := os.ReadDir(dstRoot); len(entries) != 0 {
+		t.Fatalf("library root should be empty after rejected traversal, got %d entries", len(entries))
+	}
+}
+
+func TestCopyFileCleansUpOnFailure(t *testing.T) {
+	tmp := t.TempDir()
+	dst := filepath.Join(tmp, "out.cbz")
+
+	// A directory as the source makes io.Copy's Read fail (EISDIR), exercising
+	// the cleanup-on-failure path: the partially-created dst must be removed so
+	// the next idempotent run does not skip a truncated file.
+	srcDir := filepath.Join(tmp, "srcdir")
+	if err := os.Mkdir(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyFile(srcDir, dst); err == nil {
+		t.Fatalf("expected copyFile to fail when source is a directory")
+	}
+	if _, statErr := os.Stat(dst); !os.IsNotExist(statErr) {
+		t.Fatalf("expected dst removed after copy failure, stat err=%v", statErr)
+	}
+}
+
 func TestFileHardlinkFallbackToCopyOnCrossDevice(t *testing.T) {
 	// We can't force a cross-device error in a temp-dir test, but we CAN verify
 	// that the fallback path (copyFile) is reachable by testing that hardlink
