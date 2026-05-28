@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -37,6 +38,7 @@ func (c *Client) authenticate() (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body) // drain for keep-alive reuse
 		return "", fmt.Errorf("kavita auth status %d", resp.StatusCode)
 	}
 	var out struct {
@@ -75,6 +77,7 @@ func (c *Client) ScanLibrary(libraryID int64) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
+		io.Copy(io.Discard, resp.Body) // drain for keep-alive reuse
 		return fmt.Errorf("kavita scan status %d for library %d", resp.StatusCode, libraryID)
 	}
 	return nil

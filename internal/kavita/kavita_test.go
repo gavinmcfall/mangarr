@@ -67,3 +67,29 @@ func TestAuthFailureReturnsError(t *testing.T) {
 		t.Fatal("expected error on auth failure")
 	}
 }
+
+func TestAuthEmptyTokenReturnsError(t *testing.T) {
+	var hitScan bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/api/plugin/authenticate"):
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"token":""}`))
+		case strings.Contains(r.URL.Path, "/api/library/scan"):
+			hitScan = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "APIKEY")
+	err := c.ScanLibrary(2)
+	if err == nil {
+		t.Fatal("expected error on empty token in auth response")
+	}
+	if hitScan {
+		t.Fatal("scan endpoint should not be hit when token is empty")
+	}
+}
