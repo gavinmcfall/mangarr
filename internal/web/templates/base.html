@@ -1,0 +1,65 @@
+{{define "base"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mangarr — {{block "title" .}}mangarr{{end}}</title>
+  <script src="/static/htmx.min.js"></script>
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 0; background: #f4f4f4; color: #222; }
+    nav { background: #1a1a2e; color: #eee; padding: .75rem 1.5rem; display: flex; gap: 1.5rem; align-items: center; }
+    nav a { color: #ccc; text-decoration: none; font-size: .95rem; }
+    nav a:hover, nav a.active { color: #fff; text-decoration: underline; }
+    nav .brand { font-weight: bold; font-size: 1.1rem; color: #fff; margin-right: auto; }
+    main { padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
+    h1 { font-size: 1.4rem; margin-bottom: 1rem; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+    thead { background: #e8e8f0; }
+    th, td { padding: .55rem .8rem; text-align: left; border-bottom: 1px solid #e0e0e0; font-size: .9rem; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f9f9ff; }
+    .badge { display: inline-block; padding: .15rem .45rem; border-radius: 3px; font-size: .78rem; font-weight: bold; }
+    .badge-filed { background: #d4edda; color: #155724; }
+    .badge-pending { background: #fff3cd; color: #856404; }
+    .badge-unmatched { background: #f8d7da; color: #721c24; }
+    .badge-error { background: #f5c6cb; color: #491217; }
+    .badge-manga { background: #dbeafe; color: #1e40af; }
+    .badge-manhwa { background: #fce7f3; color: #831843; }
+    .badge-manhua { background: #d1fae5; color: #065f46; }
+    .badge-unknown { background: #e5e7eb; color: #374151; }
+    button, .btn { cursor: pointer; padding: .4rem .9rem; border: none; border-radius: 4px; font-size: .875rem; background: #1a1a2e; color: #fff; }
+    button:hover, .btn:hover { background: #2d2d5e; }
+    .btn-sm { padding: .25rem .6rem; font-size: .8rem; }
+    .btn-outline { background: transparent; border: 1px solid #1a1a2e; color: #1a1a2e; }
+    .btn-outline:hover { background: #1a1a2e; color: #fff; }
+    form.inline { display: inline; }
+    .flash { padding: .6rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
+    .flash-ok { background: #d4edda; color: #155724; }
+    .flash-err { background: #f8d7da; color: #721c24; }
+    input[type=text], input[type=url], input[type=number], select, textarea {
+      padding: .4rem .6rem; border: 1px solid #ccc; border-radius: 4px; font-size: .875rem; width: 100%; box-sizing: border-box;
+    }
+    .form-row { margin-bottom: .8rem; }
+    label { display: block; font-size: .85rem; font-weight: bold; margin-bottom: .25rem; }
+    .empty { color: #888; font-size: .9rem; padding: 1rem 0; }
+    .action-filed { color: #155724; }
+    .action-unmatched { color: #856404; }
+    .action-scan-triggered { color: #1e40af; }
+    .action-error { color: #721c24; }
+    .ts { color: #888; font-size: .8rem; }
+  </style>
+</head>
+<body>
+<nav>
+  <span class="brand">mangarr</span>
+  <a href="/series" {{if eq .Page "series"}}class="active"{{end}}>Series</a>
+  <a href="/unmatched" {{if eq .Page "unmatched"}}class="active"{{end}}>Unmatched</a>
+  <a href="/activity" {{if eq .Page "activity"}}class="active"{{end}}>Activity</a>
+  <a href="/settings" {{if eq .Page "settings"}}class="active"{{end}}>Settings</a>
+</nav>
+<main>
+{{block "content" .}}{{end}}
+</main>
+</body>
+</html>
+{{end}}

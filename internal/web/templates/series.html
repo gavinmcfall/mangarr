@@ -1,0 +1,53 @@
+{{template "base" .}}
+{{define "title"}}Series{{end}}
+{{define "content"}}
+<h1>Series
+  <button class="btn-sm" style="float:right"
+    hx-post="/api/rescan"
+    hx-swap="none"
+    hx-on::after-request="document.getElementById('rescan-msg').textContent='Rescan triggered'">
+    Rescan now
+  </button>
+  <span id="rescan-msg" style="float:right; margin-right:.5rem; font-size:.85rem; color:#155724;"></span>
+</h1>
+{{if .Items}}
+<table>
+  <thead><tr>
+    <th>Title</th>
+    <th>Type</th>
+    <th>Source</th>
+    <th>Chapters</th>
+    <th>Status</th>
+    <th>Reclassify</th>
+  </tr></thead>
+  <tbody>
+  {{range .Items}}
+  <tr>
+    <td>{{.Title}}</td>
+    <td>
+      {{if .Type}}<span class="badge badge-{{.Type | lower}}">{{.Type}}</span>{{else}}<span class="badge badge-unknown">Unknown</span>{{end}}
+    </td>
+    <td>{{.Source}}</td>
+    <td>{{.ChapterCount}}</td>
+    <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+    <td>
+      <form class="inline"
+        hx-post="/api/series/{{.ID}}/reclassify"
+        hx-target="closest tr"
+        hx-swap="outerHTML">
+        <select name="type" style="width:auto; padding:.2rem .4rem; font-size:.8rem;">
+          <option value="Manga"{{if eq .Type "Manga"}} selected{{end}}>Manga</option>
+          <option value="Manhwa"{{if eq .Type "Manhwa"}} selected{{end}}>Manhwa</option>
+          <option value="Manhua"{{if eq .Type "Manhua"}} selected{{end}}>Manhua</option>
+        </select>
+        <button type="submit" class="btn-sm" style="margin-left:.3rem">Set</button>
+      </form>
+    </td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+  <p class="empty">No series discovered yet. Make sure your download roots are configured and click "Rescan now".</p>
+{{end}}
+{{end}}

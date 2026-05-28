@@ -1,0 +1,34 @@
+{{template "base" .}}
+{{define "title"}}Activity{{end}}
+{{define "content"}}
+<h1>Activity / History
+  <button class="btn-sm" style="float:right"
+    hx-post="/api/rescan"
+    hx-swap="none"
+    hx-on::after-request="window.location.reload()">
+    Rescan now
+  </button>
+</h1>
+{{if .Items}}
+<table>
+  <thead><tr>
+    <th>Time</th>
+    <th>Series</th>
+    <th>Action</th>
+    <th>Detail</th>
+  </tr></thead>
+  <tbody>
+  {{range .Items}}
+  <tr>
+    <td class="ts">{{.Time.Format "2006-01-02 15:04:05"}}</td>
+    <td>{{.SeriesTitle}}</td>
+    <td><span class="action-{{.Action}}">{{.Action}}</span></td>
+    <td style="color:#555; font-size:.85rem;">{{.Detail}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+  <p class="empty">No activity recorded yet.</p>
+{{end}}
+{{end}}

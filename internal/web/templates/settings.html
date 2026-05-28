@@ -1,0 +1,77 @@
+{{template "base" .}}
+{{define "title"}}Settings{{end}}
+{{define "content"}}
+<h1>Settings</h1>
+{{if .Flash}}<div class="flash flash-ok">{{.Flash}}</div>{{end}}
+{{if .Error}}<div class="flash flash-err">{{.Error}}</div>{{end}}
+<form method="POST" action="/settings">
+  <h2 style="font-size:1.1rem; margin:1rem 0 .5rem;">Filing</h2>
+  <div class="form-row">
+    <label>File mode</label>
+    <select name="file_mode">
+      <option value="hardlink"{{if eq .Settings.FileMode "hardlink"}} selected{{end}}>Hardlink (recommended)</option>
+      <option value="copy"{{if eq .Settings.FileMode "copy"}} selected{{end}}>Copy</option>
+      <option value="move"{{if eq .Settings.FileMode "move"}} selected{{end}}>Move</option>
+    </select>
+  </div>
+  <div class="form-row">
+    <label>Rename scheme</label>
+    <input type="text" name="rename_scheme" value="{{.Settings.RenameScheme}}"
+      placeholder="{series}/{series} - Ch.{chapter}.cbz">
+    <small style="color:#888; font-size:.78rem;">Tokens: {series} {chapter}</small>
+  </div>
+  <div class="form-row">
+    <label>Poll interval (minutes)</label>
+    <input type="number" name="poll_minutes" value="{{.Settings.PollMinutes}}" min="1" max="1440" style="width:8rem;">
+  </div>
+
+  <h2 style="font-size:1.1rem; margin:1.5rem 0 .5rem;">Library roots</h2>
+  <div class="form-row">
+    <label>Manga root path</label>
+    <input type="text" name="root_manga" value="{{.RootManga}}"
+      placeholder="/media/Library/Books/Manga">
+  </div>
+  <div class="form-row">
+    <label>Manhwa root path</label>
+    <input type="text" name="root_manhwa" value="{{.RootManhwa}}"
+      placeholder="/media/Library/Books/Manhwa">
+  </div>
+  <div class="form-row">
+    <label>Manhua root path</label>
+    <input type="text" name="root_manhua" value="{{.RootManhua}}"
+      placeholder="/media/Library/Books/Manhua">
+  </div>
+
+  <h2 style="font-size:1.1rem; margin:1.5rem 0 .5rem;">Kavita</h2>
+  <div class="form-row">
+    <label>Kavita base URL</label>
+    <input type="url" name="kavita_base_url" value="{{.Settings.KavitaBaseURL}}"
+      placeholder="http://kavita:5000">
+  </div>
+  <div class="form-row">
+    <label>Kavita API key</label>
+    <input type="text" name="kavita_api_key" value="{{.KavitaAPIKey}}"
+      placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+  </div>
+  <div class="form-row">
+    <label>Manga library ID (Kavita)</label>
+    <input type="number" name="kavita_lib_manga" value="{{.KavitaLibManga}}"
+      placeholder="1" style="width:8rem;">
+  </div>
+  <div class="form-row">
+    <label>Manhwa library ID (Kavita)</label>
+    <input type="number" name="kavita_lib_manhwa" value="{{.KavitaLibManhwa}}"
+      placeholder="2" style="width:8rem;">
+  </div>
+  <div class="form-row">
+    <label>Manhua library ID (Kavita)</label>
+    <input type="number" name="kavita_lib_manhua" value="{{.KavitaLibManhua}}"
+      placeholder="3" style="width:8rem;">
+  </div>
+
+  <div style="margin-top:1.5rem;">
+    <button type="submit">Save settings</button>
+    <p style="font-size:.8rem; color:#888; margin-top:.5rem;">Kavita connection, file mode, and poll interval take effect on the next restart.</p>
+  </div>
+</form>
+{{end}}
