@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
@@ -36,6 +37,10 @@ func Scan(root, source string) ([]model.Series, error) {
 
 	var out []model.Series
 	for dir, cbzs := range bySeriesDir {
+		if len(cbzs) == 0 {
+			continue // defensive: never index into an empty slice
+		}
+		sort.Strings(cbzs) // deterministic title source regardless of WalkDir order
 		title := seriesTitleFromCBZ(cbzs[0])
 		if title == "" {
 			title = filepath.Base(dir)
