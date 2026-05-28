@@ -1,15 +1,25 @@
 {{template "base" .}}
 {{define "title"}}Activity{{end}}
 {{define "content"}}
-<h1>Activity / History
-  <button class="btn-sm" style="float:right"
-    hx-post="/api/rescan"
-    hx-swap="none"
-    hx-on::after-request="window.location.reload()">
-    Rescan now
-  </button>
-</h1>
+<header class="page-header">
+  <h1 class="page-title">Activity</h1>
+  <div class="page-actions">
+    <button class="btn btn-primary"
+      hx-post="/api/rescan"
+      hx-swap="none"
+      hx-on::after-request="window.location.reload()">
+      <!-- Refresh icon -->
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:15px;height:15px;">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+      </svg>
+      Rescan now
+    </button>
+  </div>
+</header>
+<div class="page-body">
+  <div class="content-container">
 {{if .Items}}
+<div class="data-table-wrap">
 <table>
   <thead><tr>
     <th>Time</th>
@@ -20,15 +30,24 @@
   <tbody>
   {{range .Items}}
   <tr>
-    <td class="ts">{{.Time.Format "2006-01-02 15:04:05"}}</td>
+    <td class="td-dim">{{.Time.Format "2006-01-02 15:04"}}</td>
     <td>{{.SeriesTitle}}</td>
-    <td><span class="action-{{.Action}}">{{.Action}}</span></td>
-    <td style="color:#555; font-size:.85rem;">{{.Detail}}</td>
+    <td><span class="pill pill-{{.Action | lower}}">{{.Action}}</span></td>
+    <td class="td-dim">{{.Detail}}</td>
   </tr>
   {{end}}
   </tbody>
 </table>
+</div>
 {{else}}
-  <p class="empty">No activity recorded yet.</p>
+<div class="empty-state">
+  <!-- Clock icon -->
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+  </svg>
+  <p>No activity recorded yet.</p>
+</div>
 {{end}}
+  </div>
+</div>
 {{end}}
