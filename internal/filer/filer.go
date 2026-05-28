@@ -1,7 +1,6 @@
 package filer
 
 import (
-	"errors"
 	"io"
 	"log"
 	"os"
@@ -131,8 +130,3 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-// isNotExist is a helper that also handles the wrapped errors that os.Stat
-// can return in some edge cases.
-func isNotExist(err error) bool {
-	return errors.Is(err, os.ErrNotExist)
-}
