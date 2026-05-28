@@ -45,11 +45,20 @@ type Series struct {
 	UpdatedAt    time.Time
 }
 
+type ActivityAction string
+
+const (
+	ActionFiled         ActivityAction = "filed"
+	ActionUnmatched     ActivityAction = "unmatched"
+	ActionScanTriggered ActivityAction = "scan-triggered"
+	ActionError         ActivityAction = "error"
+)
+
 type ActivityEntry struct {
 	ID          int64
 	Time        time.Time
 	SeriesTitle string
-	Action      string // "filed", "unmatched", "scan-triggered", "error"
+	Action      ActivityAction
 	Detail      string
 }
 
@@ -68,5 +77,5 @@ type Settings struct {
 	PollMinutes   int
 	LibraryRoots  map[ContentType]string // Manga -> /media/Library/Books/Manga, ...
 	KavitaBaseURL string
-	KavitaLibIDs  []int             // libraries to scan after filing
+	KavitaLibIDs  []int64           // libraries to scan after filing
 }
