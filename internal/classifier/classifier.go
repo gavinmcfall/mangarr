@@ -78,6 +78,9 @@ func (c *Classifier) Classify(title string) (model.ContentType, error) {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return model.TypeUnknown, fmt.Errorf("anilist rate limited")
 	}
+	if resp.StatusCode >= 400 {
+		return model.TypeUnknown, fmt.Errorf("anilist status %d", resp.StatusCode)
+	}
 	var out anilistResp
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return model.TypeUnknown, err
