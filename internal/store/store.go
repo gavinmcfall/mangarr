@@ -138,6 +138,62 @@ func defaultSettings() model.Settings {
 	}
 }
 
+// ListUnmatched returns all series with StatusUnmatched.
+func (s *Store) ListUnmatched() ([]model.Series, error) {
+	rows, err := s.db.Query(`SELECT id,title,source_path,source,type,status,chapter_count FROM series WHERE status=? ORDER BY title`, string(model.StatusUnmatched))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Series
+	for rows.Next() {
+		var m model.Series
+		var typ, status string
+		if err := rows.Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount); err != nil {
+			return nil, err
+		}
+		m.Type, m.Status = model.ContentType(typ), model.Status(status)
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// ListActivity returns the most recent `limit` activity entries, newest first.
+func (s *Store) ListActivity(limit int) ([]model.ActivityEntry, error) {
+	rows, err := s.db.Query(`SELECT id,ts,series_title,action,detail FROM activity ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.ActivityEntry
+	for rows.Next() {
+		var e model.ActivityEntry
+		var action string
+		if err := rows.Scan(&e.ID, &e.Time, &e.SeriesTitle, &action, &e.Detail); err != nil {
+			return nil, err
+		}
+		e.Action = model.ActivityAction(action)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// SetSeriesType updates the type and status for a series, used when a user
+// manually assigns a type via the web UI. Status is set to StatusPending so
+// the next RunOnce will attempt to file it.
+func (s *Store) SetSeriesType(id int64, ct model.ContentType) error {
+	_, err := s.db.Exec(`UPDATE series SET type=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		string(ct), string(model.StatusPending), id)
+	return err
+}
+
+// MarkUnmatched upserts a series with StatusUnmatched. Called by the poller.
+func (s *Store) MarkUnmatched(series model.Series) error {
+	series.Status = model.StatusUnmatched
+	_, err := s.UpsertSeries(series)
+	return err
+}
+
 // CacheClassification / GetCachedClassification back the AniList cache + remembered manual choices.
 func (s *Store) CacheClassification(titleNorm string, t model.ContentType) error {
 	_, err := s.db.Exec(`INSERT INTO classification_cache (title_norm,type) VALUES (?,?) ON CONFLICT(title_norm) DO UPDATE SET type=excluded.type`, titleNorm, string(t))

@@ -1,0 +1,42 @@
+{{template "base" .}}
+{{define "title"}}Unmatched{{end}}
+{{define "content"}}
+<h1>Unmatched Series</h1>
+<p style="font-size:.875rem; color:#555; margin-bottom:1rem;">
+  These series could not be classified automatically. Pick a type to remember the choice and re-file on next scan.
+</p>
+{{if not .Items}}
+  <p class="empty">No unmatched series. All series have been classified.</p>
+{{else}}
+<table>
+  <thead><tr>
+    <th>Title</th>
+    <th>Source</th>
+    <th>Chapters</th>
+    <th>Assign type</th>
+  </tr></thead>
+  <tbody>
+  {{range .Items}}
+  <tr id="unmatched-{{.ID}}">
+    <td>{{.Title}}</td>
+    <td>{{.Source}}</td>
+    <td>{{.ChapterCount}}</td>
+    <td>
+      <form class="inline"
+        hx-post="/api/series/{{.ID}}/reclassify"
+        hx-target="#unmatched-{{.ID}}"
+        hx-swap="delete">
+        <select name="type" style="width:auto; padding:.2rem .4rem; font-size:.8rem;">
+          <option value="Manga">Manga</option>
+          <option value="Manhwa">Manhwa</option>
+          <option value="Manhua">Manhua</option>
+        </select>
+        <button type="submit" class="btn-sm" style="margin-left:.3rem">Assign</button>
+      </form>
+    </td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}

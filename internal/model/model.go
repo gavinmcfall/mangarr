@@ -72,10 +72,12 @@ const (
 
 // Settings is the single mutable config row (id=1).
 type Settings struct {
-	FileMode      FileMode
-	RenameScheme  string            // e.g. "{series}/{series} - Ch.{chapter}.cbz"
-	PollMinutes   int
-	LibraryRoots  map[ContentType]string // Manga -> /media/Library/Books/Manga, ...
-	KavitaBaseURL string
-	KavitaLibIDs  []int64           // libraries to scan after filing
+	FileMode           FileMode
+	RenameScheme       string                  // e.g. "{series}/{series} - Ch.{chapter}.cbz"
+	PollMinutes        int
+	LibraryRoots       map[ContentType]string  // Manga -> /media/Library/Books/Manga, ...
+	KavitaBaseURL      string
+	KavitaAPIKey       string                  // API key for Kavita plugin authentication
+	KavitaLibIDs       []int64                 // legacy: flat list of library IDs (kept for compatibility)
+	KavitaLibIDsByType map[ContentType]int64   // per-type library IDs (used by poller)
 }

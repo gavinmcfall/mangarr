@@ -1,20 +1,14 @@
 // Command mangarr is the mangarr service binary.
 //
 // It wires together:
-//   - config     (env-based)
-//   - store      (SQLite)
-//   - scanner    (walk download roots → series list)
+//   - config  (env-based)
+//   - store   (SQLite)
+//   - scanner (walk download roots → series list)
 //   - classifier (AniList lookup, store-backed cache)
-//   - filer      (rename + hardlink/move/copy)
-//   - kavita     (library scan trigger)
-//   - poller     (orchestrate one pass; scheduler ticker)
-//   - web        (embedded HTMX UI + JSON API)
-//
-// Required env var: MANGARR_DOWNLOAD_ROOTS (comma-separated paths).
-// Optional:
-//   MANGARR_DB_PATH         (default /config/mangarr.db)
-//   MANGARR_HTTP_ADDR       (default :8590)
-//   MANGARR_ANILIST_ENDPOINT (override AniList GraphQL URL; default https://graphql.anilist.co)
+//   - filer   (rename + hardlink/move/copy)
+//   - kavita  (library scan trigger)
+//   - poller  (orchestrate one pass; scheduler ticker)
+//   - web     (embedded HTMX UI + JSON API)
 package main
 
 import (
@@ -78,14 +72,18 @@ func main() {
 	}
 
 	// ---- scanner adapter ----
-	// The poller wants a Scanner interface (ScanAll() ([]Series, error)).
-	// scanner.Scan takes (root, source) — we wrap all configured roots.
+	// The poller wants a Scanner interface (ScanAll() []Series, error).
+	// scanner.Scan takes (root, source) — we wrap all roots.
 	scanAdapter := &multiScanner{roots: cfg.DownloadRoots}
 
 	// ---- filer adapter ----
-	// poller.Filer wants: File(s model.Series, dstRoot string) error
-	// filer.Filer has:    File(series string, srcDir string, dstRoot string) error
+	// poller.Filer wants File(s model.Series, dstRoot string) error
+	// filer.Filer.File(series string, srcDir string, dstRoot string) error
 	filerAdpt := &filerAdapter{inner: filr}
+
+	// ---- unmatched sink (store) ----
+	// poller.UnmatchedSink wants MarkUnmatched(s model.Series) error
+	// store.Store.MarkUnmatched satisfies this directly.
 
 	// ---- build LibraryIDs map from Settings ----
 	libIDs := settings.KavitaLibIDsByType
@@ -95,13 +93,11 @@ func main() {
 
 	// ---- poller ----
 	p := &poller.Poller{
-		Scanner:    scanAdapter,
-		Classifier: clf,
-		Filer:      filerAdpt,
-		Kavita:     kavitaClient,
-		// store.Store.MarkUnmatched satisfies poller.UnmatchedSink directly.
-		Unmatched: st,
-		// store.Store.AddActivity satisfies poller.ActivityWriter directly.
+		Scanner:      scanAdapter,
+		Classifier:   clf,
+		Filer:        filerAdpt,
+		Kavita:       kavitaClient,
+		Unmatched:    st,
 		Activity:     st,
 		LibraryRoots: settings.LibraryRoots,
 		LibraryIDs:   libIDs,
@@ -115,7 +111,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// ---- graceful shutdown context ----
+	// ---- graceful shutdown ----
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -126,15 +122,15 @@ func main() {
 	}
 	ticker := time.NewTicker(time.Duration(pollMinutes) * time.Minute)
 	go func() {
-		// Run once immediately on startup so the UI has data straight away.
-		log.Printf("poller: initial scan starting")
+		// Run once immediately on startup.
+		log.Printf("poller: running initial scan")
 		if err := p.RunOnce(); err != nil {
 			log.Printf("poller: initial run error: %v", err)
 		}
 		for {
 			select {
 			case <-ticker.C:
-				log.Printf("poller: scheduled tick — running scan")
+				log.Printf("poller: tick — running scan")
 				if err := p.RunOnce(); err != nil {
 					log.Printf("poller: run error: %v", err)
 				}
@@ -154,7 +150,7 @@ func main() {
 		}
 	}()
 
-	// ---- wait for SIGINT/SIGTERM ----
+	// ---- wait for shutdown signal ----
 	<-ctx.Done()
 	log.Printf("mangarr shutting down")
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -173,10 +169,10 @@ type multiScanner struct {
 func (m *multiScanner) ScanAll() ([]model.Series, error) {
 	var all []model.Series
 	for _, root := range m.roots {
+		// Use the last path component as a friendly source name.
 		source := lastPathComponent(root)
 		series, err := scanner.Scan(root, source)
 		if err != nil {
-			// Log and skip — one bad root must not abort the whole tick.
 			log.Printf("scanner: root %q error: %v (skipping)", root, err)
 			continue
 		}
@@ -185,7 +181,6 @@ func (m *multiScanner) ScanAll() ([]model.Series, error) {
 	return all, nil
 }
 
-// lastPathComponent returns the last slash-separated component of a path.
 func lastPathComponent(p string) string {
 	for i := len(p) - 1; i >= 0; i-- {
 		if p[i] == '/' || p[i] == '\\' {
@@ -195,10 +190,9 @@ func lastPathComponent(p string) string {
 	return p
 }
 
-// filerAdapter adapts *filer.Filer to the poller.Filer interface.
-//
-//   poller.Filer:  File(s model.Series, dstRoot string) error
-//   filer.Filer:   File(series string, srcDir string, dstRoot string) error
+// filerAdapter adapts filer.Filer to poller.Filer.
+// poller.Filer wants: File(s model.Series, dstRoot string) error
+// filer.Filer has:    File(series string, srcDir string, dstRoot string) error
 type filerAdapter struct {
 	inner *filer.Filer
 }
