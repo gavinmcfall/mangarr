@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
 )
 
@@ -165,9 +166,22 @@ type settingsPageData struct {
 	KavitaLibManga  int64
 	KavitaLibManhwa int64
 	KavitaLibManhua int64
+	RenameExample   string
 }
 
 // ---- HTML page handlers ----
+
+// renameExample computes a live preview string for the Settings page.
+// It renders the scheme with fixed sample values ("Berserk", "Ch. 350.cbz").
+// If the scheme is empty or fails validation the returned string is a
+// human-readable placeholder rather than an error, so the template can render
+// it unconditionally.
+func renameExample(scheme string) string {
+	if scheme == "" || filer.ValidateScheme(scheme) != nil {
+		return "(invalid scheme — fix to see preview)"
+	}
+	return filer.RenderName(scheme, "Berserk", "Ch. 350.cbz")
+}
 
 func (h *Handler) pageSeries(w http.ResponseWriter, r *http.Request) {
 	list, err := h.store.ListSeries()
@@ -227,6 +241,7 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		KavitaLibManga:  settings.KavitaLibIDsByType[model.TypeManga],
 		KavitaLibManhwa: settings.KavitaLibIDsByType[model.TypeManhwa],
 		KavitaLibManhua: settings.KavitaLibIDsByType[model.TypeManhua],
+		RenameExample:   renameExample(settings.RenameScheme),
 	})
 }
 
@@ -263,6 +278,27 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 	setLibID(settings.KavitaLibIDsByType, model.TypeManga, r.FormValue("kavita_lib_manga"))
 	setLibID(settings.KavitaLibIDsByType, model.TypeManhwa, r.FormValue("kavita_lib_manhwa"))
 	setLibID(settings.KavitaLibIDsByType, model.TypeManhua, r.FormValue("kavita_lib_manhua"))
+
+	// Validate the rename scheme before persisting. On failure, re-render the
+	// Settings page with the error shown inline and all form values preserved
+	// so the user does not lose in-progress edits.
+	if err := filer.ValidateScheme(settings.RenameScheme); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		h.render(w, "settings.html", settingsPageData{
+			Page:            "settings",
+			Settings:        settings,
+			KavitaAPIKey:    settings.KavitaAPIKey,
+			Error:           "Invalid rename scheme: " + err.Error(),
+			RootManga:       settings.LibraryRoots[model.TypeManga],
+			RootManhwa:      settings.LibraryRoots[model.TypeManhwa],
+			RootManhua:      settings.LibraryRoots[model.TypeManhua],
+			KavitaLibManga:  settings.KavitaLibIDsByType[model.TypeManga],
+			KavitaLibManhwa: settings.KavitaLibIDsByType[model.TypeManhwa],
+			KavitaLibManhua: settings.KavitaLibIDsByType[model.TypeManhua],
+			RenameExample:   renameExample(settings.RenameScheme),
+		})
+		return
+	}
 
 	if err := h.store.SaveSettings(settings); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -318,6 +354,10 @@ func (h *Handler) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 	var settings model.Settings
 	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
 		jsonErr(w, fmt.Errorf("invalid JSON: %w", err), http.StatusBadRequest)
+		return
+	}
+	if err := filer.ValidateScheme(settings.RenameScheme); err != nil {
+		jsonErr(w, fmt.Errorf("invalid rename scheme: %w", err), http.StatusBadRequest)
 		return
 	}
 	if err := h.store.SaveSettings(settings); err != nil {

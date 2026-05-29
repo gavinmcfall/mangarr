@@ -258,8 +258,9 @@ func TestAPIGetSettingsReturnsJSON(t *testing.T) {
 func TestAPIPutSettingsUpdates(t *testing.T) {
 	h, st, _ := newTestHandler()
 	newSettings := model.Settings{
-		FileMode:    model.ModeMove,
-		PollMinutes: 30,
+		FileMode:     model.ModeMove,
+		RenameScheme: "{series}/{series} - Ch.{chapter}.cbz",
+		PollMinutes:  30,
 		LibraryRoots: map[model.ContentType]string{
 			model.TypeManga: "/lib/Manga",
 		},
@@ -383,6 +384,71 @@ func TestSaveSettingsFormPost(t *testing.T) {
 	}
 	if !strings.Contains(body, `value="test-key"`) {
 		t.Fatalf("rendered settings form does not contain saved kavita_api_key")
+	}
+}
+
+func TestSaveSettingsInvalidSchemeReturns400(t *testing.T) {
+	h, st, _ := newTestHandler()
+	savedBefore := st.settings.RenameScheme
+
+	form := url.Values{
+		"file_mode":         {"copy"},
+		"rename_scheme":     {"{series}/{series} - Ch.{chapter}.cbz - {volume}"},
+		"poll_minutes":      {"60"},
+		"kavita_base_url":   {"http://kavita:5000"},
+		"kavita_api_key":    {"test-key"},
+		"root_manga":        {"/lib/Manga"},
+		"kavita_lib_manga":  {"7"},
+		"kavita_lib_manhwa": {"9"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/settings",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "unknown token {volume}") {
+		t.Fatalf("expected validation error message in body; got:\n%s", body)
+	}
+	// Settings must NOT have been persisted.
+	if st.settings.RenameScheme != savedBefore {
+		t.Fatalf("settings were persisted despite validation failure")
+	}
+}
+
+func TestAPIPutSettingsInvalidSchemeReturns400(t *testing.T) {
+	h, st, _ := newTestHandler()
+	savedBefore := st.settings.RenameScheme
+
+	bad := model.Settings{
+		FileMode:     model.ModeCopy,
+		RenameScheme: "{series}/Ch.{chapter} - {episode}.cbz",
+		PollMinutes:  30,
+		LibraryRoots: map[model.ContentType]string{model.TypeManga: "/lib/Manga"},
+	}
+	body, _ := json.Marshal(bad)
+	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if !strings.Contains(resp["error"], "unknown token {episode}") {
+		t.Fatalf("expected error about unknown token, got %q", resp["error"])
+	}
+	// Settings must NOT have been persisted.
+	if st.settings.RenameScheme != savedBefore {
+		t.Fatalf("settings were persisted despite validation failure")
 	}
 }
 
