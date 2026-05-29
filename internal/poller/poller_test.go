@@ -11,6 +11,28 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
 )
 
+// fakeMetrics records MetricsSink calls so tests can assert call counts.
+type fakeMetrics struct {
+	filesFiled  map[string]int
+	kavitaScans map[string]int
+	unmatched   int
+	fileErrors  int
+	lastRunSet  bool
+}
+
+func newFakeMetrics() *fakeMetrics {
+	return &fakeMetrics{
+		filesFiled:  make(map[string]int),
+		kavitaScans: make(map[string]int),
+	}
+}
+
+func (f *fakeMetrics) IncFilesFiled(category string) { f.filesFiled[category]++ }
+func (f *fakeMetrics) IncKavitaScan(result string)   { f.kavitaScans[result]++ }
+func (f *fakeMetrics) IncUnmatched()                 { f.unmatched++ }
+func (f *fakeMetrics) IncFileError()                 { f.fileErrors++ }
+func (f *fakeMetrics) SetPollerLastRun(_ time.Time)  { f.lastRunSet = true }
+
 // fakes
 
 type fakeClassifier struct {
@@ -386,5 +408,127 @@ func TestRunOnceMissingLibraryRootIsActionError(t *testing.T) {
 	}
 	if len(rec.filed) != 0 {
 		t.Fatalf("expected no filing for misconfig, got %v", rec.filed)
+	}
+}
+
+// ----- metrics tests -----
+
+// TestMetricsFiledAndScan proves that a successful file+scan path increments
+// the right counters and sets SetPollerLastRun at the end of RunOnce.
+func TestMetricsFiledAndScan(t *testing.T) {
+	rec := &recorder{}
+	fm := newFakeMetrics()
+	p := &Poller{
+		Scanner:    fakeScanner{out: []model.Series{{Title: "Berserk", SourcePath: "/dl/Berserk"}}},
+		Classifier: fakeClassifier{t: model.TypeManga},
+		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
+		Metrics: fm,
+		LibraryRoots: map[model.ContentType]string{
+			model.TypeManga: filepath.FromSlash("/lib/Manga"),
+		},
+		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 1},
+	}
+	if err := p.RunOnce(); err != nil {
+		t.Fatalf("runonce: %v", err)
+	}
+	if fm.filesFiled["Manga"] != 1 {
+		t.Errorf("want filesFiled[Manga]=1, got %d", fm.filesFiled["Manga"])
+	}
+	if fm.kavitaScans["success"] != 1 {
+		t.Errorf("want kavitaScans[success]=1, got %d", fm.kavitaScans["success"])
+	}
+	if !fm.lastRunSet {
+		t.Error("SetPollerLastRun was not called at end of RunOnce")
+	}
+}
+
+// TestMetricsUnmatched proves that unmatched routing increments IncUnmatched.
+func TestMetricsUnmatched(t *testing.T) {
+	rec := &recorder{}
+	fm := newFakeMetrics()
+	p := &Poller{
+		Scanner:      fakeScanner{out: []model.Series{{Title: "???"}}},
+		Classifier:   fakeClassifier{t: model.TypeUnknown},
+		Filer:        rec, Kavita: rec, Unmatched: rec, Activity: rec,
+		Metrics:      fm,
+		LibraryRoots: map[model.ContentType]string{},
+		LibraryIDs:   map[model.ContentType]int64{},
+	}
+	if err := p.RunOnce(); err != nil {
+		t.Fatalf("runonce: %v", err)
+	}
+	if fm.unmatched != 1 {
+		t.Errorf("want unmatched=1, got %d", fm.unmatched)
+	}
+	if !fm.lastRunSet {
+		t.Error("SetPollerLastRun was not called")
+	}
+}
+
+// TestMetricsFilerError proves that a filer error increments IncFileError.
+func TestMetricsFilerError(t *testing.T) {
+	rec := &recorder{errFile: errors.New("no space")}
+	fm := newFakeMetrics()
+	p := &Poller{
+		Scanner:    fakeScanner{out: []model.Series{{Title: "Vagabond"}}},
+		Classifier: fakeClassifier{t: model.TypeManga},
+		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
+		Metrics: fm,
+		LibraryRoots: map[model.ContentType]string{
+			model.TypeManga: filepath.FromSlash("/lib/Manga"),
+		},
+		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 3},
+	}
+	if err := p.RunOnce(); err != nil {
+		t.Fatalf("runonce: %v", err)
+	}
+	if fm.fileErrors != 1 {
+		t.Errorf("want fileErrors=1, got %d", fm.fileErrors)
+	}
+	if fm.filesFiled["Manga"] != 0 {
+		t.Errorf("want filesFiled[Manga]=0 on error, got %d", fm.filesFiled["Manga"])
+	}
+}
+
+// TestMetricsKavitaError proves that a Kavita scan failure increments IncKavitaScan("error").
+func TestMetricsKavitaError(t *testing.T) {
+	rec := &recorder{errScan: errors.New("kavita down")}
+	fm := newFakeMetrics()
+	p := &Poller{
+		Scanner:    fakeScanner{out: []model.Series{{Title: "Vinland Saga"}}},
+		Classifier: fakeClassifier{t: model.TypeManga},
+		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
+		Metrics: fm,
+		LibraryRoots: map[model.ContentType]string{
+			model.TypeManga: filepath.FromSlash("/lib/Manga"),
+		},
+		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 4},
+	}
+	if err := p.RunOnce(); err != nil {
+		t.Fatalf("runonce: %v", err)
+	}
+	if fm.kavitaScans["error"] != 1 {
+		t.Errorf("want kavitaScans[error]=1, got %d", fm.kavitaScans["error"])
+	}
+	if fm.kavitaScans["success"] != 0 {
+		t.Errorf("want kavitaScans[success]=0, got %d", fm.kavitaScans["success"])
+	}
+}
+
+// TestMetricsNilSafe proves that a nil Metrics field does not panic.
+func TestMetricsNilSafe(t *testing.T) {
+	rec := &recorder{}
+	p := &Poller{
+		Scanner:    fakeScanner{out: []model.Series{{Title: "One Piece"}}},
+		Classifier: fakeClassifier{t: model.TypeManga},
+		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
+		Metrics: nil, // explicitly nil — must not panic
+		LibraryRoots: map[model.ContentType]string{
+			model.TypeManga: filepath.FromSlash("/lib/Manga"),
+		},
+		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 5},
+	}
+	if err := p.RunOnce(); err != nil {
+		t.Fatalf("runonce with nil metrics: %v", err)
 	}
 }

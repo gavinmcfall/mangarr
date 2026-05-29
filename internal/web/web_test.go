@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -146,7 +147,7 @@ func newEmptyHandler() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "/config/recycle-bin", 7, nil, nil)
+	return NewHandler(st, &fakeRunner{}, "/config/recycle-bin", 7, nil, nil, nil)
 }
 
 // newTestHandler builds a Handler with test fixtures.
@@ -169,7 +170,7 @@ func newTestHandler() (*Handler, *fakeStore, *fakeRunner) {
 		},
 	}
 	runner := &fakeRunner{}
-	return NewHandler(st, runner, "/config/recycle-bin", 7, nil, nil), st, runner
+	return NewHandler(st, runner, "/config/recycle-bin", 7, nil, nil, nil), st, runner
 }
 
 // newTestHandlerWithRegistry builds a Handler with a seeded task registry.
@@ -180,7 +181,7 @@ func newTestHandlerWithRegistry() (*Handler, *fakeStore, *fakeRunner, *fakeTaskR
 		runner.called++
 		return nil
 	})
-	h := NewHandler(st, runner, "/config/recycle-bin", 7, reg, nil)
+	h := NewHandler(st, runner, "/config/recycle-bin", 7, reg, nil, nil)
 	return h, st, runner, reg
 }
 
@@ -381,7 +382,7 @@ func TestAPIRescanWithoutRunnerReturns503(t *testing.T) {
 		series:   []model.Series{},
 		activity: []model.ActivityEntry{},
 		settings: model.Settings{LibraryRoots: map[model.ContentType]string{}, KavitaLibIDsByType: map[model.ContentType]int64{}},
-	}, nil, "/config/recycle-bin", 7, nil, nil)
+	}, nil, "/config/recycle-bin", 7, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/rescan", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -576,7 +577,7 @@ func newBackupHandler(t *testing.T) (*Handler, string) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandlerWithBackup(st, &fakeRunner{}, "", 0, cfg, backupFn, nil, nil)
+	h := NewHandlerWithBackup(st, &fakeRunner{}, "", 0, cfg, backupFn, nil, nil, nil)
 	return h, dir
 }
 
@@ -720,7 +721,7 @@ func newHandlerWithRoots() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, "/tmp")
+	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, "/tmp")
 }
 
 func TestAPIDiskSpaceReturnsJSONArray(t *testing.T) {
@@ -774,7 +775,7 @@ func TestAPIDiskSpaceEmptyWhenNoRoots(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil) // no downloadRoots
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil) // no downloadRoots
 	req := httptest.NewRequest(http.MethodGet, "/api/diskspace", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -875,7 +876,7 @@ func TestSettingsPageRendersRecycleBin(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "/tmp/mg-bin", 14, nil, nil)
+	h := NewHandler(st, &fakeRunner{}, "/tmp/mg-bin", 14, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -969,7 +970,7 @@ func TestAPIRunTaskTriggersRunFn(t *testing.T) {
 		return nil
 	})
 
-	h := NewHandler(st, &fakeRunner{}, "", 0, reg, nil)
+	h := NewHandler(st, &fakeRunner{}, "", 0, reg, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/tasks/test-task/run", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1055,7 +1056,7 @@ func newHealthHandler(results []health.Result) *Handler {
 		},
 	}
 	reg := &fakeHealthRegistry{results: results}
-	return NewHandler(st, &fakeRunner{}, "", 0, nil, reg)
+	return NewHandler(st, &fakeRunner{}, "", 0, nil, reg, nil)
 }
 
 func TestHealthPageReturns200(t *testing.T) {
@@ -1126,7 +1127,7 @@ func TestHealthPageWithoutRegistryShowsWarning(t *testing.T) {
 		},
 	}
 	// nil healthReg
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil)
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1146,7 +1147,7 @@ func TestAPIHealthWithoutRegistryReturnsWarn(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil)
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1161,5 +1162,64 @@ func TestAPIHealthWithoutRegistryReturnsWarn(t *testing.T) {
 	}
 	if resp.Status != "warn" {
 		t.Errorf("want status 'warn' for nil registry, got %q", resp.Status)
+	}
+}
+
+// ---- Prometheus /metrics endpoint tests ----
+
+// fakeMetricsSink is a minimal MetricsSink implementation for web tests.
+// It serves a static body so we can assert the handler delegates correctly.
+type fakeMetricsSink struct{}
+
+func (f *fakeMetricsSink) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "# HELP mangarr_files_filed_total Total.\n")
+		fmt.Fprint(w, "# TYPE mangarr_files_filed_total counter\n")
+		fmt.Fprint(w, `mangarr_files_filed_total{category="manga"} 3`, "\n")
+	})
+}
+
+func newHandlerWithMetrics() *Handler {
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, &fakeMetricsSink{})
+}
+
+func TestMetricsEndpointServesPrometheus(t *testing.T) {
+	h := newHandlerWithMetrics()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "mangarr_") {
+		t.Errorf("expected at least one mangarr_ metric line in body; got:\n%s", body)
+	}
+}
+
+func TestMetricsEndpointWithoutHandlerReturns503(t *testing.T) {
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	// nil metrics — /metrics should return 503
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503 when metrics not wired, got %d; body: %s", rr.Code, rr.Body.String())
 	}
 }

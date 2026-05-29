@@ -19,10 +19,17 @@ type Cache interface {
 	CacheClassification(titleNorm string, t model.ContentType) error
 }
 
+// MetricsSink is the subset of the metrics.Registry interface the classifier uses.
+// A nil value is safe: all calls are guarded with a nil check.
+type MetricsSink interface {
+	IncAniListLookup(result string)
+}
+
 type Classifier struct {
 	endpoint string
 	http     *http.Client
-	cache    Cache // may be nil
+	cache    Cache        // may be nil
+	Metrics  MetricsSink  // optional; nil disables all metric calls
 }
 
 // New creates a Classifier that queries the given endpoint (use "" for the
@@ -57,6 +64,9 @@ func (c *Classifier) Classify(title string) (model.ContentType, error) {
 	// Cache read — skip network if we already know the answer.
 	if c.cache != nil {
 		if ct, ok, err := c.cache.GetCachedClassification(title); err == nil && ok {
+			if c.Metrics != nil {
+				c.Metrics.IncAniListLookup("cached")
+			}
 			return ct, nil
 		}
 	}
@@ -67,25 +77,43 @@ func (c *Classifier) Classify(title string) (model.ContentType, error) {
 	})
 	req, err := http.NewRequest(http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
+		if c.Metrics != nil {
+			c.Metrics.IncAniListLookup("error")
+		}
 		return model.TypeUnknown, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if c.Metrics != nil {
+			c.Metrics.IncAniListLookup("error")
+		}
 		return model.TypeUnknown, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests {
+		if c.Metrics != nil {
+			c.Metrics.IncAniListLookup("error")
+		}
 		return model.TypeUnknown, fmt.Errorf("anilist rate limited")
 	}
 	if resp.StatusCode >= 400 {
+		if c.Metrics != nil {
+			c.Metrics.IncAniListLookup("error")
+		}
 		return model.TypeUnknown, fmt.Errorf("anilist status %d", resp.StatusCode)
 	}
 	var out anilistResp
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		if c.Metrics != nil {
+			c.Metrics.IncAniListLookup("error")
+		}
 		return model.TypeUnknown, err
 	}
 	if out.Data.Media == nil {
+		if c.Metrics != nil {
+			c.Metrics.IncAniListLookup("miss")
+		}
 		return model.TypeUnknown, nil
 	}
 	ct := model.CountryToType(out.Data.Media.CountryOfOrigin)
@@ -95,5 +123,8 @@ func (c *Classifier) Classify(title string) (model.ContentType, error) {
 		_ = c.cache.CacheClassification(title, ct)
 	}
 
+	if c.Metrics != nil {
+		c.Metrics.IncAniListLookup("success")
+	}
 	return ct, nil
 }

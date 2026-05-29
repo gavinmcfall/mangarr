@@ -24,6 +24,7 @@
 //	GET  /api/backups                → JSON list of backup entries (newest first)
 //	POST /api/backups/run            → Trigger immediate backup; returns new Entry as JSON
 //	GET  /api/backups/{name}         → Download a backup file
+//	GET  /metrics                    → Prometheus metrics (text/plain; version=0.0.4)
 //	GET  /static/*                   → Embedded static assets (htmx.min.js)
 package web
 
@@ -85,6 +86,11 @@ type HealthRegistry interface {
 	RunAll(ctx context.Context) []health.Result
 }
 
+// MetricsSink is the subset of the metrics.Registry the web package needs.
+type MetricsSink interface {
+	Handler() http.Handler // promhttp.HandlerFor the registry
+}
+
 // Handler is the HTTP handler for the web UI and JSON API.
 type Handler struct {
 	mux                     *http.ServeMux
@@ -99,6 +105,7 @@ type Handler struct {
 	backupFn                func() (dbbackup.Entry, error) // injected for on-demand backup
 	taskReg                 TaskRegistry                   // injected for Tasks page + /api/tasks
 	healthReg               HealthRegistry                 // injected for Health page + /api/health
+	metricsHandler          http.Handler                   // nil → /metrics returns 503
 }
 
 // NewHandler wires up all routes and parses embedded templates.
@@ -108,17 +115,22 @@ type Handler struct {
 // downloadRoots is the list of download root paths (may be empty in tests).
 // taskReg may be nil (tasks routes return 503).
 // healthReg may be nil (health routes show a placeholder warning).
+// metrics may be nil (GET /metrics returns 503).
 // Backup API is wired separately via NewHandlerWithBackup (returns 503 here).
-func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, taskReg TaskRegistry, healthReg HealthRegistry, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, healthReg, downloadRoots)
+func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, healthReg, metrics, downloadRoots)
 }
 
 // NewHandlerWithBackup is like NewHandler but also wires the backup API.
-func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, downloadRoots)
+func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, downloadRoots)
 }
 
-func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, downloadRoots []string) *Handler {
+func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, downloadRoots []string) *Handler {
+	var mh http.Handler
+	if metrics != nil {
+		mh = metrics.Handler()
+	}
 	h := &Handler{
 		mux:                     http.NewServeMux(),
 		tmpls:                   parsePageTemplates(),
@@ -132,6 +144,7 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 		backupFn:                backupFn,
 		taskReg:                 taskReg,
 		healthReg:               healthReg,
+		metricsHandler:          mh,
 	}
 
 	// Static assets
@@ -168,6 +181,9 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 	h.mux.HandleFunc("GET /api/backups", h.apiListBackups)
 	h.mux.HandleFunc("POST /api/backups/run", h.apiRunBackup)
 	h.mux.HandleFunc("GET /api/backups/{name}", h.apiDownloadBackup)
+
+	// Prometheus metrics endpoint
+	h.mux.HandleFunc("GET /metrics", h.serveMetrics)
 
 	return h
 }
@@ -940,6 +956,18 @@ func (h *Handler) apiDownloadBackup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	http.ServeContent(w, r, name, info.ModTime(), f)
+}
+
+// ---- metrics endpoint ----
+
+// serveMetrics serves the Prometheus metrics text format.
+// Returns 503 when no metricsHandler is wired (nil MetricsSink).
+func (h *Handler) serveMetrics(w http.ResponseWriter, r *http.Request) {
+	if h.metricsHandler == nil {
+		http.Error(w, "metrics not configured", http.StatusServiceUnavailable)
+		return
+	}
+	h.metricsHandler.ServeHTTP(w, r)
 }
 
 // ---- helpers ----
