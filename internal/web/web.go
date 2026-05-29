@@ -6,13 +6,16 @@
 //	GET  /series                     → Series page (HTMX)
 //	GET  /unmatched                  → Unmatched page (HTMX)
 //	GET  /activity                   → Activity/History page (HTMX)
+//	GET  /tasks                      → Tasks page (HTMX)
 //	GET  /settings                   → Settings page (HTMX)
 //	POST /settings                   → Save settings (form POST, redirect back)
 //	POST /api/series/{id}/reclassify → Override a series' type (HTMX form target)
-//	POST /api/rescan                 → Trigger RunOnce on-demand
+//	POST /api/rescan                 → Trigger poll-scan via task registry
 //	GET  /api/series                 → JSON list of all series
 //	GET  /api/unmatched              → JSON list of unmatched series
 //	GET  /api/activity               → JSON activity log
+//	GET  /api/tasks                  → JSON list of registered tasks
+//	POST /api/tasks/{id}/run         → Run a task by ID
 //	GET  /api/settings               → JSON current settings
 //	PUT  /api/settings               → JSON update settings
 //	GET  /api/diskspace              → JSON disk space for all roots
@@ -23,6 +26,7 @@
 package web
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -37,6 +41,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/diskspace"
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
+	"github.com/gavinmcfall/mangarr/internal/tasks"
 )
 
 //go:embed templates/*.html static/htmx.min.js static/mangarr.css
@@ -65,6 +70,13 @@ type BackupConfig struct {
 	IntervalHours int
 }
 
+// TaskRegistry is the subset of tasks.Registry the web package needs.
+type TaskRegistry interface {
+	List() []tasks.Info
+	Get(id string) (tasks.Info, bool)
+	RunNow(ctx context.Context, id string) (tasks.Info, error)
+}
+
 // Handler is the HTTP handler for the web UI and JSON API.
 type Handler struct {
 	mux                     *http.ServeMux
@@ -77,6 +89,7 @@ type Handler struct {
 	backupDir               string
 	backupCfg               BackupConfig
 	backupFn                func() (dbbackup.Entry, error) // injected for on-demand backup
+	taskReg                 TaskRegistry                   // injected for Tasks page + /api/tasks
 }
 
 // NewHandler wires up all routes and parses embedded templates.
@@ -84,17 +97,18 @@ type Handler struct {
 // recycleBinPath and recycleBinRetentionDays are env-derived config values
 // surfaced read-only on the Settings page.
 // downloadRoots is the list of download root paths (may be empty in tests).
+// taskReg may be nil (tasks routes return 503).
 // Backup API is wired separately via NewHandlerWithBackup (returns 503 here).
-func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, downloadRoots)
+func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, taskReg TaskRegistry, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, downloadRoots)
 }
 
 // NewHandlerWithBackup is like NewHandler but also wires the backup API.
-func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, downloadRoots)
+func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, downloadRoots)
 }
 
-func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), downloadRoots []string) *Handler {
+func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, downloadRoots []string) *Handler {
 	h := &Handler{
 		mux:                     http.NewServeMux(),
 		tmpls:                   parsePageTemplates(),
@@ -106,6 +120,7 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 		backupDir:               cfg.Dir,
 		backupCfg:               cfg,
 		backupFn:                backupFn,
+		taskReg:                 taskReg,
 	}
 
 	// Static assets
@@ -118,6 +133,7 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 	h.mux.HandleFunc("GET /series", h.pageSeries)
 	h.mux.HandleFunc("GET /unmatched", h.pageUnmatched)
 	h.mux.HandleFunc("GET /activity", h.pageActivity)
+	h.mux.HandleFunc("GET /tasks", h.pageTasks)
 	h.mux.HandleFunc("GET /settings", h.pageSettings)
 	h.mux.HandleFunc("POST /settings", h.saveSettings)
 
@@ -125,6 +141,8 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 	h.mux.HandleFunc("GET /api/series", h.apiListSeries)
 	h.mux.HandleFunc("GET /api/unmatched", h.apiListUnmatched)
 	h.mux.HandleFunc("GET /api/activity", h.apiListActivity)
+	h.mux.HandleFunc("GET /api/tasks", h.apiListTasks)
+	h.mux.HandleFunc("POST /api/tasks/{id}/run", h.apiRunTask)
 	h.mux.HandleFunc("GET /api/settings", h.apiGetSettings)
 	h.mux.HandleFunc("PUT /api/settings", h.apiPutSettings)
 	h.mux.HandleFunc("POST /api/rescan", h.apiRescan)
@@ -150,7 +168,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // overlaid, ensuring that {{block "content"}} resolves to THAT page's
 // definition rather than whichever happened to be parsed last globally.
 func parsePageTemplates() map[string]*template.Template {
-	pages := []string{"series.html", "unmatched.html", "activity.html", "settings.html"}
+	pages := []string{"series.html", "unmatched.html", "activity.html", "tasks.html", "settings.html"}
 	m := make(map[string]*template.Template, len(pages))
 	for _, name := range pages {
 		// Parse base + the specific page. This gives each page its own
@@ -181,6 +199,10 @@ func templateFuncs() template.FuncMap {
 		"lower": func(v interface{}) string {
 			return strings.ToLower(fmt.Sprintf("%s", v))
 		},
+		// formatAge renders a time.Time as a relative human-readable string.
+		"formatAge": formatAge,
+		// formatInterval renders a task IntervalMs as a short string, e.g. "15m".
+		"formatInterval": formatInterval,
 	}
 }
 
@@ -255,6 +277,22 @@ type backupEntryView struct {
 	AgeHuman  string
 }
 
+// taskRow is the view-model for a single row on the Tasks page.
+// We pre-compute display strings in Go to keep template logic minimal.
+type taskRow struct {
+	tasks.Info
+	IntervalLabel string // e.g. "15m", "On demand"
+	LastRunLabel  string // e.g. "3 minutes ago", "never"
+	// ResultClass is the CSS class for the status pill.
+	ResultClass string // "success", "error", "pending"
+}
+
+// tasksPageData is passed to templates/tasks.html.
+type tasksPageData struct {
+	Page  string
+	Items []taskRow
+}
+
 // ---- HTML page handlers ----
 
 // renameExample computes a live preview string for the Settings page.
@@ -294,6 +332,31 @@ func (h *Handler) pageActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.render(w, "activity.html", pageData{Page: "activity", Items: list})
+}
+
+func (h *Handler) pageTasks(w http.ResponseWriter, r *http.Request) {
+	var rows []taskRow
+	if h.taskReg != nil {
+		for _, info := range h.taskReg.List() {
+			rows = append(rows, buildTaskRow(info))
+		}
+	}
+	h.render(w, "tasks.html", tasksPageData{Page: "tasks", Items: rows})
+}
+
+func buildTaskRow(info tasks.Info) taskRow {
+	rc := "pending"
+	if info.LastErr != "" {
+		rc = "error"
+	} else if !info.LastRun.IsZero() {
+		rc = "success"
+	}
+	return taskRow{
+		Info:          info,
+		IntervalLabel: formatInterval(info.IntervalMs),
+		LastRunLabel:  formatAge(time.Now(), info.LastRun),
+		ResultClass:   rc,
+	}
 }
 
 func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
@@ -514,6 +577,33 @@ func (h *Handler) apiListActivity(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, list)
 }
 
+func (h *Handler) apiListTasks(w http.ResponseWriter, r *http.Request) {
+	if h.taskReg == nil {
+		jsonErr(w, fmt.Errorf("task registry not configured"), http.StatusServiceUnavailable)
+		return
+	}
+	jsonOK(w, h.taskReg.List())
+}
+
+func (h *Handler) apiRunTask(w http.ResponseWriter, r *http.Request) {
+	if h.taskReg == nil {
+		jsonErr(w, fmt.Errorf("task registry not configured"), http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	info, ok := h.taskReg.Get(id)
+	if !ok {
+		jsonErr(w, fmt.Errorf("task not found: %s", id), http.StatusNotFound)
+		return
+	}
+	if info.Running {
+		jsonErr(w, fmt.Errorf("task %s is already running", id), http.StatusConflict)
+		return
+	}
+	updated, _ := h.taskReg.RunNow(r.Context(), id)
+	jsonOK(w, updated)
+}
+
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	settings, err := h.store.GetSettings()
 	if err != nil {
@@ -541,6 +631,17 @@ func (h *Handler) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiRescan(w http.ResponseWriter, r *http.Request) {
+	// Prefer the task registry path so LastRun stays accurate in the Tasks UI.
+	if h.taskReg != nil {
+		_, err := h.taskReg.RunNow(r.Context(), "poll-scan")
+		if err != nil {
+			jsonErr(w, err, http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// Fallback: direct runner (tests or minimal setups without a registry).
 	if h.runner == nil {
 		jsonErr(w, fmt.Errorf("poller not configured"), http.StatusServiceUnavailable)
 		return
