@@ -19,10 +19,12 @@
 package poller
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
 
+	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
 )
@@ -74,11 +76,31 @@ type MetricsSink interface {
 	SetPollerLastRun(t time.Time)
 }
 
+// Planner returns a dry-run plan for a series without touching the filesystem.
+// filer.Filer satisfies this interface via its Plan method.
+type Planner interface {
+	Plan(series, srcDir, dstRoot string) ([]filer.PlanEntry, error)
+}
+
+// PreviewEntry is one series' full pipeline preview.
+type PreviewEntry struct {
+	Title        string            `json:"title"`
+	SourcePath   string            `json:"source_path"`
+	Source       string            `json:"source"`
+	Classified   model.ContentType `json:"classified"`    // empty if classifier returned Unknown
+	Reason       string            `json:"reason"`        // why Classified is empty / cached / etc.
+	DstRoot      string            `json:"dst_root"`      // empty if can't be filed (Unknown or no library root)
+	ChapterPlans []filer.PlanEntry `json:"chapter_plans"` // per-chapter from Plan; empty when DstRoot is empty
+	Status       string            `json:"status"`        // "matched" | "unmatched" | "misconfigured"
+	Note         string            `json:"note"`          // human note for the row
+}
+
 // Poller holds the wired-up dependencies and configuration for one orchestration tick.
 type Poller struct {
 	Scanner      Scanner
 	Classifier   Classifier
 	Filer        Filer
+	Planner      Planner                      // optional; used by Preview only
 	Kavita       Kavita
 	Unmatched    UnmatchedSink
 	Activity     ActivityWriter
@@ -206,4 +228,81 @@ func (p *Poller) recordActivity(title string, action model.ActivityAction, detai
 		Action:      action,
 		Detail:      detail,
 	})
+}
+
+// Preview runs scanner → classifier → filer.Plan for every series, WITHOUT
+// triggering Kavita scans, writing to disk, or modifying any state (incl. cache).
+//
+// The classifier's cache is READ for speed but NOT WRITTEN. Live network calls
+// may still occur for cache-miss titles; if AniList is unavailable, the entry's
+// Classified field stays empty and Reason records the error — the preview
+// continues over other series.
+//
+// Returns a non-nil error only if the scanner itself fails. Individual series
+// errors are surfaced as PreviewEntry.Note with Status="misconfigured".
+func (p *Poller) Preview(ctx context.Context) ([]PreviewEntry, error) {
+	series, err := p.Scanner.ScanAll()
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]PreviewEntry, 0, len(series))
+	for _, s := range series {
+		// Check context cancellation — long previews on large libraries should
+		// respect the caller's deadline.
+		select {
+		case <-ctx.Done():
+			return results, ctx.Err()
+		default:
+		}
+
+		entry := PreviewEntry{
+			Title:      s.Title,
+			SourcePath: s.SourcePath,
+			Source:     s.Source,
+		}
+
+		ct, classifyErr := p.Classifier.Classify(s.Title)
+		if classifyErr != nil {
+			entry.Status = "unmatched"
+			entry.Reason = fmt.Sprintf("classify error: %v", classifyErr)
+			results = append(results, entry)
+			continue
+		}
+		if ct == model.TypeUnknown {
+			entry.Status = "unmatched"
+			entry.Reason = "AniList returned no match"
+			results = append(results, entry)
+			continue
+		}
+
+		entry.Classified = ct
+
+		root, ok := p.LibraryRoots[ct]
+		if !ok || root == "" {
+			entry.Status = "misconfigured"
+			entry.Note = fmt.Sprintf("type %s has no configured library root — check Settings", ct)
+			results = append(results, entry)
+			continue
+		}
+
+		entry.DstRoot = root
+		entry.Status = "matched"
+
+		// Run the plan (read-only filesystem walk).
+		if p.Planner != nil {
+			plans, planErr := p.Planner.Plan(s.Title, s.SourcePath, root)
+			if planErr != nil {
+				entry.Status = "misconfigured"
+				entry.Note = fmt.Sprintf("plan error: %v", planErr)
+				entry.DstRoot = ""
+				results = append(results, entry)
+				continue
+			}
+			entry.ChapterPlans = plans
+		}
+
+		results = append(results, entry)
+	}
+	return results, nil
 }

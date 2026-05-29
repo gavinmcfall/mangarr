@@ -192,12 +192,15 @@ func main() {
 		}
 	}
 
+	// Wire the planner into the poller so Preview can call Plan.
+	p.Planner = filr
+
 	// ---- web handler ----
 	h := web.NewHandlerWithBackup(st, p, cfg.RecycleBinPath, cfg.RecycleBinRetentionDays, web.BackupConfig{
 		Dir:           cfg.BackupDir,
 		RetentionDays: cfg.BackupRetentionDays,
 		IntervalHours: cfg.BackupIntervalHours,
-	}, backupFn, reg, healthReg, metricsReg, cfg.DownloadRoots...)
+	}, backupFn, reg, healthReg, metricsReg, p, cfg.DownloadRoots...)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           h,

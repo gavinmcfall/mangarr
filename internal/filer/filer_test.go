@@ -334,6 +334,110 @@ func TestMoveModeOverwriteSendsToBin(t *testing.T) {
 	}
 }
 
+// ---- Plan tests ----
+
+func TestPlanReturnsFileForNonExistentDst(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "dl", "Berserk")
+	dstRoot := filepath.Join(tmp, "lib", "Manga")
+	os.MkdirAll(src, 0o755)
+	os.WriteFile(filepath.Join(src, "Ch. 001.cbz"), []byte("data1"), 0o644)
+	os.WriteFile(filepath.Join(src, "Ch. 002.cbz"), []byte("data2"), 0o644)
+	// dstRoot does NOT contain the files yet.
+
+	f := &Filer{Mode: model.ModeHardlink, Scheme: "{series}/{series} - Ch.{chapter}.cbz"}
+	plans, err := f.Plan("Berserk", src, dstRoot)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("want 2 plan entries, got %d", len(plans))
+	}
+	for _, p := range plans {
+		if p.Action != PlanFile {
+			t.Errorf("expected PlanFile for non-existent dst, got %q (src=%s)", p.Action, p.SrcPath)
+		}
+		if p.DstPath == "" {
+			t.Errorf("DstPath must be set when Action=PlanFile, got empty")
+		}
+	}
+}
+
+func TestPlanReturnsSkipForExistingDst(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "dl", "Berserk")
+	dstRoot := filepath.Join(tmp, "lib", "Manga")
+	os.MkdirAll(src, 0o755)
+	os.WriteFile(filepath.Join(src, "Ch. 001.cbz"), []byte("data"), 0o644)
+
+	f := &Filer{Mode: model.ModeHardlink, Scheme: "{series}/{series} - Ch.{chapter}.cbz"}
+
+	// Pre-create the destination file so it looks already filed.
+	dst := filepath.Join(dstRoot, "Berserk", "Berserk - Ch.001.cbz")
+	os.MkdirAll(filepath.Dir(dst), 0o755)
+	os.WriteFile(dst, []byte("existing"), 0o644)
+
+	plans, err := f.Plan("Berserk", src, dstRoot)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("want 1 plan entry, got %d", len(plans))
+	}
+	if plans[0].Action != PlanSkip {
+		t.Errorf("expected PlanSkip for existing dst, got %q", plans[0].Action)
+	}
+}
+
+func TestPlanReturnsErrorOnPathTraversal(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "dl", "Evil")
+	dstRoot := filepath.Join(tmp, "lib", "Manga")
+	os.MkdirAll(src, 0o755)
+	os.WriteFile(filepath.Join(src, "Ch. 001.cbz"), []byte("evil"), 0o644)
+
+	malicious := "../../../../etc/cron.d"
+	f := &Filer{Mode: model.ModeCopy, Scheme: "{series}/{series} - Ch.{chapter}.cbz"}
+	plans, err := f.Plan(malicious, src, dstRoot)
+	if err != nil {
+		t.Fatalf("Plan returned unexpected error: %v (wanted PlanError entry instead)", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("want 1 plan entry, got %d", len(plans))
+	}
+	if plans[0].Action != PlanError {
+		t.Errorf("expected PlanError for path traversal, got %q", plans[0].Action)
+	}
+	if plans[0].Error == "" {
+		t.Error("Error field must be set when Action=PlanError")
+	}
+	if plans[0].DstPath != "" {
+		t.Errorf("DstPath must be empty when Action=PlanError, got %q", plans[0].DstPath)
+	}
+}
+
+func TestPlanDoesNotWrite(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "dl", "Solo Leveling")
+	dstRoot := filepath.Join(tmp, "lib", "Manhwa")
+	os.MkdirAll(src, 0o755)
+	os.WriteFile(filepath.Join(src, "Ch. 001.cbz"), []byte("data"), 0o644)
+	os.MkdirAll(dstRoot, 0o755)
+
+	before, _ := os.ReadDir(dstRoot)
+
+	f := &Filer{Mode: model.ModeHardlink, Scheme: "{series}/{series} - Ch.{chapter}.cbz"}
+	_, err := f.Plan("Solo Leveling", src, dstRoot)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	after, _ := os.ReadDir(dstRoot)
+	if len(after) != len(before) {
+		t.Fatalf("Plan must not write files: before=%d entries, after=%d entries", len(before), len(after))
+	}
+}
+
 func TestFileHardlinkFallbackToCopyOnCrossDevice(t *testing.T) {
 	// We can't force a cross-device error in a temp-dir test, but we CAN verify
 	// that the fallback path (copyFile) is reachable by testing that hardlink
