@@ -5,7 +5,11 @@
 package diskspace
 
 import (
+	"bufio"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -68,4 +72,72 @@ func FormatBytes(b uint64) string {
 	default:
 		return fmt.Sprintf("%d B", b)
 	}
+}
+
+// SourceLabel returns a friendly name for the filesystem backing the given path.
+// It reads /proc/self/mountinfo and picks the mount whose mount-point is the
+// longest ancestor of path. For NFS-like sources of form "host:export", returns
+// the host's leftmost label, title-cased ("citadel.internal:/x" → "Citadel").
+// For other mounts, returns the mount point ("/", "/var", etc.). On any parsing
+// failure, returns the original path as a sensible fallback.
+func SourceLabel(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil || abs == "" {
+		abs = path
+	}
+	mountPoint, source := findMount(abs)
+	if mountPoint == "" {
+		return path
+	}
+	// NFS-style: "host[.domain.tld]:/exported/path"
+	if i := strings.Index(source, ":"); i > 0 && !strings.HasPrefix(source, "/") {
+		host := source[:i]
+		if dot := strings.Index(host, "."); dot > 0 {
+			host = host[:dot]
+		}
+		if host != "" {
+			// Title-case the first byte (ASCII-safe for the hostnames we expect).
+			return strings.ToUpper(host[:1]) + host[1:]
+		}
+	}
+	return mountPoint
+}
+
+// findMount scans /proc/self/mountinfo and returns the mount point + source for
+// the longest ancestor of absPath. Returns ("", "") if no mount can be found
+// (e.g. /proc isn't readable, or the file format is unexpected).
+func findMount(absPath string) (mountPoint, source string) {
+	f, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return "", ""
+	}
+	defer f.Close()
+	scan := bufio.NewScanner(f)
+	scan.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var best, bestSrc string
+	for scan.Scan() {
+		// mountinfo format:
+		//   36 35 98:0 / /mnt/foo rw shared:1 - ext4 /dev/sda1 rw
+		// Fields are space-separated; a single " - " token separates the
+		// "mount fields" from "fstype source super-options".
+		parts := strings.Fields(scan.Text())
+		sep := -1
+		for i, p := range parts {
+			if p == "-" {
+				sep = i
+				break
+			}
+		}
+		if sep < 5 || sep+2 >= len(parts) {
+			continue
+		}
+		mp := parts[4]
+		src := parts[sep+2]
+		if mp == absPath || mp == "/" || strings.HasPrefix(absPath, mp+"/") {
+			if len(mp) > len(best) {
+				best, bestSrc = mp, src
+			}
+		}
+	}
+	return best, bestSrc
 }

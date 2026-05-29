@@ -15,17 +15,14 @@
   <div class="settings-card">
     <div class="settings-card-header">
       <p class="settings-card-title">Disk Space</p>
-      <p class="settings-card-desc">Space used per filesystem mount. Paths sharing the same mount are listed under one row. Green &lt; 75% used, orange 75–90%, red &gt; 90%.</p>
+      <p class="settings-card-desc">Free space per filesystem. Green &lt; 75% used, orange 75–90%, red &gt; 90%.</p>
     </div>
     <div class="settings-card-body">
       <table class="disk-space-table">
         {{range .DiskRows}}
         <tr>
           <td class="disk-path">
-            <span class="td-dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.4px;">Filesystem: {{.MountLabel}}</span>
-            {{range .Paths}}
-            <br><span style="font-size:12px;">• <span class="td-dim">{{.Label}}:</span> {{.Path}}</span>
-            {{end}}
+            <span style="font-weight:600;">{{.MountLabel}}</span>
           </td>
           {{if .Err}}
           <td class="disk-sizes"><span class="disk-unavailable">{{.Err}}</span></td>

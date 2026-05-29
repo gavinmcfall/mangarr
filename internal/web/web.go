@@ -744,8 +744,15 @@ func (h *Handler) buildDiskRows(settings model.Settings) []fsDiskRow {
 	rows := make([]fsDiskRow, 0, len(order))
 	for _, key := range order {
 		g := groups[key]
-		// Derive a display label: longest common path prefix of all paths in the group.
-		mountLabel := commonPathPrefix(g.paths)
+		// Derive a friendly display label by inspecting the filesystem source.
+		// For NFS mounts that gives us the server's short hostname (e.g.
+		// "Citadel" from "citadel.internal:/mnt/storage0/media"); for local
+		// mounts it returns the mount point itself.
+		anyPath := g.paths[0].Path
+		mountLabel := diskspace.SourceLabel(anyPath)
+		if mountLabel == "" || mountLabel == anyPath {
+			mountLabel = commonPathPrefix(g.paths)
+		}
 
 		if g.info.Err != nil {
 			rows = append(rows, fsDiskRow{
