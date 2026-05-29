@@ -110,7 +110,7 @@ func TestSettingsRoundTripSuwayomi(t *testing.T) {
 		SuwayomiBaseURL:           "http://suwayomi.entertainment.svc:4567",
 		SuwayomiAuthType:          model.SuwayomiAuthSimple,
 		SuwayomiUsername:          "alice",
-		SuwayomiPassword:          "hunter2",
+		SuwayomiPassword:          "test-placeholder-pw",
 		SuwayomiCategoryOverrides: map[int64]int64{42: 2, 43: 3, 9: 1},
 	}
 	if err := s.SaveSettings(want); err != nil {
