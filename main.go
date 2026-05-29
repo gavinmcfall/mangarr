@@ -11,9 +11,9 @@
 //   - web        (embedded HTMX UI + JSON API)
 //   - dbbackup   (scheduled VACUUM INTO + download API)
 //
-// Required env var: MANGARR_DOWNLOAD_ROOTS (comma-separated paths).
-// Optional:
+// Optional env vars (download roots are now managed via the Settings UI):
 //
+//	MANGARR_DOWNLOAD_ROOTS         (seed roots on first boot if Settings.DownloadRoots is empty)
 //	MANGARR_DB_PATH                (default /config/mangarr.db)
 //	MANGARR_HTTP_ADDR              (default :8590)
 //	MANGARR_ANILIST_ENDPOINT       (override AniList GraphQL URL; default https://graphql.anilist.co)
@@ -69,6 +69,21 @@ func main() {
 		log.Fatalf("settings: %v", err)
 	}
 
+	// ---- seed download roots from env on first boot ----
+	// If Settings.DownloadRoots is empty AND the env var provided roots,
+	// copy them in so the UI shows the initial configuration.
+	if len(settings.DownloadRoots) == 0 && len(cfg.DownloadRoots) > 0 {
+		settings.DownloadRoots = cfg.DownloadRoots
+		if err := st.SaveSettings(settings); err != nil {
+			log.Printf("settings: seed download roots: %v", err)
+		} else {
+			log.Printf("settings: seeded %d download root(s) from MANGARR_DOWNLOAD_ROOTS", len(cfg.DownloadRoots))
+		}
+	}
+	if len(settings.DownloadRoots) == 0 {
+		log.Printf("warning: no download roots configured — set them on the Settings page")
+	}
+
 	// ---- recycle bin ----
 	bin := &recyclebin.Bin{
 		Root:      cfg.RecycleBinPath,
@@ -106,7 +121,16 @@ func main() {
 	// ---- scanner adapter ----
 	// The poller wants a Scanner interface (ScanAll() ([]Series, error)).
 	// scanner.Scan takes (root, source) — we wrap all configured roots.
-	scanAdapter := &multiScanner{roots: cfg.DownloadRoots}
+	// The closure re-reads Settings on each call so UI changes take effect
+	// on the next poller tick without requiring a restart.
+	scanAdapter := &multiScanner{settingsProvider: func() []string {
+		s, err := st.GetSettings()
+		if err != nil {
+			log.Printf("scanner: get settings: %v (using empty roots)", err)
+			return nil
+		}
+		return s.DownloadRoots
+	}}
 
 	// ---- filer adapter ----
 	// poller.Filer wants: File(s model.Series, dstRoot string) error
@@ -181,13 +205,21 @@ func main() {
 	// ---- health registry ----
 	healthReg := health.NewRegistry()
 	settingsLoader := func() (model.Settings, error) { return st.GetSettings() }
+	// Download roots are now Settings-managed; derive them dynamically for checks.
+	downloadRootsLoader := func() []string {
+		s, err := st.GetSettings()
+		if err != nil {
+			return nil
+		}
+		return s.DownloadRoots
+	}
 	for _, check := range []health.Check{
-		healthchecks.DownloadRootsCheck(cfg.DownloadRoots),
+		healthchecks.DownloadRootsCheck(downloadRootsLoader()),
 		healthchecks.LibraryRootsCheck(settingsLoader),
 		healthchecks.KavitaCheck(kavitaClient),
 		healthchecks.AniListCheck(anilistEndpoint),
 		healthchecks.SQLiteCheck(st.DB()),
-		healthchecks.DiskSpaceCheck(cfg.DownloadRoots, 15, 5),
+		healthchecks.DiskSpaceCheck(downloadRootsLoader(), 15, 5),
 		healthchecks.RenameSchemeCheck(settingsLoader),
 	} {
 		if err := healthReg.Register(check); err != nil {
@@ -199,11 +231,26 @@ func main() {
 	p.Planner = filr
 
 	// ---- web handler ----
-	h := web.NewHandlerWithBrowse(st, p, p, cfg.RecycleBinPath, cfg.RecycleBinRetentionDays, web.BackupConfig{
-		Dir:           cfg.BackupDir,
-		RetentionDays: cfg.BackupRetentionDays,
-		IntervalHours: cfg.BackupIntervalHours,
-	}, backupFn, reg, healthReg, metricsReg, p, []string{"/media", "/config"}, cfg.DownloadRoots...)
+	h := web.NewHandler(web.HandlerOpts{
+		Store:                   st,
+		Runner:                  p,
+		SeriesFiler:             p,
+		TaskReg:                 reg,
+		HealthReg:               healthReg,
+		Metrics:                 metricsReg,
+		Previewer:               p,
+		BrowseRoots:             []string{"/media", "/config"},
+		RecycleBinPath:          cfg.RecycleBinPath,
+		RecycleBinRetentionDays: cfg.RecycleBinRetentionDays,
+		Backup: web.BackupOpts{
+			Config: web.BackupConfig{
+				Dir:           cfg.BackupDir,
+				RetentionDays: cfg.BackupRetentionDays,
+				IntervalHours: cfg.BackupIntervalHours,
+			},
+			Fn: backupFn,
+		},
+	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           h,
@@ -246,8 +293,10 @@ func main() {
 				log.Printf("metrics sweeper: get settings: %v", err)
 			} else {
 				paths := make(map[string]bool)
-				for _, p := range cfg.DownloadRoots {
-					paths[p] = true
+				for _, p := range sweepSettings.DownloadRoots {
+					if p != "" {
+						paths[p] = true
+					}
 				}
 				for _, root := range sweepSettings.LibraryRoots {
 					if root != "" {
@@ -389,13 +438,20 @@ func main() {
 
 // multiScanner wraps scanner.Scan for multiple download roots.
 // It satisfies poller.Scanner.
+// settingsProvider is called on every ScanAll() so UI changes to download roots
+// take effect on the next poller tick without requiring a restart.
 type multiScanner struct {
-	roots []string
+	settingsProvider func() []string
 }
 
 func (m *multiScanner) ScanAll() ([]model.Series, error) {
+	roots := m.settingsProvider()
+	if len(roots) == 0 {
+		// No roots configured — return empty, don't error.
+		return nil, nil
+	}
 	var all []model.Series
-	for _, root := range m.roots {
+	for _, root := range roots {
 		source := lastPathComponent(root)
 		series, err := scanner.Scan(root, source)
 		if err != nil {

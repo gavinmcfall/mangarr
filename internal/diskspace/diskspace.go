@@ -11,10 +11,11 @@ import (
 
 // Info reports filesystem space for a single path.
 type Info struct {
-	Path       string // the path queried
+	Path       string   // the path queried
 	TotalBytes uint64
-	FreeBytes  uint64 // available to non-root user (Bavail * Bsize)
-	Err        error  // non-nil if the path can't be statfs'd (e.g. NFS unmounted)
+	FreeBytes  uint64   // available to non-root user (Bavail * Bsize)
+	FSID       [2]int32 // filesystem identifier from statfs Fsid; identifies unique mount
+	Err        error    // non-nil if the path can't be statfs'd (e.g. NFS unmounted)
 }
 
 // PercentFree returns the percentage of free space [0, 100].
@@ -42,6 +43,7 @@ func Stat(path string) Info {
 		Path:       path,
 		TotalBytes: fs.Blocks * bsize,
 		FreeBytes:  fs.Bavail * bsize,
+		FSID:       [2]int32{fs.Fsid.X__val[0], fs.Fsid.X__val[1]},
 	}
 }
 

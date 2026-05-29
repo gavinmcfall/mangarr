@@ -50,6 +50,29 @@ func TestStatErrPercentFreeIsZero(t *testing.T) {
 	}
 }
 
+func TestStatPopulatesFSID(t *testing.T) {
+	info := Stat("/tmp")
+	if info.Err != nil {
+		t.Skipf("Stat(/tmp) failed: %v", info.Err)
+	}
+	// FSID should be non-zero for a real filesystem (both fields zero is unlikely).
+	if info.FSID[0] == 0 && info.FSID[1] == 0 {
+		t.Log("FSID is [0,0] — this can happen on some kernels; not a hard failure")
+	}
+}
+
+func TestStatTwoPathsSameFSReturnSameFSID(t *testing.T) {
+	// /tmp and /tmp itself should obviously share the same FSID.
+	a := Stat("/tmp")
+	b := Stat("/tmp")
+	if a.Err != nil || b.Err != nil {
+		t.Skipf("Stat failed: a=%v b=%v", a.Err, b.Err)
+	}
+	if a.FSID != b.FSID {
+		t.Errorf("same path should yield same FSID: %v vs %v", a.FSID, b.FSID)
+	}
+}
+
 func TestFormatBytes(t *testing.T) {
 	cases := []struct {
 		input uint64

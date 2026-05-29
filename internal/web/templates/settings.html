@@ -15,15 +15,17 @@
   <div class="settings-card">
     <div class="settings-card-header">
       <p class="settings-card-title">Disk Space</p>
-      <p class="settings-card-desc">Space used for each download root and library root. Green &lt; 75% used, orange 75–90%, red &gt; 90%.</p>
+      <p class="settings-card-desc">Space used per filesystem mount. Paths sharing the same mount are listed under one row. Green &lt; 75% used, orange 75–90%, red &gt; 90%.</p>
     </div>
     <div class="settings-card-body">
       <table class="disk-space-table">
         {{range .DiskRows}}
         <tr>
-          <td class="disk-path" title="{{.Path}}">
-            <span class="td-dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.4px;">{{.Label}}</span><br>
-            {{.Path}}
+          <td class="disk-path">
+            <span class="td-dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.4px;">Filesystem: {{.MountLabel}}</span>
+            {{range .Paths}}
+            <br><span style="font-size:12px;">• <span class="td-dim">{{.Label}}:</span> {{.Path}}</span>
+            {{end}}
           </td>
           {{if .Err}}
           <td class="disk-sizes"><span class="disk-unavailable">{{.Err}}</span></td>
@@ -54,6 +56,39 @@
 
 <form method="POST" action="/settings">
 <div class="settings-sections">
+
+  <!-- Download Roots -->
+  <div class="settings-card">
+    <div class="settings-card-header">
+      <p class="settings-card-title">Download Roots</p>
+      <p class="settings-card-desc">Paths where mangarr looks for downloaded chapters to classify and file.</p>
+    </div>
+    <div class="settings-card-body" id="download-roots-list">
+      {{range $i, $path := .DownloadRoots}}
+      <div class="settings-row download-root-row" id="download-root-row-{{$i}}">
+        <label class="settings-label">Download root</label>
+        <div class="settings-input-wrap settings-input-with-browse">
+          <input type="text" name="download_root" id="download_root_{{$i}}" value="{{$path}}"
+            placeholder="/media/Downloads/suwayomi">
+          <button type="button" class="btn-browse" title="Browse filesystem"
+            hx-get="/api/browse/fragment"
+            hx-vals='js:{path: document.getElementById("download_root_{{$i}}").value || "/media", target: "download_root_{{$i}}"}'
+            hx-target="#browse-modal-body"
+            hx-swap="innerHTML"
+            onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>
+            Browse
+          </button>
+          <button type="button" class="btn-sm" style="margin-left:4px;"
+            onclick="this.closest('.download-root-row').remove()">✕</button>
+        </div>
+      </div>
+      {{end}}
+    </div>
+    <div class="settings-card-body" style="padding-top:0;">
+      <button type="button" class="btn-sm" onclick="addDownloadRoot()">+ Add download root</button>
+    </div>
+  </div>
 
   <!-- Kavita Connection -->
   <div class="settings-card">
@@ -92,7 +127,8 @@
           <input type="text" name="root_manga" id="root_manga" value="{{.RootManga}}"
             placeholder="/media/Library/Books/Manga">
           <button type="button" class="btn-browse" title="Browse filesystem"
-            hx-get="/api/browse/fragment?path=/media&amp;target=root_manga"
+            hx-get="/api/browse/fragment"
+            hx-vals='js:{path: document.getElementById("root_manga").value || "/media", target: "root_manga"}'
             hx-target="#browse-modal-body"
             hx-swap="innerHTML"
             onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
@@ -107,7 +143,8 @@
           <input type="text" name="root_manhwa" id="root_manhwa" value="{{.RootManhwa}}"
             placeholder="/media/Library/Books/Manhwa">
           <button type="button" class="btn-browse" title="Browse filesystem"
-            hx-get="/api/browse/fragment?path=/media&amp;target=root_manhwa"
+            hx-get="/api/browse/fragment"
+            hx-vals='js:{path: document.getElementById("root_manhwa").value || "/media", target: "root_manhwa"}'
             hx-target="#browse-modal-body"
             hx-swap="innerHTML"
             onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
@@ -122,7 +159,8 @@
           <input type="text" name="root_manhua" id="root_manhua" value="{{.RootManhua}}"
             placeholder="/media/Library/Books/Manhua">
           <button type="button" class="btn-browse" title="Browse filesystem"
-            hx-get="/api/browse/fragment?path=/media&amp;target=root_manhua"
+            hx-get="/api/browse/fragment"
+            hx-vals='js:{path: document.getElementById("root_manhua").value || "/media", target: "root_manhua"}'
             hx-target="#browse-modal-body"
             hx-swap="innerHTML"
             onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
@@ -304,4 +342,34 @@
 
   </div>
 </div>
+
+<script>
+// Add a new empty download root row.
+(function() {
+  var counter = {{len .DownloadRoots}};
+  window.addDownloadRoot = function() {
+    var list = document.getElementById('download-roots-list');
+    var idx = counter++;
+    var row = document.createElement('div');
+    row.className = 'settings-row download-root-row';
+    row.id = 'download-root-row-' + idx;
+    row.innerHTML =
+      '<label class="settings-label">Download root</label>' +
+      '<div class="settings-input-wrap settings-input-with-browse">' +
+        '<input type="text" name="download_root" id="download_root_' + idx + '" value="" placeholder="/media/Downloads/suwayomi">' +
+        '<button type="button" class="btn-browse" title="Browse filesystem"' +
+          ' hx-get="/api/browse/fragment"' +
+          ' hx-vals=\'js:{path: document.getElementById("download_root_' + idx + '").value || "/media", target: "download_root_' + idx + '"}\'' +
+          ' hx-target="#browse-modal-body" hx-swap="innerHTML"' +
+          ' onclick="document.getElementById(\'browse-modal\').classList.add(\'browse-modal-open\')">' +
+          '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>' +
+          'Browse' +
+        '</button>' +
+        '<button type="button" class="btn-sm" style="margin-left:4px;" onclick="this.closest(\'.download-root-row\').remove()">&#x2715;</button>' +
+      '</div>';
+    list.appendChild(row);
+    if (window.htmx) { htmx.process(row); }
+  };
+})();
+</script>
 {{end}}
