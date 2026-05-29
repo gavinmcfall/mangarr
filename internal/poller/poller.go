@@ -20,8 +20,11 @@ package poller
 
 import (
 	"fmt"
+	"log"
+	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
+	"github.com/gavinmcfall/mangarr/internal/recyclebin"
 )
 
 // Scanner returns all candidate series from every configured download root.
@@ -71,6 +74,7 @@ type Poller struct {
 	Activity     ActivityWriter
 	LibraryRoots map[model.ContentType]string // content type → absolute library path
 	LibraryIDs   map[model.ContentType]int64  // content type → Kavita library ID
+	RecycleBin   *recyclebin.Bin              // optional; GC is called at end of each RunOnce tick
 }
 
 // RunOnce performs one complete scan→classify→file→scan pass.
@@ -145,6 +149,17 @@ func (p *Poller) RunOnce() error {
 			scanned[id] = true
 		}
 	}
+	// GC the recycle bin at the end of each tick (best-effort — a GC failure
+	// must never abort the tick or surface as a RunOnce error).
+	if p.RecycleBin != nil {
+		files, dirs, gcErr := p.RecycleBin.GC(time.Now())
+		if gcErr != nil {
+			log.Printf("poller: recycle bin GC error: %v", gcErr)
+		} else if files > 0 || dirs > 0 {
+			log.Printf("poller: recycle bin GC removed %d file(s) and %d empty dir(s)", files, dirs)
+		}
+	}
+
 	return nil
 }
 

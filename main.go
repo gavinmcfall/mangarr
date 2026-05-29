@@ -32,6 +32,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/kavita"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/poller"
+	"github.com/gavinmcfall/mangarr/internal/recyclebin"
 	"github.com/gavinmcfall/mangarr/internal/scanner"
 	"github.com/gavinmcfall/mangarr/internal/store"
 	"github.com/gavinmcfall/mangarr/internal/web"
@@ -57,6 +58,15 @@ func main() {
 		log.Fatalf("settings: %v", err)
 	}
 
+	// ---- recycle bin ----
+	bin := &recyclebin.Bin{
+		Root:      cfg.RecycleBinPath,
+		Retention: time.Duration(cfg.RecycleBinRetentionDays) * 24 * time.Hour,
+	}
+	if err := os.MkdirAll(bin.Root, 0o755); err != nil {
+		log.Fatalf("recycle bin: create root %s: %v", bin.Root, err)
+	}
+
 	// ---- classifier (with store-backed cache) ----
 	// AniList endpoint: use env override if set, else empty string = default (https://graphql.anilist.co).
 	anilistEndpoint := os.Getenv("MANGARR_ANILIST_ENDPOINT")
@@ -67,8 +77,9 @@ func main() {
 
 	// ---- filer ----
 	filr := &filer.Filer{
-		Mode:   settings.FileMode,
-		Scheme: settings.RenameScheme,
+		Mode:       settings.FileMode,
+		Scheme:     settings.RenameScheme,
+		RecycleBin: bin,
 	}
 	if filr.Mode == "" {
 		filr.Mode = model.ModeHardlink
@@ -105,10 +116,11 @@ func main() {
 		Activity:     st,
 		LibraryRoots: settings.LibraryRoots,
 		LibraryIDs:   libIDs,
+		RecycleBin:   bin,
 	}
 
 	// ---- web handler ----
-	h := web.NewHandler(st, p, cfg.DownloadRoots...)
+	h := web.NewHandler(st, p, cfg.RecycleBinPath, cfg.RecycleBinRetentionDays, cfg.DownloadRoots...)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           h,

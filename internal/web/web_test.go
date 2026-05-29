@@ -73,7 +73,7 @@ func newEmptyHandler() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{})
+	return NewHandler(st, &fakeRunner{}, "/config/recycle-bin", 7)
 }
 
 // newTestHandler builds a Handler with test fixtures.
@@ -96,7 +96,7 @@ func newTestHandler() (*Handler, *fakeStore, *fakeRunner) {
 		},
 	}
 	runner := &fakeRunner{}
-	return NewHandler(st, runner), st, runner
+	return NewHandler(st, runner, "/config/recycle-bin", 7), st, runner
 }
 
 // ---- HTML page smoke tests ----
@@ -296,7 +296,7 @@ func TestAPIRescanWithoutRunnerReturns503(t *testing.T) {
 		series:   []model.Series{},
 		activity: []model.ActivityEntry{},
 		settings: model.Settings{LibraryRoots: map[model.ContentType]string{}, KavitaLibIDsByType: map[model.ContentType]int64{}},
-	}, nil)
+	}, nil, "/config/recycle-bin", 7)
 	req := httptest.NewRequest(http.MethodPost, "/api/rescan", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -488,7 +488,7 @@ func newHandlerWithRoots() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "/tmp")
+	return NewHandler(st, &fakeRunner{}, "", 0, "/tmp")
 }
 
 func TestAPIDiskSpaceReturnsJSONArray(t *testing.T) {
@@ -542,7 +542,7 @@ func TestAPIDiskSpaceEmptyWhenNoRoots(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}) // no downloadRoots
+	h := NewHandler(st, &fakeRunner{}, "", 0) // no downloadRoots
 	req := httptest.NewRequest(http.MethodGet, "/api/diskspace", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -633,6 +633,33 @@ func TestUnmatchedPageEmptyStateRenders(t *testing.T) {
 	}
 	if strings.Contains(body, "<table") {
 		t.Fatalf("unmatched table should NOT render with no items")
+	}
+}
+
+func TestSettingsPageRendersRecycleBin(t *testing.T) {
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(st, &fakeRunner{}, "/tmp/mg-bin", 14)
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "/tmp/mg-bin") {
+		t.Fatalf("settings page does not contain recycle bin path; body excerpt:\n%s",
+			snippet(body, "Recycle", 300))
+	}
+	if !strings.Contains(body, "14") {
+		t.Fatalf("settings page does not contain retention days (14)")
+	}
+	if !strings.Contains(body, "Recycle Bin") {
+		t.Fatalf("settings page missing 'Recycle Bin' heading")
 	}
 }
 

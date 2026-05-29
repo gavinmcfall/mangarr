@@ -181,6 +181,34 @@
     </div>
   </div>
 
+  <!-- Recycle Bin -->
+  <div class="settings-card">
+    <div class="settings-card-header">
+      <p class="settings-card-title">Recycle Bin</p>
+      <p class="settings-card-desc">Files displaced by filer operations are moved here instead of deleted. Old entries are purged automatically.</p>
+    </div>
+    <div class="settings-card-body">
+      <div class="settings-row">
+        <label class="settings-label">Path</label>
+        <div class="settings-input-wrap">
+          <code>{{.RecycleBinPath}}</code>
+        </div>
+      </div>
+      <div class="settings-row">
+        <label class="settings-label">Retention</label>
+        <div class="settings-input-wrap">
+          {{.RecycleBinRetentionDays}} days
+        </div>
+      </div>
+      <div class="settings-row">
+        <label class="settings-label"></label>
+        <div class="settings-input-wrap">
+          <p class="input-hint">Set via <code>MANGARR_RECYCLE_BIN_PATH</code> / <code>MANGARR_RECYCLE_BIN_RETENTION_DAYS</code> (env).</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </div><!-- /.settings-sections -->
 
 <div class="settings-footer" style="margin-top:20px;">

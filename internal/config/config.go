@@ -3,13 +3,16 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
-	DownloadRoots []string
-	DBPath        string
-	HTTPAddr      string
+	DownloadRoots          []string
+	DBPath                 string
+	HTTPAddr               string
+	RecycleBinPath         string
+	RecycleBinRetentionDays int
 }
 
 func Load() (Config, error) {
@@ -31,5 +34,21 @@ func Load() (Config, error) {
 	if addr == "" {
 		addr = ":8590"
 	}
-	return Config{DownloadRoots: roots, DBPath: db, HTTPAddr: addr}, nil
+	binPath := os.Getenv("MANGARR_RECYCLE_BIN_PATH")
+	if binPath == "" {
+		binPath = "/config/recycle-bin"
+	}
+	binRetention := 7
+	if raw := os.Getenv("MANGARR_RECYCLE_BIN_RETENTION_DAYS"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			binRetention = n
+		}
+	}
+	return Config{
+		DownloadRoots:           roots,
+		DBPath:                  db,
+		HTTPAddr:                addr,
+		RecycleBinPath:          binPath,
+		RecycleBinRetentionDays: binRetention,
+	}, nil
 }

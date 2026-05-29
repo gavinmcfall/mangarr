@@ -2,10 +2,13 @@ package poller
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
+	"github.com/gavinmcfall/mangarr/internal/recyclebin"
 )
 
 // fakes
@@ -311,6 +314,48 @@ func TestRunOnceRecordsErrorOnKavitaFailure(t *testing.T) {
 	}
 	if got := rec.countActions(model.ActionScanTriggered); got != 0 {
 		t.Fatalf("expected 0 ActionScanTriggered on failure, got %d", got)
+	}
+}
+
+// TestRunOnceCallsGCWhenBinPresent: when RecycleBin is set, RunOnce must call
+// GC at the end of the tick. We verify this by seeding the bin with an
+// expired file and asserting it has been removed after RunOnce returns.
+func TestRunOnceCallsGCWhenBinPresent(t *testing.T) {
+	tmp := t.TempDir()
+	binRoot := filepath.Join(tmp, "bin")
+
+	// Seed an old file that is 8 days in the past (beyond the 7-day retention).
+	oldDate := time.Now().AddDate(0, 0, -8).Format("2006-01-02")
+	oldDir := filepath.Join(binRoot, oldDate)
+	if err := os.MkdirAll(oldDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := filepath.Join(oldDir, "old.cbz")
+	if err := os.WriteFile(oldFile, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := &recyclebin.Bin{Root: binRoot, Retention: 7 * 24 * time.Hour}
+	rec := &recorder{}
+	p := &Poller{
+		Scanner:      fakeScanner{out: []model.Series{}},
+		Classifier:   fakeClassifier{t: model.TypeUnknown},
+		Filer:        rec,
+		Kavita:       rec,
+		Unmatched:    rec,
+		Activity:     rec,
+		LibraryRoots: map[model.ContentType]string{},
+		LibraryIDs:   map[model.ContentType]int64{},
+		RecycleBin:   bin,
+	}
+
+	if err := p.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// GC must have run and removed the expired file.
+	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		t.Fatalf("expected old bin file to be GC'd after RunOnce, stat err=%v", err)
 	}
 }
 

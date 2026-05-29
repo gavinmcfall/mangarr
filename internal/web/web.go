@@ -53,23 +53,29 @@ type Runner interface {
 
 // Handler is the HTTP handler for the web UI and JSON API.
 type Handler struct {
-	mux           *http.ServeMux
-	tmpls         map[string]*template.Template // one template set per page
-	store         Store
-	runner        Runner
-	downloadRoots []string // from config.DownloadRoots; used by disk-space endpoints
+	mux                     *http.ServeMux
+	tmpls                   map[string]*template.Template // one template set per page
+	store                   Store
+	runner                  Runner
+	downloadRoots           []string // from config.DownloadRoots; used by disk-space endpoints
+	recycleBinPath          string
+	recycleBinRetentionDays int
 }
 
 // NewHandler wires up all routes and parses embedded templates.
 // runner may be nil (RunOnce calls will return 503).
+// recycleBinPath and recycleBinRetentionDays are env-derived config values
+// surfaced read-only on the Settings page.
 // downloadRoots is the list of download root paths (may be empty in tests).
-func NewHandler(store Store, runner Runner, downloadRoots ...string) *Handler {
+func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, downloadRoots ...string) *Handler {
 	h := &Handler{
-		mux:           http.NewServeMux(),
-		tmpls:         parsePageTemplates(),
-		store:         store,
-		runner:        runner,
-		downloadRoots: downloadRoots,
+		mux:                     http.NewServeMux(),
+		tmpls:                   parsePageTemplates(),
+		store:                   store,
+		runner:                  runner,
+		downloadRoots:           downloadRoots,
+		recycleBinPath:          recycleBinPath,
+		recycleBinRetentionDays: recycleBinRetentionDays,
 	}
 
 	// Static assets
@@ -185,19 +191,21 @@ func diskSpaceClass(pct float64) string {
 // half-rendered body — a silent UX break. Extract values in Go where types
 // are checked at compile time, then pass plain strings/ints to the template.
 type settingsPageData struct {
-	Page            string
-	Settings        model.Settings
-	KavitaAPIKey    string
-	Flash           string
-	Error           string
-	RootManga       string
-	RootManhwa      string
-	RootManhua      string
-	KavitaLibManga  int64
-	KavitaLibManhwa int64
-	KavitaLibManhua int64
-	RenameExample   string
-	DiskRows        []diskSpaceRow
+	Page                    string
+	Settings                model.Settings
+	KavitaAPIKey            string
+	Flash                   string
+	Error                   string
+	RootManga               string
+	RootManhwa              string
+	RootManhua              string
+	KavitaLibManga          int64
+	KavitaLibManhwa         int64
+	KavitaLibManhua         int64
+	RenameExample           string
+	DiskRows                []diskSpaceRow
+	RecycleBinPath          string
+	RecycleBinRetentionDays int
 }
 
 // ---- HTML page handlers ----
@@ -266,18 +274,20 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 	// so the template can use {{.RootManga}} etc. with no reflection-time
 	// type mismatch. See settingsPageData doc comment.
 	h.render(w, "settings.html", settingsPageData{
-		Page:            "settings",
-		Settings:        settings,
-		KavitaAPIKey:    settings.KavitaAPIKey,
-		Flash:           flashMsg,
-		RootManga:       settings.LibraryRoots[model.TypeManga],
-		RootManhwa:      settings.LibraryRoots[model.TypeManhwa],
-		RootManhua:      settings.LibraryRoots[model.TypeManhua],
-		KavitaLibManga:  settings.KavitaLibIDsByType[model.TypeManga],
-		KavitaLibManhwa: settings.KavitaLibIDsByType[model.TypeManhwa],
-		KavitaLibManhua: settings.KavitaLibIDsByType[model.TypeManhua],
-		RenameExample:   renameExample(settings.RenameScheme),
-		DiskRows:        diskRows,
+		Page:                    "settings",
+		Settings:                settings,
+		KavitaAPIKey:            settings.KavitaAPIKey,
+		Flash:                   flashMsg,
+		RootManga:               settings.LibraryRoots[model.TypeManga],
+		RootManhwa:              settings.LibraryRoots[model.TypeManhwa],
+		RootManhua:              settings.LibraryRoots[model.TypeManhua],
+		KavitaLibManga:          settings.KavitaLibIDsByType[model.TypeManga],
+		KavitaLibManhwa:         settings.KavitaLibIDsByType[model.TypeManhwa],
+		KavitaLibManhua:         settings.KavitaLibIDsByType[model.TypeManhua],
+		RenameExample:           renameExample(settings.RenameScheme),
+		DiskRows:                diskRows,
+		RecycleBinPath:          h.recycleBinPath,
+		RecycleBinRetentionDays: h.recycleBinRetentionDays,
 	})
 }
 
