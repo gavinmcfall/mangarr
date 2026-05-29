@@ -16,7 +16,9 @@ import (
 
 	"github.com/gavinmcfall/mangarr/internal/dbbackup"
 	"github.com/gavinmcfall/mangarr/internal/health"
+	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
+	"github.com/gavinmcfall/mangarr/internal/poller"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
 	_ "modernc.org/sqlite"
 )
@@ -71,6 +73,22 @@ func (f *fakeStore) SetSeriesType(id int64, ct model.ContentType) error {
 type fakeRunner struct{ called int }
 
 func (r *fakeRunner) RunOnce() error { r.called++; return nil }
+
+// fakeSeriesFiler records FileOne calls and optionally returns an error.
+type fakeSeriesFiler struct {
+	calls []fileOneCall
+	err   error
+}
+
+type fileOneCall struct {
+	seriesID int64
+	ct       model.ContentType
+}
+
+func (f *fakeSeriesFiler) FileOne(ctx context.Context, seriesID int64, ct model.ContentType) error {
+	f.calls = append(f.calls, fileOneCall{seriesID, ct})
+	return f.err
+}
 
 // fakeTaskRegistry is a minimal in-process TaskRegistry for tests.
 type fakeTaskRegistry struct {
@@ -147,7 +165,7 @@ func newEmptyHandler() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "/config/recycle-bin", 7, nil, nil, nil)
+	return NewHandler(st, &fakeRunner{}, "/config/recycle-bin", 7, nil, nil, nil, nil)
 }
 
 // newTestHandler builds a Handler with test fixtures.
@@ -170,7 +188,7 @@ func newTestHandler() (*Handler, *fakeStore, *fakeRunner) {
 		},
 	}
 	runner := &fakeRunner{}
-	return NewHandler(st, runner, "/config/recycle-bin", 7, nil, nil, nil), st, runner
+	return NewHandler(st, runner, "/config/recycle-bin", 7, nil, nil, nil, nil), st, runner
 }
 
 // newTestHandlerWithRegistry builds a Handler with a seeded task registry.
@@ -181,7 +199,7 @@ func newTestHandlerWithRegistry() (*Handler, *fakeStore, *fakeRunner, *fakeTaskR
 		runner.called++
 		return nil
 	})
-	h := NewHandler(st, runner, "/config/recycle-bin", 7, reg, nil, nil)
+	h := NewHandler(st, runner, "/config/recycle-bin", 7, reg, nil, nil, nil)
 	return h, st, runner, reg
 }
 
@@ -382,7 +400,7 @@ func TestAPIRescanWithoutRunnerReturns503(t *testing.T) {
 		series:   []model.Series{},
 		activity: []model.ActivityEntry{},
 		settings: model.Settings{LibraryRoots: map[model.ContentType]string{}, KavitaLibIDsByType: map[model.ContentType]int64{}},
-	}, nil, "/config/recycle-bin", 7, nil, nil, nil)
+	}, nil, "/config/recycle-bin", 7, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/rescan", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -577,7 +595,7 @@ func newBackupHandler(t *testing.T) (*Handler, string) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandlerWithBackup(st, &fakeRunner{}, "", 0, cfg, backupFn, nil, nil, nil)
+	h := NewHandlerWithBackup(st, &fakeRunner{}, "", 0, cfg, backupFn, nil, nil, nil, nil)
 	return h, dir
 }
 
@@ -721,7 +739,7 @@ func newHandlerWithRoots() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, "/tmp")
+	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil, "/tmp")
 }
 
 func TestAPIDiskSpaceReturnsJSONArray(t *testing.T) {
@@ -775,7 +793,7 @@ func TestAPIDiskSpaceEmptyWhenNoRoots(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil) // no downloadRoots
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil) // no downloadRoots
 	req := httptest.NewRequest(http.MethodGet, "/api/diskspace", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -876,7 +894,7 @@ func TestSettingsPageRendersRecycleBin(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "/tmp/mg-bin", 14, nil, nil, nil)
+	h := NewHandler(st, &fakeRunner{}, "/tmp/mg-bin", 14, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -970,7 +988,7 @@ func TestAPIRunTaskTriggersRunFn(t *testing.T) {
 		return nil
 	})
 
-	h := NewHandler(st, &fakeRunner{}, "", 0, reg, nil, nil)
+	h := NewHandler(st, &fakeRunner{}, "", 0, reg, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/tasks/test-task/run", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1056,7 +1074,7 @@ func newHealthHandler(results []health.Result) *Handler {
 		},
 	}
 	reg := &fakeHealthRegistry{results: results}
-	return NewHandler(st, &fakeRunner{}, "", 0, nil, reg, nil)
+	return NewHandler(st, &fakeRunner{}, "", 0, nil, reg, nil, nil)
 }
 
 func TestHealthPageReturns200(t *testing.T) {
@@ -1127,7 +1145,7 @@ func TestHealthPageWithoutRegistryShowsWarning(t *testing.T) {
 		},
 	}
 	// nil healthReg
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil)
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1147,7 +1165,7 @@ func TestAPIHealthWithoutRegistryReturnsWarn(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil)
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1188,7 +1206,7 @@ func newHandlerWithMetrics() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, &fakeMetricsSink{})
+	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, &fakeMetricsSink{}, nil)
 }
 
 func TestMetricsEndpointServesPrometheus(t *testing.T) {
@@ -1214,12 +1232,244 @@ func TestMetricsEndpointWithoutHandlerReturns503(t *testing.T) {
 		},
 	}
 	// nil metrics — /metrics should return 503
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil)
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("want 503 when metrics not wired, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ---- Preview page + API tests ----
+
+// fakePreviewer implements Previewer with canned results.
+type fakePreviewer struct {
+	entries []poller.PreviewEntry
+	err     error
+}
+
+func (f *fakePreviewer) Preview(ctx context.Context) ([]poller.PreviewEntry, error) {
+	return f.entries, f.err
+}
+
+// newPreviewHandler builds a Handler wired with a fakePreviewer seeded with
+// one matched, one unmatched, and one misconfigured entry.
+func newPreviewHandler() *Handler {
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	prev := &fakePreviewer{
+		entries: []poller.PreviewEntry{
+			{
+				Title:      "Berserk",
+				SourcePath: "/dl/Berserk",
+				Source:     "tranga",
+				Classified: model.TypeManga,
+				DstRoot:    "/lib/Manga",
+				Status:     "matched",
+				ChapterPlans: []filer.PlanEntry{
+					{SrcPath: "/dl/Berserk/Ch.001.cbz", DstPath: "/lib/Manga/Berserk/Berserk - Ch.001.cbz", Action: filer.PlanFile},
+					{SrcPath: "/dl/Berserk/Ch.002.cbz", DstPath: "/lib/Manga/Berserk/Berserk - Ch.002.cbz", Action: filer.PlanSkip},
+				},
+			},
+			{
+				Title:      "Unknown Series",
+				SourcePath: "/dl/Unknown",
+				Source:     "suwayomi",
+				Status:     "unmatched",
+				Reason:     "AniList returned no match",
+			},
+			{
+				Title:      "Misconfigured",
+				SourcePath: "/dl/Misc",
+				Source:     "tranga",
+				Classified: model.TypeManhua,
+				Status:     "misconfigured",
+				Note:       "type Manhua has no configured library root",
+			},
+		},
+	}
+	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, prev)
+}
+
+func TestPreviewPageReturns200(t *testing.T) {
+	h := newPreviewHandler()
+	req := httptest.NewRequest(http.MethodGet, "/preview", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Preview") {
+		t.Fatalf("page does not contain 'Preview' heading; body excerpt:\n%s", snippet(body, "Preview", 300))
+	}
+	// All three series must appear on the page.
+	if !strings.Contains(body, "Berserk") {
+		t.Fatalf("'Berserk' not in preview page body")
+	}
+	if !strings.Contains(body, "Unknown Series") {
+		t.Fatalf("'Unknown Series' not in preview page body")
+	}
+	if !strings.Contains(body, "Misconfigured") {
+		t.Fatalf("'Misconfigured' not in preview page body")
+	}
+}
+
+func TestAPIPreviewReturnsJSON(t *testing.T) {
+	h := newPreviewHandler()
+	req := httptest.NewRequest(http.MethodGet, "/api/preview", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("want application/json, got %q", ct)
+	}
+	var entries []poller.PreviewEntry
+	if err := json.Unmarshal(rr.Body.Bytes(), &entries); err != nil {
+		t.Fatalf("parse JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if len(entries) != 3 {
+		t.Fatalf("want 3 preview entries, got %d", len(entries))
+	}
+	// Find the matched one and verify chapter plans are present.
+	var berserk *poller.PreviewEntry
+	for i := range entries {
+		if entries[i].Title == "Berserk" {
+			berserk = &entries[i]
+		}
+	}
+	if berserk == nil {
+		t.Fatal("Berserk entry missing from /api/preview response")
+	}
+	if len(berserk.ChapterPlans) != 2 {
+		t.Fatalf("Berserk: want 2 chapter plans, got %d", len(berserk.ChapterPlans))
+	}
+}
+
+func TestPreviewPageWithoutPreviewerShowsPlaceholder(t *testing.T) {
+	// nil previewer → placeholder message.
+	h := NewHandler(&fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}, &fakeRunner{}, "", 0, nil, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/preview", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "not available") && !strings.Contains(body, "not wired") {
+		t.Fatalf("placeholder text not found in body;\nbody:\n%s", snippet(body, "Preview", 400))
+	}
+}
+
+// ---- /api/series/{id}/assign tests ----
+
+// newHandlerWithFilerForTest builds a Handler with a fakeSeriesFiler and a seeded store.
+func newHandlerWithFilerForTest(sf *fakeSeriesFiler) (*Handler, *fakeStore) {
+	st := &fakeStore{
+		series: []model.Series{
+			{ID: 1, Title: "Dragon Ball Super (Color)", Type: model.TypeUnknown, Status: model.StatusUnmatched, Source: "suwayomi"},
+		},
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{model.TypeManga: "/lib/Manga"},
+			KavitaLibIDsByType: map[model.ContentType]int64{model.TypeManga: 3},
+		},
+	}
+	h := NewHandlerWithFiler(st, &fakeRunner{}, sf, "", 0, BackupConfig{}, nil, nil, nil, nil, nil)
+	return h, st
+}
+
+func TestAPIAssignTriggersFileOne(t *testing.T) {
+	sf := &fakeSeriesFiler{}
+	h, _ := newHandlerWithFilerForTest(sf)
+
+	form := url.Values{"type": {"Manga"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/1/assign",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if len(sf.calls) != 1 {
+		t.Fatalf("expected 1 FileOne call, got %d", len(sf.calls))
+	}
+	if sf.calls[0].seriesID != 1 || sf.calls[0].ct != model.TypeManga {
+		t.Fatalf("expected FileOne(1, Manga), got %+v", sf.calls[0])
+	}
+}
+
+func TestAPIAssignReturnsEmptyFragment(t *testing.T) {
+	sf := &fakeSeriesFiler{}
+	h, _ := newHandlerWithFilerForTest(sf)
+
+	form := url.Values{"type": {"Manhwa"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/1/assign",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	// Body must be empty so the HTMX outerHTML swap removes the row.
+	if body := strings.TrimSpace(rr.Body.String()); body != "" {
+		t.Fatalf("expected empty body for successful assign, got %q", body)
+	}
+}
+
+func TestAPIAssignRejectsBadType(t *testing.T) {
+	sf := &fakeSeriesFiler{}
+	h, _ := newHandlerWithFilerForTest(sf)
+
+	form := url.Values{"type": {"Whatever"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/1/assign",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if len(sf.calls) != 0 {
+		t.Fatalf("FileOne must not be called on invalid type, got %d calls", len(sf.calls))
+	}
+}
+
+func TestAPIAssignWithoutFilerReturns503(t *testing.T) {
+	// Handler with no SeriesFiler → 503.
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil)
+
+	form := url.Values{"type": {"Manga"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/1/assign",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503, got %d; body: %s", rr.Code, rr.Body.String())
 	}
 }

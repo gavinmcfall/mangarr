@@ -533,3 +533,43 @@ input[type="number"].input-narrow {
   font-size: 14px;
 }
 .health-warn-banner p { margin: 0; }
+
+/* ── Preview page ─────────────────────────────────────────── */
+.preview-section {
+  margin-bottom: 28px;
+}
+
+.preview-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #9aa0a6;
+  margin: 0 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #3a3c40;
+}
+
+.preview-count {
+  font-weight: 400;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.page-subtitle-wrap {
+  margin-top: 4px;
+}
+
+.page-subtitle {
+  font-size: 12px;
+  color: #9aa0a6;
+}
+
+.td-mono {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}

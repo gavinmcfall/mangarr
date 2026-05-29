@@ -24,6 +24,15 @@
         </a>
       </li>
       <li>
+        <a href="/preview" {{if eq .Page "preview"}}class="active"{{end}}>
+          <!-- Magnifying glass (preview/dry-run) icon -->
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 15.803a7.5 7.5 0 0 0 10.607 0Z" />
+          </svg>
+          Preview
+        </a>
+      </li>
+      <li>
         <a href="/unmatched" {{if eq .Page "unmatched"}}class="active"{{end}}>
           <!-- Question mark circle icon -->
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

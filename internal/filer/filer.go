@@ -108,6 +108,24 @@ func RenderName(scheme, series, origFile string) string {
 	return out
 }
 
+// PlannedAction describes what File() WOULD do for a single chapter.
+type PlannedAction string
+
+const (
+	PlanFile  PlannedAction = "file"  // would create dst (hardlink/move/copy)
+	PlanSkip  PlannedAction = "skip"  // dst already exists, idempotent skip
+	PlanError PlannedAction = "error" // would error (path traversal, etc.)
+)
+
+// PlanEntry is one chapter's planned outcome.
+type PlanEntry struct {
+	SrcPath string
+	DstPath string        // empty when PlanError
+	Mode    model.FileMode
+	Action  PlannedAction
+	Error   string        // populated when Action == PlanError
+}
+
 // Filer places .cbz files from a source directory into a destination library root
 // using the configured mode (hardlink/move/copy) and rename scheme.
 //
@@ -161,6 +179,69 @@ func (f *Filer) File(series, srcDir, dstRoot string) error {
 		}
 	}
 	return nil
+}
+
+// Plan walks the same logic as File() but returns the planned actions without
+// touching the filesystem. Used by the dry-run preview UI.
+//
+// Returns one PlanEntry per .cbz under srcDir. The classifier cache is read
+// (via the caller's Classify call) but Plan itself makes no writes — no
+// os.Link, os.Rename, or directory creation.
+//
+// If srcDir cannot be read, Plan returns an error. Per-entry path-traversal
+// violations are returned as PlanEntry{Action: PlanError} rather than aborting
+// the whole walk, matching the semantics callers expect.
+func (f *Filer) Plan(series, srcDir, dstRoot string) ([]PlanEntry, error) {
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return nil, err
+	}
+
+	mode := f.Mode
+	if mode == "" {
+		mode = model.ModeHardlink
+	}
+
+	var plans []PlanEntry
+	for _, e := range entries {
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".cbz") {
+			continue
+		}
+		src := filepath.Join(srcDir, e.Name())
+		rel := RenderName(f.Scheme, series, e.Name())
+		dst := filepath.Join(dstRoot, rel)
+
+		// Security: same guard as File() — reject paths that escape dstRoot.
+		cleanRoot := filepath.Clean(dstRoot) + string(os.PathSeparator)
+		if !strings.HasPrefix(filepath.Clean(dst)+string(os.PathSeparator), cleanRoot) {
+			plans = append(plans, PlanEntry{
+				SrcPath: src,
+				Mode:    mode,
+				Action:  PlanError,
+				Error:   fmt.Sprintf("rendered path %q escapes library root %q", dst, dstRoot),
+			})
+			continue
+		}
+
+		// Idempotency check: if dst already exists, this would be a skip.
+		if _, err := os.Stat(dst); err == nil {
+			plans = append(plans, PlanEntry{
+				SrcPath: src,
+				DstPath: dst,
+				Mode:    mode,
+				Action:  PlanSkip,
+			})
+			continue
+		}
+
+		plans = append(plans, PlanEntry{
+			SrcPath: src,
+			DstPath: dst,
+			Mode:    mode,
+			Action:  PlanFile,
+		})
+	}
+	return plans, nil
 }
 
 // place performs the actual file operation for a single chapter.

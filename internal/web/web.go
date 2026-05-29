@@ -4,14 +4,17 @@
 //
 //	GET  /                           → redirect to /series
 //	GET  /series                     → Series page (HTMX)
+//	GET  /preview                    → Preview / dry-run page (HTMX)
 //	GET  /unmatched                  → Unmatched page (HTMX)
 //	GET  /activity                   → Activity/History page (HTMX)
 //	GET  /health                     → Health checks page (HTMX)
 //	GET  /tasks                      → Tasks page (HTMX)
 //	GET  /settings                   → Settings page (HTMX)
 //	POST /settings                   → Save settings (form POST, redirect back)
-//	POST /api/series/{id}/reclassify → Override a series' type (HTMX form target)
+//	POST /api/series/{id}/reclassify → Override a series' type (HTMX form target, Series page)
+//	POST /api/series/{id}/assign    → Classify, cache, file, and Kavita-scan one series (Unmatched page)
 //	POST /api/rescan                 → Trigger poll-scan via task registry
+//	GET  /api/preview                → JSON []PreviewEntry (dry-run pipeline)
 //	GET  /api/series                 → JSON list of all series
 //	GET  /api/unmatched              → JSON list of unmatched series
 //	GET  /api/activity               → JSON activity log
@@ -30,8 +33,10 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -45,6 +50,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/health"
 	"github.com/gavinmcfall/mangarr/internal/model"
+	"github.com/gavinmcfall/mangarr/internal/poller"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
 )
 
@@ -91,12 +97,26 @@ type MetricsSink interface {
 	Handler() http.Handler // promhttp.HandlerFor the registry
 }
 
+// Previewer can run the full pipeline dry-run without side effects.
+// poller.Poller satisfies this interface via its Preview method.
+type Previewer interface {
+	Preview(ctx context.Context) ([]poller.PreviewEntry, error)
+}
+
+// SeriesFiler can file a single series on demand.
+// poller.Poller satisfies this interface via its FileOne method.
+type SeriesFiler interface {
+	FileOne(ctx context.Context, seriesID int64, ct model.ContentType) error
+}
+
 // Handler is the HTTP handler for the web UI and JSON API.
 type Handler struct {
 	mux                     *http.ServeMux
 	tmpls                   map[string]*template.Template // one template set per page
 	store                   Store
 	runner                  Runner
+	previewer               Previewer                     // optional; /preview returns placeholder when nil
+	seriesFiler             SeriesFiler                   // optional; /api/series/{id}/assign returns 503 when nil
 	downloadRoots           []string // from config.DownloadRoots; used by disk-space endpoints
 	recycleBinPath          string
 	recycleBinRetentionDays int
@@ -112,21 +132,29 @@ type Handler struct {
 // runner may be nil (RunOnce calls will return 503).
 // recycleBinPath and recycleBinRetentionDays are env-derived config values
 // surfaced read-only on the Settings page.
+// previewer may be nil (/preview returns a placeholder page).
 // downloadRoots is the list of download root paths (may be empty in tests).
 // taskReg may be nil (tasks routes return 503).
 // healthReg may be nil (health routes show a placeholder warning).
 // metrics may be nil (GET /metrics returns 503).
 // Backup API is wired separately via NewHandlerWithBackup (returns 503 here).
-func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, healthReg, metrics, downloadRoots)
+func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, nil, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, healthReg, metrics, previewer, downloadRoots)
 }
 
 // NewHandlerWithBackup is like NewHandler but also wires the backup API.
-func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, downloadRoots)
+func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, nil, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, downloadRoots)
 }
 
-func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, downloadRoots []string) *Handler {
+// NewHandlerWithFiler is like NewHandlerWithBackup but also wires the per-series filer
+// used by POST /api/series/{id}/assign. In production main.go passes the *poller.Poller
+// directly as it implements both Runner and SeriesFiler.
+func NewHandlerWithFiler(store Store, runner Runner, seriesFiler SeriesFiler, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, seriesFiler, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, downloadRoots)
+}
+
+func newHandlerFull(store Store, runner Runner, seriesFiler SeriesFiler, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots []string) *Handler {
 	var mh http.Handler
 	if metrics != nil {
 		mh = metrics.Handler()
@@ -136,6 +164,8 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 		tmpls:                   parsePageTemplates(),
 		store:                   store,
 		runner:                  runner,
+		previewer:               previewer,
+		seriesFiler:             seriesFiler,
 		downloadRoots:           downloadRoots,
 		recycleBinPath:          recycleBinPath,
 		recycleBinRetentionDays: recycleBinRetentionDays,
@@ -155,6 +185,7 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 		http.Redirect(w, r, "/series", http.StatusFound)
 	})
 	h.mux.HandleFunc("GET /series", h.pageSeries)
+	h.mux.HandleFunc("GET /preview", h.pagePreview)
 	h.mux.HandleFunc("GET /unmatched", h.pageUnmatched)
 	h.mux.HandleFunc("GET /activity", h.pageActivity)
 	h.mux.HandleFunc("GET /health", h.pageHealth)
@@ -163,6 +194,7 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 	h.mux.HandleFunc("POST /settings", h.saveSettings)
 
 	// JSON API
+	h.mux.HandleFunc("GET /api/preview", h.apiPreview)
 	h.mux.HandleFunc("GET /api/series", h.apiListSeries)
 	h.mux.HandleFunc("GET /api/unmatched", h.apiListUnmatched)
 	h.mux.HandleFunc("GET /api/activity", h.apiListActivity)
@@ -176,6 +208,9 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
+
+	// HTMX action: manual classify-and-file from Unmatched page (POST /api/series/{id}/assign)
+	h.mux.HandleFunc("POST /api/series/{id}/assign", h.apiAssign)
 
 	// Backup API
 	h.mux.HandleFunc("GET /api/backups", h.apiListBackups)
@@ -197,7 +232,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // overlaid, ensuring that {{block "content"}} resolves to THAT page's
 // definition rather than whichever happened to be parsed last globally.
 func parsePageTemplates() map[string]*template.Template {
-	pages := []string{"series.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "settings.html"}
+	pages := []string{"series.html", "preview.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "settings.html"}
 	m := make(map[string]*template.Template, len(pages))
 	for _, name := range pages {
 		// Parse base + the specific page. This gives each page its own
@@ -242,6 +277,28 @@ type pageData struct {
 	Items interface{}
 	Flash string
 	Error string
+}
+
+// previewPageData is passed to templates/preview.html.
+type previewPageData struct {
+	Page         string
+	Matched      []previewRow
+	Unmatched    []previewRow
+	Misconfigured []previewRow
+	Placeholder  bool   // true when previewer is not wired
+}
+
+// previewRow is the view-model for one series on the Preview page.
+type previewRow struct {
+	Title        string
+	Source       string
+	SourcePath   string
+	Type         string
+	DstRoot      string
+	Reason       string
+	Note         string
+	ChapterCount int
+	FileSummary  string // e.g. "3 file, 5 skip"
 }
 
 // diskSpaceRow is a single row in the disk-space display: one path with its
@@ -358,6 +415,94 @@ func (h *Handler) pageSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.render(w, "series.html", pageData{Page: "series", Items: list})
+}
+
+func (h *Handler) pagePreview(w http.ResponseWriter, r *http.Request) {
+	if h.previewer == nil {
+		h.render(w, "preview.html", previewPageData{Page: "preview", Placeholder: true})
+		return
+	}
+	entries, err := h.previewer.Preview(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	data := buildPreviewPageData(entries)
+	data.Page = "preview"
+	h.render(w, "preview.html", data)
+}
+
+func (h *Handler) apiPreview(w http.ResponseWriter, r *http.Request) {
+	if h.previewer == nil {
+		jsonOK(w, []poller.PreviewEntry{})
+		return
+	}
+	entries, err := h.previewer.Preview(r.Context())
+	if err != nil {
+		jsonErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	if entries == nil {
+		entries = []poller.PreviewEntry{}
+	}
+	jsonOK(w, entries)
+}
+
+// buildPreviewPageData converts raw PreviewEntry slice into the grouped view model.
+func buildPreviewPageData(entries []poller.PreviewEntry) previewPageData {
+	data := previewPageData{}
+	for _, e := range entries {
+		row := previewRow{
+			Title:      e.Title,
+			Source:     e.Source,
+			SourcePath: e.SourcePath,
+			Type:       string(e.Classified),
+			DstRoot:    e.DstRoot,
+			Reason:     e.Reason,
+			Note:       e.Note,
+		}
+		// Count chapters from chapter plans.
+		var nFile, nSkip int
+		for _, p := range e.ChapterPlans {
+			switch p.Action {
+			case "file":
+				nFile++
+			case "skip":
+				nSkip++
+			}
+		}
+		row.ChapterCount = len(e.ChapterPlans)
+		if len(e.ChapterPlans) > 0 {
+			row.FileSummary = buildFileSummary(nFile, nSkip, len(e.ChapterPlans)-nFile-nSkip)
+		}
+		switch e.Status {
+		case "matched":
+			data.Matched = append(data.Matched, row)
+		case "unmatched":
+			data.Unmatched = append(data.Unmatched, row)
+		default: // "misconfigured"
+			data.Misconfigured = append(data.Misconfigured, row)
+		}
+	}
+	return data
+}
+
+// buildFileSummary produces a compact summary like "3 file, 5 skip" or "all skip".
+func buildFileSummary(nFile, nSkip, nErr int) string {
+	var parts []string
+	if nFile > 0 {
+		parts = append(parts, fmt.Sprintf("%d file", nFile))
+	}
+	if nSkip > 0 {
+		parts = append(parts, fmt.Sprintf("%d skip", nSkip))
+	}
+	if nErr > 0 {
+		parts = append(parts, fmt.Sprintf("%d error", nErr))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (h *Handler) pageUnmatched(w http.ResponseWriter, r *http.Request) {
@@ -896,6 +1041,57 @@ func (h *Handler) apiReclassify(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, row)
+}
+
+// apiAssign handles POST /api/series/{id}/assign.
+//
+// It classifies the series to the given type, writes the override to the
+// classification cache, files the series immediately, and triggers a Kavita
+// scan — all in one click from the Unmatched page.
+//
+// On success it returns an empty 200 body: the HTMX target row is swapped out
+// (deleted) by the caller's hx-swap="outerHTML" pointing at an empty response,
+// which removes the row from the Unmatched table without a full page reload.
+//
+// Returns 503 when the SeriesFiler is not configured (minimal test setups).
+// Returns 400 on invalid id or unknown type.
+func (h *Handler) apiAssign(w http.ResponseWriter, r *http.Request) {
+	if h.seriesFiler == nil {
+		http.Error(w, "series filer not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	typeStr := r.FormValue("type")
+	ct := model.ContentType(typeStr)
+	if ct != model.TypeManga && ct != model.TypeManhwa && ct != model.TypeManhua {
+		http.Error(w, "invalid type", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.seriesFiler.FileOne(r.Context(), id, ct); err != nil {
+		// Surface as 404 if the series doesn't exist, else 500.
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "series not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return empty body — the HTMX hx-swap="outerHTML" replaces the row with
+	// nothing, removing it from the Unmatched table.
+	w.WriteHeader(http.StatusOK)
 }
 
 // ---- backup API handlers ----
