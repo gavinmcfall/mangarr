@@ -460,3 +460,65 @@ input[type="number"].input-narrow {
   font-size: 12px;
   color: #9aa0a6;
 }
+
+/* ── Disk Space section ───────────────────────────────────── */
+.disk-space-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.disk-space-table td {
+  padding: 8px 4px;
+  border-bottom: 1px solid #3a3c40;
+  vertical-align: middle;
+}
+
+.disk-space-table tr:last-child td {
+  border-bottom: none;
+}
+
+.disk-path {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  color: #e7e8eb;
+  word-break: break-all;
+  width: 40%;
+}
+
+.disk-sizes {
+  font-size: 12px;
+  color: #9aa0a6;
+  text-align: right;
+  white-space: nowrap;
+  padding-left: 12px;
+  padding-right: 8px;
+  width: 1%; /* shrink-wrap */
+}
+
+.disk-bar-cell {
+  width: 59%;
+}
+
+.space-bar {
+  background: #3a3c40;
+  border-radius: 3px;
+  height: 8px;
+  overflow: hidden;
+}
+
+.space-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  min-width: 2px;
+  transition: width 0.2s;
+}
+
+.bar-ok   { background: #3bb273; }
+.bar-warn { background: #e6a23c; }
+.bar-err  { background: #e15554; }
+
+.disk-unavailable {
+  font-size: 12px;
+  color: #e15554;
+  font-style: italic;
+}

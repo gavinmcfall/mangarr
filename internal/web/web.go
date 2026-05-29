@@ -15,6 +15,7 @@
 //	GET  /api/activity               → JSON activity log
 //	GET  /api/settings               → JSON current settings
 //	PUT  /api/settings               → JSON update settings
+//	GET  /api/diskspace              → JSON disk space for all roots
 //	GET  /static/*                   → Embedded static assets (htmx.min.js)
 package web
 
@@ -27,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gavinmcfall/mangarr/internal/diskspace"
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
 )
@@ -51,20 +53,23 @@ type Runner interface {
 
 // Handler is the HTTP handler for the web UI and JSON API.
 type Handler struct {
-	mux    *http.ServeMux
-	tmpls  map[string]*template.Template // one template set per page
-	store  Store
-	runner Runner
+	mux           *http.ServeMux
+	tmpls         map[string]*template.Template // one template set per page
+	store         Store
+	runner        Runner
+	downloadRoots []string // from config.DownloadRoots; used by disk-space endpoints
 }
 
 // NewHandler wires up all routes and parses embedded templates.
 // runner may be nil (RunOnce calls will return 503).
-func NewHandler(store Store, runner Runner) *Handler {
+// downloadRoots is the list of download root paths (may be empty in tests).
+func NewHandler(store Store, runner Runner, downloadRoots ...string) *Handler {
 	h := &Handler{
-		mux:    http.NewServeMux(),
-		tmpls:  parsePageTemplates(),
-		store:  store,
-		runner: runner,
+		mux:           http.NewServeMux(),
+		tmpls:         parsePageTemplates(),
+		store:         store,
+		runner:        runner,
+		downloadRoots: downloadRoots,
 	}
 
 	// Static assets
@@ -87,6 +92,7 @@ func NewHandler(store Store, runner Runner) *Handler {
 	h.mux.HandleFunc("GET /api/settings", h.apiGetSettings)
 	h.mux.HandleFunc("PUT /api/settings", h.apiPutSettings)
 	h.mux.HandleFunc("POST /api/rescan", h.apiRescan)
+	h.mux.HandleFunc("GET /api/diskspace", h.apiDiskSpace)
 
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
@@ -146,6 +152,30 @@ type pageData struct {
 	Error string
 }
 
+// diskSpaceRow is a single row in the disk-space display: one path with its
+// space info and presentation fields pre-computed server-side.
+type diskSpaceRow struct {
+	Label      string // e.g. "Download root" or "Manga library"
+	Path       string
+	Free       string  // formatted free bytes, e.g. "42.0 GiB"
+	Total      string  // formatted total bytes
+	PercentFmt string  // e.g. "73"  (integer %, no decimal, for bar width)
+	BarClass   string  // "bar-ok" | "bar-warn" | "bar-err"
+	Err        string  // non-empty when path is unavailable
+}
+
+// diskSpaceClass returns the CSS class for the bar fill based on percent free.
+func diskSpaceClass(pct float64) string {
+	switch {
+	case pct >= 25:
+		return "bar-ok"
+	case pct >= 10:
+		return "bar-warn"
+	default:
+		return "bar-err"
+	}
+}
+
 // settingsPageData holds pre-extracted plain fields for the Settings template.
 //
 // We deliberately AVOID using {{index .Settings.LibraryRoots "Manga"}} in
@@ -167,6 +197,7 @@ type settingsPageData struct {
 	KavitaLibManhwa int64
 	KavitaLibManhua int64
 	RenameExample   string
+	DiskRows        []diskSpaceRow
 }
 
 // ---- HTML page handlers ----
@@ -227,6 +258,10 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 	if flash == "1" {
 		flashMsg = "Settings saved."
 	}
+
+	// Build disk-space rows: download roots first, then library roots.
+	diskRows := h.buildDiskRows(settings)
+
 	// Pre-extract values typed-keyed by model.ContentType into plain fields,
 	// so the template can use {{.RootManga}} etc. with no reflection-time
 	// type mismatch. See settingsPageData doc comment.
@@ -242,7 +277,71 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		KavitaLibManhwa: settings.KavitaLibIDsByType[model.TypeManhwa],
 		KavitaLibManhua: settings.KavitaLibIDsByType[model.TypeManhua],
 		RenameExample:   renameExample(settings.RenameScheme),
+		DiskRows:        diskRows,
 	})
+}
+
+// buildDiskRows gathers disk-space rows for the Settings page.
+// Download roots come from the Handler (config.DownloadRoots).
+// Library roots come from settings (may be partially configured).
+func (h *Handler) buildDiskRows(settings model.Settings) []diskSpaceRow {
+	type pathSpec struct {
+		label string
+		path  string
+	}
+	var specs []pathSpec
+	for _, p := range h.downloadRoots {
+		specs = append(specs, pathSpec{"Download root", p})
+	}
+	libLabels := []struct {
+		ct    model.ContentType
+		label string
+	}{
+		{model.TypeManga, "Manga library"},
+		{model.TypeManhwa, "Manhwa library"},
+		{model.TypeManhua, "Manhua library"},
+	}
+	for _, ll := range libLabels {
+		if p := settings.LibraryRoots[ll.ct]; p != "" {
+			specs = append(specs, pathSpec{ll.label, p})
+		}
+	}
+
+	// Deduplicate: same physical path should only appear once
+	// (a download root might equal a library root).
+	seen := map[string]bool{}
+	var rows []diskSpaceRow
+	for _, spec := range specs {
+		key := spec.label + "|" + spec.path
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		rows = append(rows, makeDiskRow(spec.label, spec.path))
+	}
+	return rows
+}
+
+// makeDiskRow builds a single diskSpaceRow from a path.
+func makeDiskRow(label, path string) diskSpaceRow {
+	info := diskspace.Stat(path)
+	if info.Err != nil {
+		return diskSpaceRow{
+			Label:    label,
+			Path:     path,
+			Err:      "unavailable",
+			BarClass: "bar-err",
+		}
+	}
+	pct := info.PercentFree()
+	return diskSpaceRow{
+		Label:      label,
+		Path:       path,
+		Free:       diskspace.FormatBytes(info.FreeBytes),
+		Total:      diskspace.FormatBytes(info.TotalBytes),
+		PercentFmt: fmt.Sprintf("%d", int(pct)),
+		BarClass:   diskSpaceClass(pct),
+	}
 }
 
 func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
@@ -377,6 +476,61 @@ func (h *Handler) apiRescan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// diskSpaceAPIEntry is the JSON shape for GET /api/diskspace entries.
+type diskSpaceAPIEntry struct {
+	Path        string  `json:"path"`
+	TotalBytes  uint64  `json:"total_bytes"`
+	FreeBytes   uint64  `json:"free_bytes"`
+	PercentFree float64 `json:"percent_free"`
+	Error       string  `json:"error,omitempty"`
+}
+
+func (h *Handler) apiDiskSpace(w http.ResponseWriter, r *http.Request) {
+	settings, err := h.store.GetSettings()
+	if err != nil {
+		jsonErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	if settings.LibraryRoots == nil {
+		settings.LibraryRoots = map[model.ContentType]string{}
+	}
+
+	// Collect all unique paths: download roots + configured library roots.
+	type pathEntry struct {
+		path string
+	}
+	seen := map[string]bool{}
+	var paths []string
+	for _, p := range h.downloadRoots {
+		if !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	for _, ct := range []model.ContentType{model.TypeManga, model.TypeManhwa, model.TypeManhua} {
+		if p := settings.LibraryRoots[ct]; p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+
+	result := make([]diskSpaceAPIEntry, 0, len(paths))
+	for _, p := range paths {
+		info := diskspace.Stat(p)
+		entry := diskSpaceAPIEntry{
+			Path:        p,
+			TotalBytes:  info.TotalBytes,
+			FreeBytes:   info.FreeBytes,
+			PercentFree: info.PercentFree(),
+		}
+		if info.Err != nil {
+			entry.Error = info.Err.Error()
+		}
+		result = append(result, entry)
+	}
+	jsonOK(w, result)
 }
 
 func (h *Handler) apiReclassify(w http.ResponseWriter, r *http.Request) {
