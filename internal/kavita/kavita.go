@@ -81,7 +81,9 @@ func (c *Client) Ping(ctx context.Context) error {
 }
 
 // ListLibraries authenticates to Kavita and returns all libraries the
-// authenticated user can see (Kavita's GET /api/Library is per-user-scoped).
+// authenticated user can see (Kavita's GET /api/Library/Libraries is per-user-scoped).
+// Note: bare GET /api/Library returns 204 No Content — the list endpoint is
+// /api/Library/Libraries.
 //
 // The returned slice is sorted by Library.Name for stable UI ordering.
 func (c *Client) ListLibraries(ctx context.Context) ([]Library, error) {
@@ -89,7 +91,7 @@ func (c *Client) ListLibraries(ctx context.Context) ([]Library, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/Library", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/Library/Libraries", nil)
 	if err != nil {
 		return nil, fmt.Errorf("kavita list libraries request: %w", err)
 	}
