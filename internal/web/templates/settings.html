@@ -172,20 +172,78 @@
     </div>
   </div>
 
-  <!-- Kavita Libraries -->
+  <!-- Suwayomi Connection -->
   <div class="settings-card">
-    <div class="settings-card-header" style="display:flex;align-items:center;justify-content:space-between;">
-      <div>
-        <p class="settings-card-title">Kavita Libraries</p>
-        <p class="settings-card-desc">Select which Kavita library corresponds to each content type. Click Sync to refresh the list from Kavita.</p>
-      </div>
-      <button type="button" class="btn-sm"
-              hx-get="/api/kavita/libraries/fragment"
-              hx-target="#kavita-lib-selects"
-              hx-swap="innerHTML">Sync</button>
+    <div class="settings-card-header">
+      <p class="settings-card-title">Suwayomi Connection</p>
+      <p class="settings-card-desc">Optional. Used by the Library Map below to route Suwayomi-categorised series to specific Kavita libraries instead of consulting AniList.</p>
     </div>
     <div class="settings-card-body">
-      <div id="kavita-lib-selects">
+      <div class="settings-row">
+        <label class="settings-label">Base URL</label>
+        <div class="settings-input-wrap">
+          <input type="url" name="suwayomi_base_url" value="{{.SuwayomiBaseURL}}"
+            placeholder="http://suwayomi.entertainment.svc.cluster.local:4567">
+        </div>
+      </div>
+      <div class="settings-row">
+        <label class="settings-label">Auth type</label>
+        <div class="settings-input-wrap">
+          <label class="settings-radio"><input type="radio" name="suwayomi_auth_type" value="none"{{if or (eq .SuwayomiAuthType "none") (eq .SuwayomiAuthType "")}} checked{{end}}> None</label>
+          <label class="settings-radio"><input type="radio" name="suwayomi_auth_type" value="basic"{{if eq .SuwayomiAuthType "basic"}} checked{{end}}> Basic</label>
+          <label class="settings-radio"><input type="radio" name="suwayomi_auth_type" value="simple"{{if eq .SuwayomiAuthType "simple"}} checked{{end}}> Simple login</label>
+          <label class="settings-radio"><input type="radio" name="suwayomi_auth_type" value="ui"{{if eq .SuwayomiAuthType "ui"}} checked{{end}}> UI login</label>
+        </div>
+      </div>
+      <div class="settings-row">
+        <label class="settings-label">Username</label>
+        <div class="settings-input-wrap">
+          <input type="text" name="suwayomi_username" value="{{.SuwayomiUsername}}"
+            placeholder="admin" autocomplete="off">
+        </div>
+      </div>
+      <div class="settings-row">
+        <label class="settings-label">Password</label>
+        <div class="settings-input-wrap">
+          <input type="password" name="suwayomi_password" value="{{.SuwayomiPassword}}"
+            placeholder="(unchanged)" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="settings-row">
+        <label class="settings-label"></label>
+        <div class="settings-input-wrap">
+          <button type="button" class="btn-sm"
+                  hx-get="/api/suwayomi/test"
+                  hx-target="#suwayomi-test-result"
+                  hx-swap="innerHTML"
+                  hx-on::after-request="window.renderSuwayomiTestResult && window.renderSuwayomiTestResult(event)">Test</button>
+          <span id="suwayomi-test-result" class="suwayomi-test-result"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Library Map -->
+  <div class="settings-card">
+    <div class="settings-card-header">
+      <p class="settings-card-title">Library Map</p>
+      <p class="settings-card-desc">How mangarr decides which Kavita library a series belongs to. AniList classification is the default; Suwayomi categories can override it for specific groupings.</p>
+    </div>
+    <div class="settings-card-body" style="padding-bottom:8px;">
+
+      <!-- Sub-card: Default AniList Classification (first, drives the override card below) -->
+      <div class="settings-subcard">
+        <div class="settings-subcard-header" style="display:flex;align-items:center;justify-content:space-between;">
+          <div>
+            <p class="settings-subcard-title">Default: AniList Classification</p>
+            <p class="settings-subcard-desc">For series that don't match a Suwayomi override below, mangarr asks AniList for <code>countryOfOrigin</code> and routes by content type.</p>
+          </div>
+          <button type="button" class="btn-sm"
+                  hx-get="/api/kavita/libraries/fragment"
+                  hx-target="#kavita-lib-selects"
+                  hx-swap="innerHTML">Sync</button>
+        </div>
+        <div id="kavita-lib-selects">
 {{if .KavitaLibError}}
 <div class="form-error">Kavita unreachable: {{.KavitaLibError}}. Check Settings &#8594; Kavita Connection.</div>
 {{end}}
@@ -240,7 +298,34 @@
           </div>
         </div>
 {{end}}
+        </div>
       </div>
+
+      <!-- Sub-card: Suwayomi Category Overrides -->
+      <div class="settings-subcard" style="margin-top:16px;">
+        <div class="settings-subcard-header" style="display:flex;align-items:center;justify-content:space-between;">
+          <div>
+            <p class="settings-subcard-title">Suwayomi Category Overrides</p>
+            <p class="settings-subcard-desc">When a series comes from a Suwayomi category below, route there instead of asking AniList. First-match-wins by Suwayomi category order.</p>
+          </div>
+          <button type="button" class="btn-sm"
+                  hx-get="/api/suwayomi/categories/fragment"
+                  hx-target="#suwayomi-override-body"
+                  hx-swap="innerHTML">Refresh categories from Suwayomi</button>
+        </div>
+        <div id="suwayomi-override-body">
+{{if .SuwayomiOverridesUnconfigured}}
+          <div class="form-error">Configure AniList Classification above before adding Suwayomi overrides — overrides can only route to one of the three primary content-type libraries.</div>
+{{else if eq .SuwayomiBaseURL ""}}
+          <div class="form-error">Suwayomi not configured. Set the base URL in the Suwayomi Connection panel above, click Save, then Refresh.</div>
+          {{template "override-rows" .}}
+{{else}}
+          {{if .SuwayomiCatError}}<div class="form-error">Suwayomi unreachable: {{.SuwayomiCatError}}. Check the Suwayomi Connection panel above.</div>{{end}}
+          {{template "override-rows" .}}
+{{end}}
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -412,5 +497,91 @@
     if (window.htmx) { htmx.process(row); }
   };
 })();
+
+// Add a new empty override row by cloning the template.
+window.mangarrAddOverrideRow = function() {
+  var tpl = document.getElementById('override-row-template');
+  var body = document.getElementById('override-rows-body');
+  var counter = document.getElementById('override-next-idx');
+  if (!tpl || !body || !counter) { return; }
+  var idx = parseInt(counter.value || '0', 10);
+  counter.value = idx + 1;
+  // Materialise the template, then replace __IDX__ placeholders.
+  var frag = document.importNode(tpl.content, true);
+  var wrapper = document.createElement('div');
+  wrapper.appendChild(frag);
+  wrapper.innerHTML = wrapper.innerHTML.replace(/__IDX__/g, idx);
+  while (wrapper.firstChild) {
+    body.appendChild(wrapper.firstChild);
+  }
+};
+
+// Render the Suwayomi Test button result into the inline span.
+// Reads the JSON returned by /api/suwayomi/test and rewrites the span.
+window.renderSuwayomiTestResult = function(event) {
+  var span = document.getElementById('suwayomi-test-result');
+  if (!span) { return; }
+  var raw = (event && event.detail && event.detail.xhr && event.detail.xhr.responseText) || span.textContent || '';
+  var data;
+  try { data = JSON.parse(raw); } catch (e) { data = null; }
+  if (data && data.ok) {
+    span.innerHTML = '<span class="suwayomi-test-ok">&#9679; connected, ' + (data.category_count|0) + ' categories</span>';
+  } else if (data && data.error) {
+    span.innerHTML = '<span class="suwayomi-test-err">&#9679; ' + data.error.replace(/[<>&]/g, function(ch) { return ({'<':'&lt;','>':'&gt;','&':'&amp;'})[ch]; }) + '</span>';
+  } else {
+    span.innerHTML = '<span class="suwayomi-test-err">&#9679; unexpected response</span>';
+  }
+};
 </script>
+{{end}}
+
+{{define "override-rows"}}
+<div class="override-rows" id="override-rows-body">
+{{$cats := .SuwayomiCategories}}
+{{$libs := .OverrideLibChoices}}
+{{range .OverrideRows}}
+  <div class="settings-row override-row" data-idx="{{.Index}}">
+    <div class="settings-input-wrap">
+      <select name="override_category_{{.Index}}">
+        <option value="0">(select category)</option>
+        {{if not .CatKnown}}<option value="{{.CatID}}" selected>{{.CatName}}</option>{{end}}
+        {{$saved := .CatID}}
+        {{range $cats}}<option value="{{.ID}}"{{if eq .ID $saved}} selected{{end}}>{{.Name}}</option>{{end}}
+      </select>
+    </div>
+    <span class="override-arrow">&rarr;</span>
+    <div class="settings-input-wrap">
+      <select name="override_library_{{.Index}}">
+        <option value="0">(select library)</option>
+        {{$savedLib := .LibID}}
+        {{range $libs}}<option value="{{.ID}}"{{if eq .ID $savedLib}} selected{{end}}>{{.Label}}</option>{{end}}
+      </select>
+    </div>
+    {{if .ContentType}}<span class="override-badge pill pill-{{.ContentType | lower}}">{{.ContentType}}</span>{{else if gt .LibID 0}}<span class="override-badge pill pill-error">unmapped</span>{{end}}
+    <button type="button" class="btn-sm override-delete" onclick="this.closest('.override-row').remove()">&#x2715;</button>
+  </div>
+{{end}}
+</div>
+<input type="hidden" id="override-next-idx" value="{{len .OverrideRows}}">
+<div class="override-actions" style="margin-top:12px;">
+  <button type="button" class="btn-sm" onclick="mangarrAddOverrideRow()">+ Add override</button>
+</div>
+<template id="override-row-template">
+  <div class="settings-row override-row" data-idx="__IDX__">
+    <div class="settings-input-wrap">
+      <select name="override_category___IDX__">
+        <option value="0">(select category)</option>
+        {{range $cats}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+      </select>
+    </div>
+    <span class="override-arrow">&rarr;</span>
+    <div class="settings-input-wrap">
+      <select name="override_library___IDX__">
+        <option value="0">(select library)</option>
+        {{range $libs}}<option value="{{.ID}}">{{.Label}}</option>{{end}}
+      </select>
+    </div>
+    <button type="button" class="btn-sm override-delete" onclick="this.closest('.override-row').remove()">&#x2715;</button>
+  </div>
+</template>
 {{end}}
