@@ -8,8 +8,18 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 	"time"
 )
+
+// Library is one entry from Kavita's GET /api/Library response.
+type Library struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	Type int    `json:"type"` // Kavita's LibraryType enum
+	// (0=Manga, 1=Comic, 2=Book, 3=Image, 4=LightNovel, 5=ComicVine)
+}
 
 // Client authenticates against Kavita's plugin API and triggers library scans.
 type Client struct {
@@ -60,6 +70,39 @@ func (c *Client) authenticate() (string, error) {
 func (c *Client) Ping(ctx context.Context) error {
 	_, err := c.authenticate()
 	return err
+}
+
+// ListLibraries authenticates to Kavita and returns all libraries the
+// authenticated user can see (Kavita's GET /api/Library is per-user-scoped).
+//
+// The returned slice is sorted by Library.Name for stable UI ordering.
+func (c *Client) ListLibraries(ctx context.Context) ([]Library, error) {
+	token, err := c.authenticate()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/Library", nil)
+	if err != nil {
+		return nil, fmt.Errorf("kavita list libraries request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("kavita list libraries: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		io.Copy(io.Discard, resp.Body) // drain for keep-alive reuse
+		return nil, fmt.Errorf("kavita list libraries status %d", resp.StatusCode)
+	}
+	var libs []Library
+	if err := json.NewDecoder(resp.Body).Decode(&libs); err != nil {
+		return nil, fmt.Errorf("kavita list libraries decode: %w", err)
+	}
+	sort.Slice(libs, func(i, j int) bool {
+		return strings.ToLower(libs[i].Name) < strings.ToLower(libs[j].Name)
+	})
+	return libs, nil
 }
 
 // ScanLibrary triggers a full library scan for the given library ID.

@@ -171,6 +171,17 @@ html, body {
   border: 1px solid #e15554;
 }
 
+.form-error {
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  background: #4d2424;
+  color: #e15554;
+  border: 1px solid #e15554;
+}
+
 /* ── Buttons ──────────────────────────────────────────────── */
 .btn {
   display: inline-flex;
