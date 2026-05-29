@@ -24,6 +24,8 @@
 //	GET  /api/settings               → JSON current settings
 //	PUT  /api/settings               → JSON update settings
 //	GET  /api/diskspace              → JSON disk space for all roots
+//	GET  /api/browse                 → JSON directory listing (path browser; allowlist-restricted)
+//	GET  /api/browse/fragment        → HTMX HTML fragment for the path-browser modal
 //	GET  /api/backups                → JSON list of backup entries (newest first)
 //	POST /api/backups/run            → Trigger immediate backup; returns new Entry as JSON
 //	GET  /api/backups/{name}         → Download a backup file
@@ -41,6 +43,8 @@ import (
 	"html/template"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -118,6 +122,7 @@ type Handler struct {
 	previewer               Previewer                     // optional; /preview returns placeholder when nil
 	seriesFiler             SeriesFiler                   // optional; /api/series/{id}/assign returns 503 when nil
 	downloadRoots           []string // from config.DownloadRoots; used by disk-space endpoints
+	browseRoots             []string // allowlist for /api/browse (injected; tests can override)
 	recycleBinPath          string
 	recycleBinRetentionDays int
 	backupDir               string
@@ -139,25 +144,35 @@ type Handler struct {
 // metrics may be nil (GET /metrics returns 503).
 // Backup API is wired separately via NewHandlerWithBackup (returns 503 here).
 func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, nil, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, healthReg, metrics, previewer, downloadRoots)
+	return newHandlerFull(store, runner, nil, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, healthReg, metrics, previewer, nil, downloadRoots)
 }
 
 // NewHandlerWithBackup is like NewHandler but also wires the backup API.
 func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, nil, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, downloadRoots)
+	return newHandlerFull(store, runner, nil, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, nil, downloadRoots)
 }
 
 // NewHandlerWithFiler is like NewHandlerWithBackup but also wires the per-series filer
 // used by POST /api/series/{id}/assign. In production main.go passes the *poller.Poller
 // directly as it implements both Runner and SeriesFiler.
 func NewHandlerWithFiler(store Store, runner Runner, seriesFiler SeriesFiler, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, seriesFiler, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, downloadRoots)
+	return newHandlerFull(store, runner, seriesFiler, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, nil, downloadRoots)
 }
 
-func newHandlerFull(store Store, runner Runner, seriesFiler SeriesFiler, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots []string) *Handler {
+// NewHandlerWithBrowse is like NewHandlerWithFiler but also accepts an explicit
+// browseRoots allowlist for the path-browser endpoints. If browseRoots is nil the
+// production default (/media, /config) is used.
+func NewHandlerWithBrowse(store Store, runner Runner, seriesFiler SeriesFiler, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, browseRoots []string, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, seriesFiler, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, browseRoots, downloadRoots)
+}
+
+func newHandlerFull(store Store, runner Runner, seriesFiler SeriesFiler, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, browseRoots []string, downloadRoots []string) *Handler {
 	var mh http.Handler
 	if metrics != nil {
 		mh = metrics.Handler()
+	}
+	if browseRoots == nil {
+		browseRoots = []string{"/media", "/config"}
 	}
 	h := &Handler{
 		mux:                     http.NewServeMux(),
@@ -167,6 +182,7 @@ func newHandlerFull(store Store, runner Runner, seriesFiler SeriesFiler, recycle
 		previewer:               previewer,
 		seriesFiler:             seriesFiler,
 		downloadRoots:           downloadRoots,
+		browseRoots:             browseRoots,
 		recycleBinPath:          recycleBinPath,
 		recycleBinRetentionDays: recycleBinRetentionDays,
 		backupDir:               cfg.Dir,
@@ -205,6 +221,10 @@ func newHandlerFull(store Store, runner Runner, seriesFiler SeriesFiler, recycle
 	h.mux.HandleFunc("PUT /api/settings", h.apiPutSettings)
 	h.mux.HandleFunc("POST /api/rescan", h.apiRescan)
 	h.mux.HandleFunc("GET /api/diskspace", h.apiDiskSpace)
+
+	// Path-browser API (for Library Roots Browse button)
+	h.mux.HandleFunc("GET /api/browse", h.apiBrowse)
+	h.mux.HandleFunc("GET /api/browse/fragment", h.apiBrowseFragment)
 
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
@@ -304,21 +324,23 @@ type previewRow struct {
 // diskSpaceRow is a single row in the disk-space display: one path with its
 // space info and presentation fields pre-computed server-side.
 type diskSpaceRow struct {
-	Label      string // e.g. "Download root" or "Manga library"
-	Path       string
-	Free       string  // formatted free bytes, e.g. "42.0 GiB"
-	Total      string  // formatted total bytes
-	PercentFmt string  // e.g. "73"  (integer %, no decimal, for bar width)
-	BarClass   string  // "bar-ok" | "bar-warn" | "bar-err"
-	Err        string  // non-empty when path is unavailable
+	Label          string // e.g. "Download root" or "Manga library"
+	Path           string
+	Free           string // formatted free bytes, e.g. "42.0 GiB"
+	Total          string // formatted total bytes
+	PercentFmt     string // e.g. "73"  (integer %, no decimal, for bar width — represents %used)
+	PercentUsedFmt string // e.g. "73%" — human-readable label shown inside/beside bar
+	BarClass       string // "bar-ok" | "bar-warn" | "bar-err"
+	Err            string // non-empty when path is unavailable
 }
 
-// diskSpaceClass returns the CSS class for the bar fill based on percent free.
-func diskSpaceClass(pct float64) string {
+// diskSpaceClass returns the CSS class for the bar fill based on percent USED.
+// Green < 75% used, orange 75–90%, red > 90%.
+func diskSpaceClass(pctUsed float64) string {
 	switch {
-	case pct >= 25:
+	case pctUsed < 75:
 		return "bar-ok"
-	case pct >= 10:
+	case pctUsed < 90:
 		return "bar-warn"
 	default:
 		return "bar-err"
@@ -694,14 +716,19 @@ func makeDiskRow(label, path string) diskSpaceRow {
 			BarClass: "bar-err",
 		}
 	}
-	pct := info.PercentFree()
+	pctUsed := 100.0 - info.PercentFree()
+	if pctUsed < 0 {
+		pctUsed = 0
+	}
+	pctUsedInt := int(pctUsed)
 	return diskSpaceRow{
-		Label:      label,
-		Path:       path,
-		Free:       diskspace.FormatBytes(info.FreeBytes),
-		Total:      diskspace.FormatBytes(info.TotalBytes),
-		PercentFmt: fmt.Sprintf("%d", int(pct)),
-		BarClass:   diskSpaceClass(pct),
+		Label:          label,
+		Path:           path,
+		Free:           diskspace.FormatBytes(info.FreeBytes),
+		Total:          diskspace.FormatBytes(info.TotalBytes),
+		PercentFmt:     fmt.Sprintf("%d", pctUsedInt),
+		PercentUsedFmt: fmt.Sprintf("%d%% used", pctUsedInt),
+		BarClass:       diskSpaceClass(pctUsed),
 	}
 }
 
@@ -1152,6 +1179,286 @@ func (h *Handler) apiDownloadBackup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	http.ServeContent(w, r, name, info.ModTime(), f)
+}
+
+// ---- path-browser API ----
+
+// browseEntry is a single entry in the /api/browse JSON response.
+type browseEntry struct {
+	Name string `json:"name"`
+	Type string `json:"type"` // always "dir"
+	Path string `json:"path"`
+}
+
+// browseResponse is the JSON shape returned by GET /api/browse.
+type browseResponse struct {
+	Path    string        `json:"path"`
+	Parent  string        `json:"parent"`
+	Entries []browseEntry `json:"entries"`
+}
+
+// resolveBrowsePath validates and resolves the requested path against the
+// configured allowlist. It returns the cleaned absolute path, or an empty
+// string and an error string to send to the caller (403/400 as appropriate).
+// An empty or missing path is treated as the synthetic "root view" signal
+// by returning ("", "") — callers should check for both being empty.
+func (h *Handler) resolveBrowsePath(rawPath string) (resolved string, errMsg string, synthetic bool) {
+	if rawPath == "" {
+		return "", "", true // synthetic root view
+	}
+	cleaned := filepath.Clean(filepath.FromSlash(rawPath))
+	abs, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", "invalid path", false
+	}
+	for _, root := range h.browseRoots {
+		rootAbs, err := filepath.Abs(filepath.Clean(root))
+		if err != nil {
+			continue
+		}
+		// Accept the root itself or anything strictly inside it.
+		if abs == rootAbs || strings.HasPrefix(abs, rootAbs+string(filepath.Separator)) {
+			return abs, "", false
+		}
+	}
+	return "", "forbidden", false
+}
+
+// listDirs returns sorted directory entries under dir.
+func listDirs(dir string) ([]browseEntry, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	infos, err := f.Readdir(-1)
+	if err != nil {
+		return nil, err
+	}
+	var entries []browseEntry
+	for _, info := range infos {
+		if info.IsDir() {
+			name := info.Name()
+			entries = append(entries, browseEntry{
+				Name: name,
+				Type: "dir",
+				Path: filepath.Join(dir, name),
+			})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+	})
+	return entries, nil
+}
+
+// browseSyntheticRoot returns the synthetic root listing (all allowlist roots).
+func (h *Handler) browseSyntheticRoot() browseResponse {
+	entries := make([]browseEntry, 0, len(h.browseRoots))
+	for _, root := range h.browseRoots {
+		abs, err := filepath.Abs(filepath.Clean(root))
+		if err != nil {
+			abs = root
+		}
+		entries = append(entries, browseEntry{
+			Name: abs,
+			Type: "dir",
+			Path: abs,
+		})
+	}
+	return browseResponse{Path: "", Parent: "", Entries: entries}
+}
+
+// browseParent returns the parent path, or "" if the path equals one of the
+// allowlist roots (can't navigate above a root).
+func (h *Handler) browseParent(abs string) string {
+	for _, root := range h.browseRoots {
+		rootAbs, err := filepath.Abs(filepath.Clean(root))
+		if err != nil {
+			continue
+		}
+		if abs == rootAbs {
+			return "" // at a root — no parent to navigate to
+		}
+	}
+	return filepath.Dir(abs)
+}
+
+func (h *Handler) apiBrowse(w http.ResponseWriter, r *http.Request) {
+	rawPath := r.URL.Query().Get("path")
+	abs, errMsg, synthetic := h.resolveBrowsePath(rawPath)
+	if errMsg == "forbidden" {
+		http.Error(w, "path outside allowed roots", http.StatusForbidden)
+		return
+	}
+	if errMsg != "" {
+		http.Error(w, errMsg, http.StatusBadRequest)
+		return
+	}
+	if synthetic {
+		jsonOK(w, h.browseSyntheticRoot())
+		return
+	}
+	entries, err := listDirs(abs)
+	if err != nil {
+		http.Error(w, "cannot read directory", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, browseResponse{
+		Path:    abs,
+		Parent:  h.browseParent(abs),
+		Entries: entries,
+	})
+}
+
+// apiBrowseFragment renders the HTMX HTML fragment for the path-browser modal.
+func (h *Handler) apiBrowseFragment(w http.ResponseWriter, r *http.Request) {
+	rawPath := r.URL.Query().Get("path")
+	target := r.URL.Query().Get("target") // e.g. "root_manga"
+	abs, errMsg, synthetic := h.resolveBrowsePath(rawPath)
+	if errMsg == "forbidden" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `<div class="browse-error">Path is outside the allowed filesystem roots.</div>`)
+		return
+	}
+	if errMsg != "" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `<div class="browse-error">%s</div>`, html(errMsg))
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if synthetic {
+		// Render the allowlist roots as the top-level listing.
+		fmt.Fprint(w, `<div class="browse-fragment">`)
+		fmt.Fprint(w, `<div class="browse-breadcrumbs"><span class="browse-crumb-sep">/</span></div>`)
+		fmt.Fprint(w, `<ul class="browse-dir-list">`)
+		for _, root := range h.browseRoots {
+			rootAbs, err := filepath.Abs(filepath.Clean(root))
+			if err != nil {
+				rootAbs = root
+			}
+			fmt.Fprintf(w,
+				`<li class="browse-dir-item"><button type="button" class="browse-dir-btn" `+
+					`hx-get="/api/browse/fragment?path=%s&amp;target=%s" `+
+					`hx-target="#browse-modal-body" hx-swap="innerHTML">%s</button></li>`,
+				html(rootAbs), html(target), html(rootAbs),
+			)
+		}
+		fmt.Fprint(w, `</ul>`)
+		fmt.Fprint(w, `<div class="browse-actions">`)
+		fmt.Fprintf(w,
+			`<button type="button" class="btn btn-primary browse-select-btn" `+
+				`onclick="document.getElementById('%s').value='';document.getElementById('browse-modal').innerHTML=''">Cancel</button>`,
+			html(target),
+		)
+		fmt.Fprint(w, `</div></div>`)
+		return
+	}
+	// Build breadcrumbs from path segments relative to the allowlist root.
+	crumbs := buildBreadcrumbs(abs, h.browseRoots)
+	entries, err := listDirs(abs)
+	if err != nil {
+		fmt.Fprint(w, `<div class="browse-error">Cannot read directory.</div>`)
+		return
+	}
+	parent := h.browseParent(abs)
+	fmt.Fprint(w, `<div class="browse-fragment">`)
+	// Breadcrumbs
+	fmt.Fprint(w, `<div class="browse-breadcrumbs">`)
+	for i, crumb := range crumbs {
+		if i < len(crumbs)-1 {
+			// Clickable ancestor
+			fmt.Fprintf(w,
+				`<button type="button" class="browse-crumb-btn" `+
+					`hx-get="/api/browse/fragment?path=%s&amp;target=%s" `+
+					`hx-target="#browse-modal-body" hx-swap="innerHTML">%s</button>`+
+					`<span class="browse-crumb-sep">/</span>`,
+				html(crumb.Path), html(target), html(crumb.Label),
+			)
+		} else {
+			fmt.Fprintf(w, `<span class="browse-crumb-current">%s</span>`, html(crumb.Label))
+		}
+	}
+	fmt.Fprint(w, `</div>`)
+	// Directory list
+	fmt.Fprint(w, `<ul class="browse-dir-list">`)
+	if parent != "" {
+		fmt.Fprintf(w,
+			`<li class="browse-dir-item browse-dir-up"><button type="button" class="browse-dir-btn" `+
+				`hx-get="/api/browse/fragment?path=%s&amp;target=%s" `+
+				`hx-target="#browse-modal-body" hx-swap="innerHTML">..</button></li>`,
+			html(parent), html(target),
+		)
+	}
+	for _, e := range entries {
+		fmt.Fprintf(w,
+			`<li class="browse-dir-item"><button type="button" class="browse-dir-btn" `+
+				`hx-get="/api/browse/fragment?path=%s&amp;target=%s" `+
+				`hx-target="#browse-modal-body" hx-swap="innerHTML">%s</button></li>`,
+			html(e.Path), html(target), html(e.Name),
+		)
+	}
+	fmt.Fprint(w, `</ul>`)
+	// Footer actions
+	fmt.Fprint(w, `<div class="browse-actions">`)
+	fmt.Fprintf(w,
+		`<button type="button" class="btn btn-primary browse-select-btn" `+
+			`onclick="document.getElementById('%s').value='%s';document.getElementById('browse-modal').innerHTML=''">Select this folder</button>`,
+		html(target), html(abs),
+	)
+	fmt.Fprintf(w,
+		`<button type="button" class="btn browse-cancel-btn" `+
+			`onclick="document.getElementById('browse-modal').innerHTML=''">Cancel</button>`,
+	)
+	fmt.Fprint(w, `</div></div>`)
+}
+
+// breadcrumb represents one segment in the path-browser breadcrumbs.
+type breadcrumb struct {
+	Label string
+	Path  string
+}
+
+// buildBreadcrumbs constructs a slice of breadcrumbs for abs relative to the
+// deepest matching allowlist root. If abs does not match any root, returns a
+// single crumb for abs itself.
+func buildBreadcrumbs(abs string, roots []string) []breadcrumb {
+	// Find the longest matching root.
+	bestRoot := ""
+	for _, root := range roots {
+		rootAbs, err := filepath.Abs(filepath.Clean(root))
+		if err != nil {
+			continue
+		}
+		if abs == rootAbs || strings.HasPrefix(abs, rootAbs+string(filepath.Separator)) {
+			if len(rootAbs) > len(bestRoot) {
+				bestRoot = rootAbs
+			}
+		}
+	}
+	if bestRoot == "" {
+		return []breadcrumb{{Label: filepath.Base(abs), Path: abs}}
+	}
+	// Walk from root to abs.
+	rel, err := filepath.Rel(bestRoot, abs)
+	if err != nil {
+		return []breadcrumb{{Label: filepath.Base(abs), Path: abs}}
+	}
+	var crumbs []breadcrumb
+	// Add the root crumb itself.
+	crumbs = append(crumbs, breadcrumb{Label: bestRoot, Path: bestRoot})
+	if rel == "." {
+		return crumbs
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	cur := bestRoot
+	for _, p := range parts {
+		cur = filepath.Join(cur, p)
+		crumbs = append(crumbs, breadcrumb{Label: p, Path: cur})
+	}
+	return crumbs
 }
 
 // ---- metrics endpoint ----

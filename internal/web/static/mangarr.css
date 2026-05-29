@@ -448,15 +448,24 @@ input[type="number"].input-narrow {
 }
 
 .settings-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 40;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 16px;
-  margin-top: 8px;
-  padding-top: 4px;
+  background: #252628;
+  border-top: 1px solid #3a3c40;
+  padding: 14px 16px;
+  margin-top: 24px;
+  /* extend full width of the content area */
+  margin-left: -24px;
+  margin-right: -24px;
 }
 
 .settings-note {
+  flex: 1;
   font-size: 12px;
   color: #9aa0a6;
 }
@@ -521,6 +530,179 @@ input[type="number"].input-narrow {
   font-size: 12px;
   color: #e15554;
   font-style: italic;
+}
+
+.disk-pct-label {
+  display: block;
+  font-size: 11px;
+  color: #9aa0a6;
+  margin-top: 2px;
+}
+
+/* ── Browse button (next to Library Roots inputs) ─────────── */
+.settings-input-with-browse {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-input-with-browse input {
+  flex: 1;
+}
+
+.btn-browse {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 7px 10px;
+  background: #3a3c40;
+  border: 1px solid #4a4d52;
+  border-radius: 4px;
+  color: #9aa0a6;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+
+.btn-browse:hover {
+  background: #4a4d52;
+  color: #e7e8eb;
+}
+
+.btn-browse svg {
+  flex-shrink: 0;
+}
+
+/* ── Path-browser modal ───────────────────────────────────── */
+#browse-modal {
+  display: none;
+}
+
+#browse-modal.browse-modal-open {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#browse-modal-body {
+  width: 100%;
+  max-width: 600px;
+  max-height: 80vh;
+}
+
+.browse-fragment {
+  background: #2d2e31;
+  border: 1px solid #3a3c40;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+}
+
+.browse-breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid #3a3c40;
+  background: #333537;
+  font-size: 12px;
+}
+
+.browse-crumb-btn {
+  background: none;
+  border: none;
+  color: #5d9cec;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.browse-crumb-btn:hover {
+  background: #3a3c40;
+}
+
+.browse-crumb-current {
+  color: #e7e8eb;
+  font-weight: 600;
+  padding: 2px 4px;
+}
+
+.browse-crumb-sep {
+  color: #9aa0a6;
+  padding: 0 2px;
+}
+
+.browse-dir-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.browse-dir-item {
+  border-bottom: 1px solid #3a3c40;
+}
+
+.browse-dir-item:last-child {
+  border-bottom: none;
+}
+
+.browse-dir-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: #e7e8eb;
+  font-size: 13px;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.browse-dir-btn:hover {
+  background: #34363a;
+}
+
+.browse-dir-up .browse-dir-btn {
+  color: #9aa0a6;
+}
+
+.browse-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 12px 16px;
+  border-top: 1px solid #3a3c40;
+  background: #333537;
+}
+
+.browse-cancel-btn {
+  background: #3a3c40;
+  color: #e7e8eb;
+}
+
+.browse-cancel-btn:hover {
+  background: #4a4d52;
+}
+
+.browse-error {
+  padding: 16px;
+  color: #e15554;
+  font-size: 13px;
 }
 
 /* ---- Health page ---- */
