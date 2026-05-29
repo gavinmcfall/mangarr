@@ -27,6 +27,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
+	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
 
 // Scanner returns all candidate series from every configured download root.
@@ -35,10 +36,18 @@ type Scanner interface {
 	ScanAll() ([]model.Series, error)
 }
 
-// Classifier maps a series title to a ContentType.
-// classifier.Classifier satisfies this interface directly.
+// Classifier maps a series to a ContentType plus a "via" reason string
+// (e.g. "anilist:KR", "suwayomi-override:category=42", "unmatched") used
+// in activity log entries. classifier.Classifier satisfies this interface
+// directly via its ClassifySeries method.
+//
+// The Via channel exists so the Library Map override path (Plan B)
+// records which classifier produced the routing decision. Pre-Plan-B
+// callers (Preview, the one-off FileOne path) still use the plain
+// title-only Classify method on the concrete classifier — they keep
+// receiving just (ContentType, error) and write empty Via.
 type Classifier interface {
-	Classify(title string) (model.ContentType, error)
+	ClassifySeries(s model.Series) (model.ContentType, string, error)
 }
 
 // Filer moves/copies/hardlinks the series files into the destination root.
@@ -108,12 +117,27 @@ type PreviewEntry struct {
 	Note         string            `json:"note"`          // human note for the row
 }
 
+// SettingsProvider returns the current Settings on demand. The poller
+// reads through it at the top of each tick so user edits (download
+// roots, Suwayomi connection params) take effect on the next tick
+// without a process restart. *store.Store satisfies this directly.
+type SettingsProvider interface {
+	GetSettings() (model.Settings, error)
+}
+
+// SuwayomiClientFactory builds a fresh suwayomi.Client from the supplied
+// Settings on every call. Lives on the Poller so tests can substitute a
+// stub that never opens a real socket. Returns (nil, nil) when
+// Settings.SuwayomiBaseURL is empty — the poller treats that as
+// "feature disabled" and skips the refresh entirely.
+type SuwayomiClientFactory func(set model.Settings) (*suwayomi.Client, error)
+
 // Poller holds the wired-up dependencies and configuration for one orchestration tick.
 type Poller struct {
 	Scanner      Scanner
 	Classifier   Classifier
 	Filer        Filer
-	Planner      Planner                      // optional; used by Preview only
+	Planner      Planner // optional; used by Preview only
 	Kavita       Kavita
 	Unmatched    UnmatchedSink
 	Activity     ActivityWriter
@@ -123,6 +147,23 @@ type Poller struct {
 	LibraryRoots map[model.ContentType]string // content type → absolute library path
 	LibraryIDs   map[model.ContentType]int64  // content type → Kavita library ID
 	RecycleBin   *recyclebin.Bin              // optional; GC is called at end of each RunOnce tick
+
+	// Library Map (Plan B). All three optional; nil values disable the
+	// Suwayomi override path without affecting AniList classification.
+	//
+	// SuwayomiCache is the long-lived shared cache the classifier reads on
+	// the file-time hot path. The poller refreshes it at the top of each
+	// RunOnce tick.
+	//
+	// SuwayomiClient is the constructor that builds a fresh client from
+	// current Settings every tick (PR #28 fresh-per-call pattern). A nil
+	// factory or an empty SuwayomiBaseURL in Settings skips the refresh.
+	//
+	// Settings is read on every tick to learn the current SuwayomiBaseURL,
+	// auth params, and DownloadRoots (passed to PathCache.Refresh).
+	SuwayomiCache  *suwayomi.PathCache
+	SuwayomiClient SuwayomiClientFactory
+	Settings       SettingsProvider
 }
 
 // RunOnce performs one complete scan→classify→file→scan pass.
@@ -140,6 +181,17 @@ type Poller struct {
 // scan-triggered / error) AFTER the action completes — never before — so a
 // mid-tick crash cannot produce a phantom success entry.
 func (p *Poller) RunOnce() error {
+	// Library Map (Plan B): refresh the Suwayomi path cache at the top
+	// of every tick, BEFORE we scan, so the classifier's override path
+	// has fresh data when classifying any files this tick discovers.
+	//
+	// Failure here is non-fatal — the classifier falls through to
+	// AniList for cache misses, and previously-cached entries stay live
+	// (PathCache.Refresh swaps atomically on success only). One warning
+	// log per failed refresh, no activity entry — these are operator
+	// concerns, not per-series events.
+	p.refreshSuwayomiCache(context.Background())
+
 	series, err := p.Scanner.ScanAll()
 	if err != nil {
 		return err
@@ -149,15 +201,15 @@ func (p *Poller) RunOnce() error {
 	scanned := map[int64]bool{}
 
 	for _, s := range series {
-		ct, classifyErr := p.Classifier.Classify(s.Title)
+		ct, via, classifyErr := p.Classifier.ClassifySeries(s)
 		if classifyErr != nil || ct == model.TypeUnknown {
 			// Route to unmatched — classification failed or type unknown.
 			if err := p.Unmatched.MarkUnmatched(s); err != nil {
-				p.recordActivity(s.Title, model.ActionError,
+				p.recordActivityVia(s.Title, model.ActionError, via,
 					fmt.Sprintf("mark unmatched: %v", err))
 				continue
 			}
-			p.recordActivity(s.Title, model.ActionUnmatched, "")
+			p.recordActivityVia(s.Title, model.ActionUnmatched, via, "")
 			if p.Metrics != nil {
 				p.Metrics.IncUnmatched()
 			}
@@ -170,7 +222,7 @@ func (p *Poller) RunOnce() error {
 			// NOT something a user can fix from the Unmatched UI (reclassifying
 			// "Manhwa" → "Manhwa" would just loop forever). Record as error so
 			// the operator sees it in Activity and updates Settings.
-			p.recordActivity(s.Title, model.ActionError,
+			p.recordActivityVia(s.Title, model.ActionError, via,
 				fmt.Sprintf("type %s has no configured library root — check Settings", ct))
 			continue
 		}
@@ -178,14 +230,14 @@ func (p *Poller) RunOnce() error {
 		s.Type = ct
 		if err := p.Filer.File(s, root); err != nil {
 			// Filer error: record, do NOT trigger scan, move on.
-			p.recordActivity(s.Title, model.ActionError,
+			p.recordActivityVia(s.Title, model.ActionError, via,
 				fmt.Sprintf("file: %v", err))
 			if p.Metrics != nil {
 				p.Metrics.IncFileError()
 			}
 			continue
 		}
-		p.recordActivity(s.Title, model.ActionFiled,
+		p.recordActivityVia(s.Title, model.ActionFiled, via,
 			fmt.Sprintf("filed into %s", root))
 		if p.Metrics != nil {
 			p.Metrics.IncFilesFiled(string(ct))
@@ -196,7 +248,7 @@ func (p *Poller) RunOnce() error {
 		// same-type series in this tick).
 		if id, ok := p.LibraryIDs[ct]; ok && !scanned[id] {
 			if err := p.Kavita.ScanLibrary(id); err != nil {
-				p.recordActivity(s.Title, model.ActionError,
+				p.recordActivityVia(s.Title, model.ActionError, via,
 					fmt.Sprintf("kavita scan library %d: %v", id, err))
 				if p.Metrics != nil {
 					p.Metrics.IncKavitaScan("error")
@@ -204,7 +256,7 @@ func (p *Poller) RunOnce() error {
 				// Do NOT mark scanned[id] — let the next same-type series retry.
 				continue
 			}
-			p.recordActivity(s.Title, model.ActionScanTriggered,
+			p.recordActivityVia(s.Title, model.ActionScanTriggered, via,
 				fmt.Sprintf("library %d", id))
 			if p.Metrics != nil {
 				p.Metrics.IncKavitaScan("success")
@@ -231,10 +283,56 @@ func (p *Poller) RunOnce() error {
 	return nil
 }
 
+// refreshSuwayomiCache rebuilds the Suwayomi path cache from a fresh
+// client built off current Settings. Called at the top of every tick.
+//
+// No-op when any of the Library Map collaborators is missing:
+//   - SuwayomiCache nil (feature not wired)
+//   - SuwayomiClient factory nil
+//   - Settings provider nil
+//   - Settings.SuwayomiBaseURL empty (user has not configured Suwayomi)
+//
+// A failed refresh is logged once and swallowed — the tick continues
+// using whatever the cache already had. The classifier falls through to
+// AniList for any cache miss, so an unreachable Suwayomi degrades the
+// system to pre-Library-Map behaviour, not below it.
+func (p *Poller) refreshSuwayomiCache(ctx context.Context) {
+	if p.SuwayomiCache == nil || p.SuwayomiClient == nil || p.Settings == nil {
+		return
+	}
+	set, err := p.Settings.GetSettings()
+	if err != nil {
+		log.Printf("poller: suwayomi refresh: read settings: %v", err)
+		return
+	}
+	if set.SuwayomiBaseURL == "" {
+		return
+	}
+	client, err := p.SuwayomiClient(set)
+	if err != nil {
+		log.Printf("poller: suwayomi refresh: build client: %v", err)
+		return
+	}
+	if client == nil {
+		return
+	}
+	if err := p.SuwayomiCache.Refresh(ctx, client, set.DownloadRoots); err != nil {
+		log.Printf("poller: suwayomi refresh failed (continuing with last good cache): %v", err)
+	}
+}
+
 // recordActivity writes an activity entry best-effort. A failure to write
 // activity must never abort the tick. If Activity is nil (e.g. minimal test
 // setups), the call is a no-op.
 func (p *Poller) recordActivity(title string, action model.ActivityAction, detail string) {
+	p.recordActivityVia(title, action, "", detail)
+}
+
+// recordActivityVia is recordActivity plus the Via reason from the
+// classifier (e.g. "anilist:KR", "suwayomi-override:category=42",
+// "unmatched"). Empty Via is fine — paths that don't run through the
+// classifier (FileOne, recycle bin GC) just leave it blank.
+func (p *Poller) recordActivityVia(title string, action model.ActivityAction, via, detail string) {
 	if p.Activity == nil {
 		return
 	}
@@ -242,6 +340,7 @@ func (p *Poller) recordActivity(title string, action model.ActivityAction, detai
 		SeriesTitle: title,
 		Action:      action,
 		Detail:      detail,
+		Via:         via,
 	})
 }
 
@@ -354,7 +453,7 @@ func (p *Poller) Preview(ctx context.Context) ([]PreviewEntry, error) {
 			Source:     s.Source,
 		}
 
-		ct, classifyErr := p.Classifier.Classify(s.Title)
+		ct, _, classifyErr := p.Classifier.ClassifySeries(s)
 		if classifyErr != nil {
 			entry.Status = "unmatched"
 			entry.Reason = fmt.Sprintf("classify error: %v", classifyErr)

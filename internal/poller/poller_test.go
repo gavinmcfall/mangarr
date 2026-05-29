@@ -4,14 +4,18 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
+	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
 
 // fakeMetrics records MetricsSink calls so tests can assert call counts.
@@ -44,6 +48,34 @@ type fakeClassifier struct {
 }
 
 func (f fakeClassifier) Classify(string) (model.ContentType, error) { return f.t, f.err }
+
+// ClassifySeries adapts the poller.Classifier interface onto fakeClassifier's
+// simple title-only fake. Via is derived from the content type so tests can
+// continue to assert via tags without changing every existing fixture.
+func (f fakeClassifier) ClassifySeries(s model.Series) (model.ContentType, string, error) {
+	if f.err != nil {
+		return model.TypeUnknown, "unmatched", f.err
+	}
+	if f.t == model.TypeUnknown {
+		return model.TypeUnknown, "unmatched", nil
+	}
+	return f.t, "anilist:" + countryForType(f.t), nil
+}
+
+// countryForType is the inverse of model.CountryToType, used only by the
+// fake classifiers below to emit deterministic Via tags.
+func countryForType(ct model.ContentType) string {
+	switch ct {
+	case model.TypeManga:
+		return "JP"
+	case model.TypeManhwa:
+		return "KR"
+	case model.TypeManhua:
+		return "CN"
+	default:
+		return ""
+	}
+}
 
 type fakeScanner struct{ out []model.Series }
 
@@ -554,6 +586,17 @@ func (m *multiClassifier) Classify(title string) (model.ContentType, error) {
 	return model.TypeUnknown, nil
 }
 
+func (m *multiClassifier) ClassifySeries(s model.Series) (model.ContentType, string, error) {
+	ct, err := m.Classify(s.Title)
+	if err != nil {
+		return model.TypeUnknown, "unmatched", err
+	}
+	if ct == model.TypeUnknown {
+		return model.TypeUnknown, "unmatched", nil
+	}
+	return ct, "anilist:" + countryForType(ct), nil
+}
+
 // cacheCountingClassifier counts how many times CacheClassification is called.
 // It wraps a fakeClassifier and tracks cache writes.
 type cacheCountingClassifier struct {
@@ -563,6 +606,10 @@ type cacheCountingClassifier struct {
 
 func (c *cacheCountingClassifier) Classify(title string) (model.ContentType, error) {
 	return c.inner.Classify(title)
+}
+
+func (c *cacheCountingClassifier) ClassifySeries(s model.Series) (model.ContentType, string, error) {
+	return c.inner.ClassifySeries(s)
 }
 
 // fakePlanner records Plan calls and returns canned plan entries.
@@ -930,5 +977,171 @@ func TestFileOneStillWritesCacheOnSuccess(t *testing.T) {
 	}
 	if cache.writes[0].title != "Tower of God" || cache.writes[0].ct != model.TypeManhwa {
 		t.Fatalf("unexpected cache write: %+v", cache.writes[0])
+	}
+}
+
+// ---------- Library Map (Plan B) — Suwayomi refresh ----------
+
+// suwayomiStub returns an httptest.Server that serves a single empty
+// library to /api/graphql. Good enough to make PathCache.Refresh
+// succeed without exercising the full GraphQL surface.
+func suwayomiStub(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"mangas":{"nodes":[]}}}`))
+	}))
+}
+
+// stubSettingsProvider hands back a fixed Settings on every call.
+type stubSettingsProvider struct{ s model.Settings }
+
+func (p *stubSettingsProvider) GetSettings() (model.Settings, error) { return p.s, nil }
+
+// TestRunOnceCallsSuwayomiRefreshWhenConfigured covers:
+// "The poller shall call PathCache.Refresh at the top of each tick."
+func TestRunOnceCallsSuwayomiRefreshWhenConfigured(t *testing.T) {
+	srv := suwayomiStub(t)
+	defer srv.Close()
+
+	cache := suwayomi.NewPathCache()
+	var factoryCalls int32
+
+	p := &Poller{
+		Scanner:    fakeScanner{out: nil},
+		Classifier: fakeClassifier{t: model.TypeUnknown},
+		Filer:      &recorder{},
+		Kavita:     &recorder{},
+		Unmatched:  &recorder{},
+		Activity:   &recorder{},
+		SuwayomiCache: cache,
+		SuwayomiClient: func(set model.Settings) (*suwayomi.Client, error) {
+			atomic.AddInt32(&factoryCalls, 1)
+			return suwayomi.New(srv.URL, suwayomi.NoAuth{}), nil
+		},
+		Settings: &stubSettingsProvider{s: model.Settings{
+			SuwayomiBaseURL: srv.URL,
+		}},
+	}
+
+	if err := p.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := atomic.LoadInt32(&factoryCalls); got != 1 {
+		t.Errorf("SuwayomiClient factory: want 1 call, got %d", got)
+	}
+	// Refresh succeeded → cache has been swapped in. Empty library
+	// snapshot just means zero entries — Size() will be 0 but it's
+	// "the latest refresh" rather than "never refreshed". We can't
+	// distinguish those from Size alone, so the factoryCalls assertion
+	// is what really pins down "Refresh was called". A successful
+	// Refresh leaves Size() at zero here.
+	if got := cache.Size(); got != 0 {
+		t.Errorf("cache.Size after refresh of empty library: want 0, got %d", got)
+	}
+}
+
+// TestRunOnceContinuesWhenSuwayomiRefreshFails covers:
+// "If Suwayomi is unreachable during a poller tick, the tick shall
+// continue and rely on previously-cached entries (or fall through to
+// AniList for cache misses)."
+func TestRunOnceContinuesWhenSuwayomiRefreshFails(t *testing.T) {
+	// Closed server → every request errors out.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close()
+
+	cache := suwayomi.NewPathCache()
+	rec := &recorder{}
+
+	// Plant a series so we can prove the tick continued (Filer.File was called).
+	series := model.Series{Title: "Solo Leveling", SourcePath: "/dl/Solo Leveling"}
+	p := &Poller{
+		Scanner:    fakeScanner{out: []model.Series{series}},
+		Classifier: fakeClassifier{t: model.TypeManhwa},
+		Filer:      rec,
+		Kavita:     rec,
+		Unmatched:  rec,
+		Activity:   rec,
+		LibraryRoots: map[model.ContentType]string{
+			model.TypeManhwa: filepath.FromSlash("/lib/Manhwa"),
+		},
+		LibraryIDs:    map[model.ContentType]int64{model.TypeManhwa: 2},
+		SuwayomiCache: cache,
+		SuwayomiClient: func(set model.Settings) (*suwayomi.Client, error) {
+			return suwayomi.New(srv.URL, suwayomi.NoAuth{}), nil
+		},
+		Settings: &stubSettingsProvider{s: model.Settings{
+			SuwayomiBaseURL: srv.URL,
+		}},
+	}
+
+	if err := p.RunOnce(); err != nil {
+		t.Fatalf("RunOnce returned error after refresh failure: %v", err)
+	}
+	if len(rec.filed) != 1 {
+		t.Errorf("tick must continue after refresh failure: want 1 filed, got %d", len(rec.filed))
+	}
+}
+
+// TestRunOnceSkipsRefreshWhenSuwayomiURLEmpty covers:
+// "Poller does not call Refresh when SuwayomiBaseURL is empty."
+func TestRunOnceSkipsRefreshWhenSuwayomiURLEmpty(t *testing.T) {
+	var factoryCalls int32
+	cache := suwayomi.NewPathCache()
+	p := &Poller{
+		Scanner:    fakeScanner{out: nil},
+		Classifier: fakeClassifier{t: model.TypeUnknown},
+		Filer:      &recorder{},
+		Kavita:     &recorder{},
+		Unmatched:  &recorder{},
+		Activity:   &recorder{},
+		SuwayomiCache: cache,
+		SuwayomiClient: func(set model.Settings) (*suwayomi.Client, error) {
+			atomic.AddInt32(&factoryCalls, 1)
+			return nil, nil
+		},
+		Settings: &stubSettingsProvider{s: model.Settings{
+			// SuwayomiBaseURL deliberately empty.
+		}},
+	}
+	if err := p.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := atomic.LoadInt32(&factoryCalls); got != 0 {
+		t.Errorf("factory must not be called when SuwayomiBaseURL is empty, got %d", got)
+	}
+}
+
+// TestRunOnceWritesViaIntoActivity asserts that the via tag the
+// classifier returns ends up on the ActivityEntry.
+func TestRunOnceWritesViaIntoActivity(t *testing.T) {
+	s := model.Series{Title: "Solo Leveling", SourcePath: "/dl/Solo Leveling"}
+	rec := &recorder{}
+	p := &Poller{
+		Scanner:    fakeScanner{out: []model.Series{s}},
+		Classifier: fakeClassifier{t: model.TypeManhwa},
+		Filer:      rec,
+		Kavita:     rec,
+		Unmatched:  rec,
+		Activity:   rec,
+		LibraryRoots: map[model.ContentType]string{
+			model.TypeManhwa: filepath.FromSlash("/lib/Manhwa"),
+		},
+		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 2},
+	}
+	if err := p.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	var sawFiled bool
+	for _, e := range rec.activity {
+		if e.Action == model.ActionFiled {
+			sawFiled = true
+			if e.Via != "anilist:KR" {
+				t.Errorf("ActionFiled Via: want anilist:KR, got %q", e.Via)
+			}
+		}
+	}
+	if !sawFiled {
+		t.Errorf("expected at least one ActionFiled activity entry")
 	}
 }

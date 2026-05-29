@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
 	_ "modernc.org/sqlite"
@@ -54,7 +55,21 @@ CREATE TABLE IF NOT EXISTS classification_cache (
   title_norm TEXT PRIMARY KEY,
   type TEXT NOT NULL
 );`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Additive migrations — idempotent. Each ADD COLUMN runs once per
+	// fresh DB; on subsequent boots SQLite returns "duplicate column" and
+	// we ignore it. This avoids a separate migrations table for what is
+	// effectively a one-off Plan B addition.
+	if _, err := s.db.Exec(`ALTER TABLE activity ADD COLUMN via TEXT NOT NULL DEFAULT ''`); err != nil {
+		// SQLite reports "duplicate column name: via" once the migration
+		// has run. Any other error is fatal.
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) UpsertSeries(in model.Series) (int64, error) {
@@ -116,8 +131,8 @@ func (s *Store) ListSeries() ([]model.Series, error) {
 }
 
 func (s *Store) AddActivity(e model.ActivityEntry) error {
-	_, err := s.db.Exec(`INSERT INTO activity (series_title, action, detail) VALUES (?,?,?)`,
-		e.SeriesTitle, string(e.Action), e.Detail)
+	_, err := s.db.Exec(`INSERT INTO activity (series_title, action, detail, via) VALUES (?,?,?,?)`,
+		e.SeriesTitle, string(e.Action), e.Detail, e.Via)
 	return err
 }
 
@@ -174,7 +189,7 @@ func (s *Store) ListUnmatched() ([]model.Series, error) {
 
 // ListActivity returns the most recent `limit` activity entries, newest first.
 func (s *Store) ListActivity(limit int) ([]model.ActivityEntry, error) {
-	rows, err := s.db.Query(`SELECT id,ts,series_title,action,detail FROM activity ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT id,ts,series_title,action,detail,via FROM activity ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +198,7 @@ func (s *Store) ListActivity(limit int) ([]model.ActivityEntry, error) {
 	for rows.Next() {
 		var e model.ActivityEntry
 		var action string
-		if err := rows.Scan(&e.ID, &e.Time, &e.SeriesTitle, &action, &e.Detail); err != nil {
+		if err := rows.Scan(&e.ID, &e.Time, &e.SeriesTitle, &action, &e.Detail, &e.Via); err != nil {
 			return nil, err
 		}
 		e.Action = model.ActivityAction(action)
