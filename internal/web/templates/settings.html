@@ -217,6 +217,59 @@
 </div>
 
 </form>
+
+<!-- Backups card (outside the settings form — has its own HTMX action) -->
+<div class="settings-sections" style="margin-top:24px;" id="backups-section">
+  <div class="settings-card">
+    <div class="settings-card-header">
+      <p class="settings-card-title">Backups</p>
+      <p class="settings-card-desc">SQLite database snapshots via VACUUM INTO. Download to restore after data loss.</p>
+    </div>
+    <div class="settings-card-body">
+      <div class="settings-row" style="margin-bottom:12px;">
+        <button class="btn btn-primary"
+          hx-post="/api/backups/run"
+          hx-target="#backup-list"
+          hx-swap="innerHTML"
+          hx-on::after-request="htmx.ajax('GET','/api/backups',{target:'#backup-list',swap:'innerHTML'})">
+          Backup now
+        </button>
+      </div>
+      <div id="backup-list">
+{{if .Backups}}
+<table>
+  <thead><tr>
+    <th>Name</th>
+    <th>Size</th>
+    <th>Age</th>
+    <th></th>
+  </tr></thead>
+  <tbody>
+  {{range .Backups}}
+  <tr>
+    <td class="td-mono">{{.Name}}</td>
+    <td class="td-dim">{{.SizeHuman}}</td>
+    <td class="td-dim">{{.AgeHuman}}</td>
+    <td class="td-right"><a href="/api/backups/{{.Name}}" class="btn-sm" download>Download</a></td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty">No backups yet. Click "Backup now" or wait for the scheduled backup.</p>
+{{end}}
+      </div>
+      <div class="settings-row" style="margin-top:12px;">
+        <div class="input-hint">
+          Path: <code>{{.BackupDir}}</code> &nbsp;&bull;&nbsp;
+          Retention: {{.BackupRetentionDays}} days &nbsp;&bull;&nbsp;
+          Interval: every {{.BackupIntervalHours}} hours
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
   </div>
 </div>
 {{end}}

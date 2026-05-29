@@ -16,6 +16,9 @@
 //	GET  /api/settings               → JSON current settings
 //	PUT  /api/settings               → JSON update settings
 //	GET  /api/diskspace              → JSON disk space for all roots
+//	GET  /api/backups                → JSON list of backup entries (newest first)
+//	POST /api/backups/run            → Trigger immediate backup; returns new Entry as JSON
+//	GET  /api/backups/{name}         → Download a backup file
 //	GET  /static/*                   → Embedded static assets (htmx.min.js)
 package web
 
@@ -25,9 +28,12 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/gavinmcfall/mangarr/internal/dbbackup"
 	"github.com/gavinmcfall/mangarr/internal/diskspace"
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
@@ -51,6 +57,14 @@ type Runner interface {
 	RunOnce() error
 }
 
+// BackupConfig holds the backup-scheduler configuration passed into the Handler
+// for display on the Settings page.
+type BackupConfig struct {
+	Dir           string
+	RetentionDays int
+	IntervalHours int
+}
+
 // Handler is the HTTP handler for the web UI and JSON API.
 type Handler struct {
 	mux                     *http.ServeMux
@@ -60,6 +74,9 @@ type Handler struct {
 	downloadRoots           []string // from config.DownloadRoots; used by disk-space endpoints
 	recycleBinPath          string
 	recycleBinRetentionDays int
+	backupDir               string
+	backupCfg               BackupConfig
+	backupFn                func() (dbbackup.Entry, error) // injected for on-demand backup
 }
 
 // NewHandler wires up all routes and parses embedded templates.
@@ -67,7 +84,17 @@ type Handler struct {
 // recycleBinPath and recycleBinRetentionDays are env-derived config values
 // surfaced read-only on the Settings page.
 // downloadRoots is the list of download root paths (may be empty in tests).
+// Backup API is wired separately via NewHandlerWithBackup (returns 503 here).
 func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, downloadRoots)
+}
+
+// NewHandlerWithBackup is like NewHandler but also wires the backup API.
+func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, downloadRoots)
+}
+
+func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), downloadRoots []string) *Handler {
 	h := &Handler{
 		mux:                     http.NewServeMux(),
 		tmpls:                   parsePageTemplates(),
@@ -76,6 +103,9 @@ func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRet
 		downloadRoots:           downloadRoots,
 		recycleBinPath:          recycleBinPath,
 		recycleBinRetentionDays: recycleBinRetentionDays,
+		backupDir:               cfg.Dir,
+		backupCfg:               cfg,
+		backupFn:                backupFn,
 	}
 
 	// Static assets
@@ -102,6 +132,11 @@ func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRet
 
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
+
+	// Backup API
+	h.mux.HandleFunc("GET /api/backups", h.apiListBackups)
+	h.mux.HandleFunc("POST /api/backups/run", h.apiRunBackup)
+	h.mux.HandleFunc("GET /api/backups/{name}", h.apiDownloadBackup)
 
 	return h
 }
@@ -206,6 +241,18 @@ type settingsPageData struct {
 	DiskRows                []diskSpaceRow
 	RecycleBinPath          string
 	RecycleBinRetentionDays int
+	BackupDir               string
+	BackupRetentionDays     int
+	BackupIntervalHours     int
+	Backups                 []backupEntryView
+	BackupNow               time.Time
+}
+
+// backupEntryView wraps dbbackup.Entry with pre-formatted display strings.
+type backupEntryView struct {
+	dbbackup.Entry
+	SizeHuman string
+	AgeHuman  string
 }
 
 // ---- HTML page handlers ----
@@ -270,6 +317,18 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 	// Build disk-space rows: download roots first, then library roots.
 	diskRows := h.buildDiskRows(settings)
 
+	// Load backup list — treat a missing dir as empty, not an error.
+	now := time.Now()
+	entries, _ := dbbackup.List(h.backupDir) // error → nil slice → empty view
+	views := make([]backupEntryView, 0, len(entries))
+	for _, e := range entries {
+		views = append(views, backupEntryView{
+			Entry:     e,
+			SizeHuman: formatBytes(e.SizeBytes),
+			AgeHuman:  formatAge(now, e.ModTime),
+		})
+	}
+
 	// Pre-extract values typed-keyed by model.ContentType into plain fields,
 	// so the template can use {{.RootManga}} etc. with no reflection-time
 	// type mismatch. See settingsPageData doc comment.
@@ -288,6 +347,11 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		DiskRows:                diskRows,
 		RecycleBinPath:          h.recycleBinPath,
 		RecycleBinRetentionDays: h.recycleBinRetentionDays,
+		BackupDir:               h.backupCfg.Dir,
+		BackupRetentionDays:     h.backupCfg.RetentionDays,
+		BackupIntervalHours:     h.backupCfg.IntervalHours,
+		Backups:                 views,
+		BackupNow:               now,
 	})
 }
 
@@ -621,6 +685,66 @@ func (h *Handler) apiReclassify(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, row)
+}
+
+// ---- backup API handlers ----
+
+func (h *Handler) apiListBackups(w http.ResponseWriter, r *http.Request) {
+	entries, err := dbbackup.List(h.backupDir)
+	if err != nil {
+		jsonErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, entries)
+}
+
+func (h *Handler) apiRunBackup(w http.ResponseWriter, r *http.Request) {
+	if h.backupFn == nil {
+		jsonErr(w, fmt.Errorf("backup not configured"), http.StatusServiceUnavailable)
+		return
+	}
+	entry, err := h.backupFn()
+	if err != nil {
+		jsonErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, entry)
+}
+
+func (h *Handler) apiDownloadBackup(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !dbbackup.ValidateName(name) {
+		http.Error(w, "invalid backup name", http.StatusBadRequest)
+		return
+	}
+	// Extra defence: reject path separators even after ValidateName.
+	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+		http.Error(w, "invalid backup name", http.StatusBadRequest)
+		return
+	}
+	if h.backupDir == "" {
+		http.Error(w, "backup not configured", http.StatusServiceUnavailable)
+		return
+	}
+	path := h.backupDir + "/" + name
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	http.ServeContent(w, r, name, info.ModTime(), f)
 }
 
 // ---- helpers ----

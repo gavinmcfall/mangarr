@@ -1,14 +1,18 @@
 package web
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gavinmcfall/mangarr/internal/dbbackup"
 	"github.com/gavinmcfall/mangarr/internal/model"
+	_ "modernc.org/sqlite"
 )
 
 // fakeStore implements web.Store with canned in-memory data.
@@ -449,6 +453,153 @@ func TestAPIPutSettingsInvalidSchemeReturns400(t *testing.T) {
 	// Settings must NOT have been persisted.
 	if st.settings.RenameScheme != savedBefore {
 		t.Fatalf("settings were persisted despite validation failure")
+	}
+}
+
+// ---- backup API tests ----
+
+// newBackupHandler creates a Handler wired with a real in-memory SQLite backup function
+// and a temp backup directory.
+func newBackupHandler(t *testing.T) (*Handler, string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('test')`); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	dir := t.TempDir()
+	cfg := BackupConfig{Dir: dir, RetentionDays: 14, IntervalHours: 24}
+	backupFn := func() (dbbackup.Entry, error) {
+		path, err := dbbackup.Backup(db, dir, time.Now())
+		if err != nil {
+			return dbbackup.Entry{}, err
+		}
+		entries, err := dbbackup.List(dir)
+		if err != nil {
+			return dbbackup.Entry{}, err
+		}
+		for _, e := range entries {
+			if e.Path == path {
+				return e, nil
+			}
+		}
+		return dbbackup.Entry{Name: path}, nil
+	}
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandlerWithBackup(st, &fakeRunner{}, "", 0, cfg, backupFn)
+	return h, dir
+}
+
+func TestAPIListBackupsReturnsJSON(t *testing.T) {
+	h, _ := newBackupHandler(t)
+
+	// Run a backup first so there is at least one entry.
+	runReq := httptest.NewRequest(http.MethodPost, "/api/backups/run", nil)
+	runRR := httptest.NewRecorder()
+	h.ServeHTTP(runRR, runReq)
+	if runRR.Code != http.StatusOK {
+		t.Fatalf("POST /api/backups/run: want 200, got %d; body: %s", runRR.Code, runRR.Body.String())
+	}
+
+	// Now list backups.
+	req := httptest.NewRequest(http.MethodGet, "/api/backups", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/backups: want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	var entries []dbbackup.Entry
+	if err := json.Unmarshal(rr.Body.Bytes(), &entries); err != nil {
+		t.Fatalf("parse JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if len(entries) < 1 {
+		t.Fatalf("want at least 1 backup entry, got %d", len(entries))
+	}
+	if entries[0].Name == "" {
+		t.Fatal("entry has empty Name")
+	}
+}
+
+func TestAPIDownloadBackupServesFile(t *testing.T) {
+	h, _ := newBackupHandler(t)
+
+	// Run a backup to create the file.
+	runReq := httptest.NewRequest(http.MethodPost, "/api/backups/run", nil)
+	runRR := httptest.NewRecorder()
+	h.ServeHTTP(runRR, runReq)
+	if runRR.Code != http.StatusOK {
+		t.Fatalf("POST /api/backups/run: want 200, got %d", runRR.Code)
+	}
+	var entry dbbackup.Entry
+	if err := json.Unmarshal(runRR.Body.Bytes(), &entry); err != nil {
+		t.Fatalf("parse entry JSON: %v", err)
+	}
+
+	// Download by name.
+	req := httptest.NewRequest(http.MethodGet, "/api/backups/"+entry.Name, nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/backups/<name>: want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.Len() == 0 {
+		t.Fatal("downloaded backup has zero bytes")
+	}
+	ct := rr.Header().Get("Content-Type")
+	if ct != "application/octet-stream" {
+		t.Fatalf("want Content-Type application/octet-stream, got %q", ct)
+	}
+}
+
+func TestAPIDownloadBackupRejectsTraversal(t *testing.T) {
+	h, _ := newBackupHandler(t)
+
+	for _, badName := range []string{
+		"../etc/passwd",
+		"..%2fetc%2fpasswd",
+		"mangarr-20260101-000000.db/../../etc/passwd",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/backups/"+badName, nil)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code == http.StatusOK {
+			t.Errorf("traversal name %q: want non-200, got 200", badName)
+		}
+	}
+}
+
+func TestSettingsPageRendersBackups(t *testing.T) {
+	h, _ := newBackupHandler(t)
+
+	// Run a backup first.
+	runReq := httptest.NewRequest(http.MethodPost, "/api/backups/run", nil)
+	h.ServeHTTP(httptest.NewRecorder(), runReq)
+
+	// GET /settings should contain the backup dir and at least one backup name.
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Backups") {
+		t.Fatalf("settings page does not contain 'Backups' heading; body excerpt:\n%s",
+			snippet(body, "Backups", 300))
+	}
+	if !strings.Contains(body, "mangarr-") {
+		t.Fatalf("settings page does not contain a backup filename; body excerpt:\n%s",
+			snippet(body, "mangarr-", 300))
+
 	}
 }
 
