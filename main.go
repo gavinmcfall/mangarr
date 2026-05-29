@@ -45,6 +45,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
 	"github.com/gavinmcfall/mangarr/internal/scanner"
 	"github.com/gavinmcfall/mangarr/internal/store"
+	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
 	"github.com/gavinmcfall/mangarr/internal/web"
 )
@@ -101,6 +102,13 @@ func main() {
 	anilistEndpoint := os.Getenv("MANGARR_ANILIST_ENDPOINT")
 	clf := classifier.NewWithCache(anilistEndpoint, st)
 	clf.Metrics = metricsReg
+
+	// ---- suwayomi path cache (Library Map — Plan B) ----
+	// Long-lived, shared between the classifier (hot path) and the
+	// poller (refreshes it at the top of every tick). The cache stays
+	// empty + harmless until the user configures Suwayomi via Settings.
+	suwayomiCache := suwayomi.NewPathCache()
+	clf.WithSuwayomi(suwayomiCache, st)
 
 	// ---- kavita client ----
 	kavitaClient := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)
@@ -160,6 +168,14 @@ func main() {
 		LibraryRoots: settings.LibraryRoots,
 		LibraryIDs:   libIDs,
 		RecycleBin:   bin,
+
+		// Library Map (Plan B) — fresh-per-call Suwayomi client built off
+		// the current Settings on every tick. nil-safe if the user
+		// hasn't configured Suwayomi: the factory returns (nil, nil)
+		// when BaseURL is empty and the poller skips the refresh.
+		SuwayomiCache:  suwayomiCache,
+		SuwayomiClient: newSuwayomiClient,
+		Settings:       st,
 	}
 
 	// ---- backup function (closure over db and config) ----
@@ -196,7 +212,7 @@ func main() {
 			return pm
 		}()) * time.Minute,
 		RunFn: func(ctx context.Context) error {
-			return p.RunOnce()
+			return p.RunOnce(ctx)
 		},
 	}); err != nil {
 		log.Fatalf("tasks: register poll-scan: %v", err)
@@ -484,4 +500,30 @@ type filerAdapter struct {
 
 func (a *filerAdapter) File(s model.Series, dstRoot string) error {
 	return a.inner.File(s.Title, s.SourcePath, dstRoot)
+}
+
+// newSuwayomiClient is the SuwayomiClientFactory the poller invokes at
+// the top of every tick. It builds a fresh client off the supplied
+// Settings — never captures state at boot — so users can edit the
+// Suwayomi URL/credentials in the UI and have them take effect on the
+// next tick without a pod restart (PR #28 fresh-per-call pattern).
+//
+// Returns (nil, nil) when SuwayomiBaseURL is empty so the poller can
+// distinguish "feature not configured" from "construction failed".
+func newSuwayomiClient(set model.Settings) (*suwayomi.Client, error) {
+	if set.SuwayomiBaseURL == "" {
+		return nil, nil
+	}
+	var auth suwayomi.Auth
+	switch set.SuwayomiAuthType {
+	case model.SuwayomiAuthBasic:
+		auth = suwayomi.BasicAuth{Username: set.SuwayomiUsername, Password: set.SuwayomiPassword}
+	case model.SuwayomiAuthSimple:
+		auth = &suwayomi.SimpleLoginAuth{Username: set.SuwayomiUsername, Password: set.SuwayomiPassword}
+	case model.SuwayomiAuthUI:
+		auth = &suwayomi.UILoginAuth{Username: set.SuwayomiUsername, Password: set.SuwayomiPassword}
+	default:
+		auth = suwayomi.NoAuth{}
+	}
+	return suwayomi.New(set.SuwayomiBaseURL, auth), nil
 }

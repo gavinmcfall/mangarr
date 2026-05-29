@@ -95,6 +95,94 @@ func TestListSeries(t *testing.T) {
 	}
 }
 
+// TestSettingsRoundTripSuwayomi verifies the Plan B Settings additions
+// (Suwayomi connection params + category overrides) survive a JSON
+// round-trip through the store. Covers the spec truth statement:
+// "Settings shall round-trip SuwayomiBaseURL, SuwayomiAuthType,
+// SuwayomiUsername, SuwayomiPassword, and SuwayomiCategoryOverrides
+// without lossy conversion."
+func TestSettingsRoundTripSuwayomi(t *testing.T) {
+	s := newTestStore(t)
+	want := model.Settings{
+		FileMode:                  model.ModeHardlink,
+		RenameScheme:              "{series}/{series} - Ch.{chapter}.cbz",
+		PollMinutes:               15,
+		SuwayomiBaseURL:           "http://suwayomi.entertainment.svc:4567",
+		SuwayomiAuthType:          model.SuwayomiAuthSimple,
+		SuwayomiUsername:          "alice",
+		SuwayomiPassword:          "test-placeholder-pw",
+		SuwayomiCategoryOverrides: map[int64]int64{42: 2, 43: 3, 9: 1},
+	}
+	if err := s.SaveSettings(want); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := s.GetSettings()
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.SuwayomiBaseURL != want.SuwayomiBaseURL {
+		t.Errorf("SuwayomiBaseURL: want %q, got %q", want.SuwayomiBaseURL, got.SuwayomiBaseURL)
+	}
+	if got.SuwayomiAuthType != want.SuwayomiAuthType {
+		t.Errorf("SuwayomiAuthType: want %q, got %q", want.SuwayomiAuthType, got.SuwayomiAuthType)
+	}
+	if got.SuwayomiUsername != want.SuwayomiUsername {
+		t.Errorf("SuwayomiUsername: want %q, got %q", want.SuwayomiUsername, got.SuwayomiUsername)
+	}
+	if got.SuwayomiPassword != want.SuwayomiPassword {
+		t.Errorf("SuwayomiPassword: want %q, got %q", want.SuwayomiPassword, got.SuwayomiPassword)
+	}
+	if len(got.SuwayomiCategoryOverrides) != len(want.SuwayomiCategoryOverrides) {
+		t.Fatalf("override map size: want %d, got %d (%v)", len(want.SuwayomiCategoryOverrides), len(got.SuwayomiCategoryOverrides), got.SuwayomiCategoryOverrides)
+	}
+	for k, v := range want.SuwayomiCategoryOverrides {
+		if got.SuwayomiCategoryOverrides[k] != v {
+			t.Errorf("override[%d]: want %d, got %d", k, v, got.SuwayomiCategoryOverrides[k])
+		}
+	}
+}
+
+// TestSettingsRoundTripSuwayomiEmptyAndNilMap pins down the two edge
+// shapes for SuwayomiCategoryOverrides: an explicitly empty map and a
+// nil map. Both must round-trip without surfacing as garbage on read.
+// The contract is "no entries", regardless of which shape went in.
+func TestSettingsRoundTripSuwayomiEmptyAndNilMap(t *testing.T) {
+	t.Run("nil map", func(t *testing.T) {
+		s := newTestStore(t)
+		want := model.Settings{
+			FileMode:                  model.ModeHardlink,
+			SuwayomiCategoryOverrides: nil,
+		}
+		if err := s.SaveSettings(want); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		got, err := s.GetSettings()
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if len(got.SuwayomiCategoryOverrides) != 0 {
+			t.Fatalf("want zero-entry override map, got %v", got.SuwayomiCategoryOverrides)
+		}
+	})
+	t.Run("empty map", func(t *testing.T) {
+		s := newTestStore(t)
+		want := model.Settings{
+			FileMode:                  model.ModeHardlink,
+			SuwayomiCategoryOverrides: map[int64]int64{},
+		}
+		if err := s.SaveSettings(want); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		got, err := s.GetSettings()
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if len(got.SuwayomiCategoryOverrides) != 0 {
+			t.Fatalf("want zero-entry override map, got %v", got.SuwayomiCategoryOverrides)
+		}
+	})
+}
+
 func TestCacheClassification(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.CacheClassification("solo leveling", model.TypeManhwa); err != nil {

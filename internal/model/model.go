@@ -60,6 +60,12 @@ type ActivityEntry struct {
 	SeriesTitle string
 	Action      ActivityAction
 	Detail      string
+	// Via records which classification path produced this entry, e.g.
+	// "suwayomi-override:category=42", "anilist:KR", "anilist:JP", or
+	// "unmatched". Empty for entries written before the Library Map
+	// feature shipped (Plan B); the activity log renderer treats empty
+	// as "unknown / legacy".
+	Via string
 }
 
 type FileMode string
@@ -70,15 +76,39 @@ const (
 	ModeCopy     FileMode = "copy"
 )
 
+// SuwayomiAuthType selects which upstream auth flow the suwayomi.Client
+// uses. Values map 1:1 onto Suwayomi's `server.authMode` setting.
+type SuwayomiAuthType string
+
+const (
+	SuwayomiAuthNone   SuwayomiAuthType = "none"
+	SuwayomiAuthBasic  SuwayomiAuthType = "basic"
+	SuwayomiAuthSimple SuwayomiAuthType = "simple" // simple_login
+	SuwayomiAuthUI     SuwayomiAuthType = "ui"     // ui_login
+)
+
 // Settings is the single mutable config row (id=1).
 type Settings struct {
-	DownloadRoots      []string               `json:"download_roots"`   // managed via UI; env seeds on first boot
+	DownloadRoots      []string              `json:"download_roots"` // managed via UI; env seeds on first boot
 	FileMode           FileMode
-	RenameScheme       string                  // e.g. "{series}/{series} - Ch.{chapter}.cbz"
+	RenameScheme       string // e.g. "{series}/{series} - Ch.{chapter}.cbz"
 	PollMinutes        int
-	LibraryRoots       map[ContentType]string  // Manga -> /media/Library/Books/Manga, ...
+	LibraryRoots       map[ContentType]string // Manga -> /media/Library/Books/Manga, ...
 	KavitaBaseURL      string
-	KavitaAPIKey       string                  // API key for Kavita plugin authentication
-	KavitaLibIDs       []int64                 // legacy: flat list of library IDs (kept for compatibility)
-	KavitaLibIDsByType map[ContentType]int64   // per-type library IDs (used by poller)
+	KavitaAPIKey       string                // API key for Kavita plugin authentication
+	KavitaLibIDs       []int64               // legacy: flat list of library IDs (kept for compatibility)
+	KavitaLibIDsByType map[ContentType]int64 // per-type library IDs (used by poller)
+
+	// --- Suwayomi (Library Map) ---
+	// User-editable, fresh-per-call. Empty BaseURL = feature disabled,
+	// classifier short-circuits to the AniList path unchanged.
+	SuwayomiBaseURL  string           `json:"suwayomi_base_url,omitempty"`
+	SuwayomiAuthType SuwayomiAuthType `json:"suwayomi_auth_type,omitempty"`
+	SuwayomiUsername string           `json:"suwayomi_username,omitempty"`
+	SuwayomiPassword string           `json:"suwayomi_password,omitempty"`
+	// SuwayomiCategoryOverrides maps a Suwayomi category ID to a Kavita
+	// library ID. First-match-wins by Suwayomi `category.order` (the
+	// PathCache returns CategoryIDs in that order). Empty/nil map =
+	// feature disabled = pure AniList classification.
+	SuwayomiCategoryOverrides map[int64]int64 `json:"suwayomi_category_overrides,omitempty"`
 }
