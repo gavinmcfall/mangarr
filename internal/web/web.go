@@ -1350,7 +1350,7 @@ func (h *Handler) apiBrowseFragment(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `<div class="browse-actions">`)
 		fmt.Fprint(w,
 			`<button type="button" class="btn browse-cancel-btn" `+
-				`onclick="var m=document.getElementById('browse-modal');m.innerHTML='';m.classList.remove('browse-modal-open')">Cancel</button>`,
+				`onclick="var w=document.getElementById('browse-modal');w.classList.remove('browse-modal-open');document.getElementById('browse-modal-body').innerHTML=''">Cancel</button>`,
 		)
 		fmt.Fprint(w, `</div></div>`)
 		return
@@ -1404,12 +1404,12 @@ func (h *Handler) apiBrowseFragment(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, `<div class="browse-actions">`)
 	fmt.Fprintf(w,
 		`<button type="button" class="btn btn-primary browse-select-btn" `+
-			`onclick="document.getElementById('%s').value='%s';var m=document.getElementById('browse-modal');m.innerHTML='';m.classList.remove('browse-modal-open')">Select this folder</button>`,
+			`onclick="document.getElementById('%s').value='%s';var w=document.getElementById('browse-modal');w.classList.remove('browse-modal-open');document.getElementById('browse-modal-body').innerHTML=''">Select this folder</button>`,
 		html(target), html(abs),
 	)
 	fmt.Fprint(w,
 		`<button type="button" class="btn browse-cancel-btn" `+
-			`onclick="var m=document.getElementById('browse-modal');m.innerHTML='';m.classList.remove('browse-modal-open')">Cancel</button>`,
+			`onclick="var w=document.getElementById('browse-modal');w.classList.remove('browse-modal-open');document.getElementById('browse-modal-body').innerHTML=''">Cancel</button>`,
 	)
 	fmt.Fprint(w, `</div></div>`)
 }
