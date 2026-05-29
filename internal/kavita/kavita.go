@@ -40,10 +40,18 @@ func New(base, apiKey string) *Client {
 
 // authenticate exchanges the API key for a short-lived JWT.
 // POST /api/plugin/authenticate?apiKey=...&pluginName=mangarr
-func (c *Client) authenticate() (string, error) {
+//
+// ctx is honoured so cancellation/deadlines flow through to the underlying
+// HTTP request. Callers without a context can pass context.Background().
+func (c *Client) authenticate(ctx context.Context) (string, error) {
 	u := fmt.Sprintf("%s/api/plugin/authenticate?apiKey=%s&pluginName=mangarr",
 		c.base, url.QueryEscape(c.apiKey))
-	resp, err := c.http.Post(u, "application/json", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		return "", fmt.Errorf("kavita auth request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("kavita auth request: %w", err)
 	}
@@ -68,7 +76,7 @@ func (c *Client) authenticate() (string, error) {
 // and discarding the token. It is used by the health check to confirm the
 // base URL and API key are correct without triggering any library operations.
 func (c *Client) Ping(ctx context.Context) error {
-	_, err := c.authenticate()
+	_, err := c.authenticate(ctx)
 	return err
 }
 
@@ -77,7 +85,7 @@ func (c *Client) Ping(ctx context.Context) error {
 //
 // The returned slice is sorted by Library.Name for stable UI ordering.
 func (c *Client) ListLibraries(ctx context.Context) ([]Library, error) {
-	token, err := c.authenticate()
+	token, err := c.authenticate(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +117,7 @@ func (c *Client) ListLibraries(ctx context.Context) ([]Library, error) {
 // It authenticates first, then POST /api/library/scan with the bearer token.
 // libraryID is int64 to match model.Settings.KavitaLibIDs []int64.
 func (c *Client) ScanLibrary(libraryID int64) error {
-	token, err := c.authenticate()
+	token, err := c.authenticate(context.Background())
 	if err != nil {
 		return err
 	}

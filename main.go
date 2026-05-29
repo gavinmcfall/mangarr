@@ -239,7 +239,6 @@ func main() {
 		HealthReg:               healthReg,
 		Metrics:                 metricsReg,
 		Previewer:               p,
-		KavitaLib:               kavitaClient,
 		BrowseRoots:             []string{"/media", "/config"},
 		RecycleBinPath:          cfg.RecycleBinPath,
 		RecycleBinRetentionDays: cfg.RecycleBinRetentionDays,

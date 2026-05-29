@@ -116,12 +116,6 @@ type SeriesFiler interface {
 	FileOne(ctx context.Context, seriesID int64, ct model.ContentType) error
 }
 
-// KavitaLibrarian can list libraries from Kavita's API.
-// kavita.Client satisfies this interface directly.
-type KavitaLibrarian interface {
-	ListLibraries(ctx context.Context) ([]kavita.Library, error)
-}
-
 // HandlerOpts is passed to NewHandler to wire all dependencies.
 // Using a struct keeps the constructor stable as the surface grows:
 // adding a new optional field is a backwards-compatible change, whereas
@@ -134,7 +128,6 @@ type HandlerOpts struct {
 	HealthReg   HealthRegistry // optional; health routes show a placeholder
 	Metrics     MetricsSink    // optional; /metrics returns 503 when nil
 	Previewer   Previewer      // optional; /preview returns placeholder when nil
-	KavitaLib   KavitaLibrarian // optional; /api/kavita/libraries returns 503 when nil
 
 	BrowseRoots             []string // allowlist for /api/browse; defaults to ["/media", "/config"]
 	RecycleBinPath          string
@@ -156,7 +149,6 @@ type Handler struct {
 	runner                  Runner
 	previewer               Previewer                     // optional; /preview returns placeholder when nil
 	seriesFiler             SeriesFiler                   // optional; /api/series/{id}/assign returns 503 when nil
-	kavitaLib               KavitaLibrarian               // optional; /api/kavita/libraries returns 503 when nil
 	browseRoots             []string                      // allowlist for /api/browse (injected; tests can override)
 	recycleBinPath          string
 	recycleBinRetentionDays int
@@ -186,7 +178,6 @@ func NewHandler(opts HandlerOpts) *Handler {
 		runner:                  opts.Runner,
 		previewer:               opts.Previewer,
 		seriesFiler:             opts.SeriesFiler,
-		kavitaLib:               opts.KavitaLib,
 		browseRoots:             browseRoots,
 		recycleBinPath:          opts.RecycleBinPath,
 		recycleBinRetentionDays: opts.RecycleBinRetentionDays,
@@ -680,12 +671,15 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Try fetching Kavita libraries for the select dropdowns if Kavita is configured.
+	// We build a fresh client from CURRENT settings each call so URL/key changes
+	// take effect immediately (no restart needed).
 	var kavitaLibs []kavita.Library
 	var kavitaLibErr string
-	if h.kavitaLib != nil && settings.KavitaBaseURL != "" && settings.KavitaAPIKey != "" {
+	if settings.KavitaBaseURL != "" && settings.KavitaAPIKey != "" {
 		fetchCtx, fetchCancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer fetchCancel()
-		if libs, err := h.kavitaLib.ListLibraries(fetchCtx); err != nil {
+		client := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)
+		if libs, err := client.ListLibraries(fetchCtx); err != nil {
 			kavitaLibErr = err.Error()
 		} else {
 			kavitaLibs = libs
@@ -1582,12 +1576,20 @@ type kavitaLibrariesResponse struct {
 
 // apiKavitaLibraries handles GET /api/kavita/libraries.
 // Returns JSON {libraries:[{id,name,type},...]} or {error:"..."} + appropriate status.
+// Builds a fresh kavita.Client from current Settings so URL/key changes apply
+// immediately without requiring a restart.
 func (h *Handler) apiKavitaLibraries(w http.ResponseWriter, r *http.Request) {
-	if h.kavitaLib == nil {
-		jsonErr(w, fmt.Errorf("kavita library client not configured"), http.StatusServiceUnavailable)
+	settings, err := h.store.GetSettings()
+	if err != nil {
+		jsonErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	libs, err := h.kavitaLib.ListLibraries(r.Context())
+	if settings.KavitaBaseURL == "" || settings.KavitaAPIKey == "" {
+		jsonErr(w, fmt.Errorf("kavita base URL and API key not configured"), http.StatusServiceUnavailable)
+		return
+	}
+	client := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)
+	libs, err := client.ListLibraries(r.Context())
 	if err != nil {
 		jsonErr(w, err, http.StatusBadGateway)
 		return
@@ -1602,6 +1604,10 @@ func (h *Handler) apiKavitaLibraries(w http.ResponseWriter, r *http.Request) {
 // Returns an HTML fragment for HTMX: three labeled <select> elements populated
 // with Kavita library options. On failure returns HTTP 200 with an inline error
 // message (so HTMX always swaps the content and the user sees a readable message).
+//
+// Builds a fresh kavita.Client from current Settings each call so the user can
+// change Kavita URL/key in the form, click Save, then click Sync — and it just
+// works without any restart.
 func (h *Handler) apiKavitaLibrariesFragment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
@@ -1619,15 +1625,16 @@ func (h *Handler) apiKavitaLibrariesFragment(w http.ResponseWriter, r *http.Requ
 	savedManhwa := settings.KavitaLibIDsByType[model.TypeManhwa]
 	savedManhua := settings.KavitaLibIDsByType[model.TypeManhua]
 
-	if h.kavitaLib == nil {
-		fmt.Fprint(w, `<div class="form-error">Kavita client not configured. Check Settings &#8594; Kavita Connection.</div>`)
+	if settings.KavitaBaseURL == "" || settings.KavitaAPIKey == "" {
+		fmt.Fprint(w, `<div class="form-error">Kavita not configured. Set the base URL and API key in Settings &#8594; Kavita Connection above, click Save, then Sync.</div>`)
 		writeKavitaLibPlaceholders(w, savedManga, savedManhwa, savedManhua)
 		return
 	}
 
 	fetchCtx, fetchCancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer fetchCancel()
-	libs, err := h.kavitaLib.ListLibraries(fetchCtx)
+	client := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)
+	libs, err := client.ListLibraries(fetchCtx)
 	if err != nil {
 		fmt.Fprintf(w, `<div class="form-error">Kavita unreachable: %s. Check Settings &#8594; Kavita Connection.</div>`,
 			html(err.Error()))
