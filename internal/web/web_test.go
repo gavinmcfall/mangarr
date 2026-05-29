@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -1471,5 +1472,208 @@ func TestAPIAssignWithoutFilerReturns503(t *testing.T) {
 
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("want 503, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ---- /api/browse tests ----
+
+// newBrowseHandler builds a Handler with browseRoots injected for testing.
+func newBrowseHandler(t *testing.T, browseRoots []string) *Handler {
+	t.Helper()
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	return NewHandlerWithBrowse(st, &fakeRunner{}, nil, "", 0, BackupConfig{}, nil, nil, nil, nil, nil, browseRoots)
+}
+
+func TestAPIBrowseRootViewListsAllowlist(t *testing.T) {
+	h := newBrowseHandler(t, []string{"/media", "/config"})
+	req := httptest.NewRequest(http.MethodGet, "/api/browse", nil) // no path param → synthetic root
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Path    string `json:"path"`
+		Entries []struct {
+			Path string `json:"path"`
+			Type string `json:"type"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if resp.Path != "" {
+		t.Errorf("want empty path for root view, got %q", resp.Path)
+	}
+	if len(resp.Entries) < 2 {
+		t.Fatalf("want >=2 entries (/media + /config), got %d: %+v", len(resp.Entries), resp.Entries)
+	}
+	var paths []string
+	for _, e := range resp.Entries {
+		paths = append(paths, e.Path)
+	}
+	foundMedia := false
+	foundConfig := false
+	for _, p := range paths {
+		if p == "/media" {
+			foundMedia = true
+		}
+		if p == "/config" {
+			foundConfig = true
+		}
+	}
+	if !foundMedia {
+		t.Errorf("want /media in entries, got %v", paths)
+	}
+	if !foundConfig {
+		t.Errorf("want /config in entries, got %v", paths)
+	}
+}
+
+func TestAPIBrowseRejectsOutsideAllowlist(t *testing.T) {
+	h := newBrowseHandler(t, []string{"/media", "/config"})
+	req := httptest.NewRequest(http.MethodGet, "/api/browse?path=/etc", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("want 403 for /etc, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAPIBrowseRejectsTraversal(t *testing.T) {
+	h := newBrowseHandler(t, []string{"/media", "/config"})
+	for _, bad := range []string{"/media/../etc", "/config/../etc/passwd"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/browse?path="+url.QueryEscape(bad), nil)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("traversal %q: want 403, got %d; body: %s", bad, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestAPIBrowseListsTempDir(t *testing.T) {
+	// Inject /tmp as the sole browse root so the test can navigate it.
+	h := newBrowseHandler(t, []string{"/tmp"})
+
+	// Create a couple of test subdirs.
+	dir := t.TempDir() // somewhere under /tmp
+	sub1 := dir + "/alpha"
+	sub2 := dir + "/beta"
+	if err := os.MkdirAll(sub1, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(sub2, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/browse?path="+url.QueryEscape(dir), nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Path    string `json:"path"`
+		Entries []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if len(resp.Entries) < 2 {
+		t.Fatalf("want >=2 dir entries (alpha, beta), got %d: %+v", len(resp.Entries), resp.Entries)
+	}
+	// Entries must be sorted case-insensitively.
+	if resp.Entries[0].Name != "alpha" || resp.Entries[1].Name != "beta" {
+		t.Errorf("want sorted [alpha, beta], got %v", resp.Entries)
+	}
+	for _, e := range resp.Entries {
+		if e.Type != "dir" {
+			t.Errorf("entry %q: want type=dir, got %q", e.Name, e.Type)
+		}
+	}
+}
+
+func TestAPIBrowseFragmentRendersHTML(t *testing.T) {
+	h := newBrowseHandler(t, []string{"/tmp"})
+	dir := t.TempDir()
+	_ = os.MkdirAll(dir+"/subdir", 0o755)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/browse/fragment?path="+url.QueryEscape(dir)+"&target=root_manga", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("want text/html, got %q", ct)
+	}
+	if !strings.Contains(body, "browse-breadcrumbs") {
+		t.Errorf("breadcrumbs not in fragment; body:\n%s", body)
+	}
+	if !strings.Contains(body, "Select this folder") {
+		t.Errorf("'Select this folder' button not in fragment; body:\n%s", body)
+	}
+	if !strings.Contains(body, "root_manga") {
+		t.Errorf("target field 'root_manga' not in fragment; body:\n%s", body)
+	}
+}
+
+func TestDiskBarShowsPercentUsed(t *testing.T) {
+	h := newHandlerWithRoots() // uses /tmp as both download root and manga library
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "% used") {
+		t.Fatalf("expected percent-used label in disk-space bar; body excerpt:\n%s",
+			snippet(body, "space-bar", 400))
+	}
+}
+
+func TestSettingsFooterIsBelowBackups(t *testing.T) {
+	h, _ := newBackupHandler(t)
+	// Run a backup so the Backups card has actual content.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/backups/run", nil))
+
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+
+	// Both landmarks must be present.
+	if !strings.Contains(body, "backups-section") {
+		t.Fatalf("backups-section not in settings page body")
+	}
+	if !strings.Contains(body, "settings-footer") {
+		t.Fatalf("settings-footer not in settings page body")
+	}
+	// Backups card must appear BEFORE the sticky footer (footer is last).
+	idxBackups := strings.Index(body, "backups-section")
+	idxFooter := strings.Index(body, "settings-footer")
+	if idxBackups < 0 || idxFooter < 0 {
+		t.Fatalf("both landmarks must be present (backups=%d, footer=%d)", idxBackups, idxFooter)
+	}
+	if idxBackups > idxFooter {
+		t.Fatalf("backups-section appears AFTER settings-footer — want backups before footer (idxBackups=%d idxFooter=%d)", idxBackups, idxFooter)
 	}
 }

@@ -199,11 +199,11 @@ func main() {
 	p.Planner = filr
 
 	// ---- web handler ----
-	h := web.NewHandlerWithFiler(st, p, p, cfg.RecycleBinPath, cfg.RecycleBinRetentionDays, web.BackupConfig{
+	h := web.NewHandlerWithBrowse(st, p, p, cfg.RecycleBinPath, cfg.RecycleBinRetentionDays, web.BackupConfig{
 		Dir:           cfg.BackupDir,
 		RetentionDays: cfg.BackupRetentionDays,
 		IntervalHours: cfg.BackupIntervalHours,
-	}, backupFn, reg, healthReg, metricsReg, p, cfg.DownloadRoots...)
+	}, backupFn, reg, healthReg, metricsReg, p, []string{"/media", "/config"}, cfg.DownloadRoots...)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           h,

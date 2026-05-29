@@ -15,7 +15,7 @@
   <div class="settings-card">
     <div class="settings-card-header">
       <p class="settings-card-title">Disk Space</p>
-      <p class="settings-card-desc">Free space for each download root and library root. Red &lt; 10%, orange 10–25%, green ≥ 25% free.</p>
+      <p class="settings-card-desc">Space used for each download root and library root. Green &lt; 75% used, orange 75–90%, red &gt; 90%.</p>
     </div>
     <div class="settings-card-body">
       <table class="disk-space-table">
@@ -36,6 +36,7 @@
             <div class="space-bar">
               <div class="space-bar-fill {{.BarClass}}" style="width:{{.PercentFmt}}%"></div>
             </div>
+            <span class="disk-pct-label">{{.PercentUsedFmt}}</span>
           </td>
           {{end}}
         </tr>
@@ -45,6 +46,11 @@
   </div>
 </div>
 {{end}}
+
+<!-- Browse modal overlay — populated by HTMX; hidden via :empty -->
+<div id="browse-modal">
+  <div id="browse-modal-body"></div>
+</div>
 
 <form method="POST" action="/settings">
 <div class="settings-sections">
@@ -82,23 +88,47 @@
     <div class="settings-card-body">
       <div class="settings-row">
         <label class="settings-label">Manga root</label>
-        <div class="settings-input-wrap">
-          <input type="text" name="root_manga" value="{{.RootManga}}"
+        <div class="settings-input-wrap settings-input-with-browse">
+          <input type="text" name="root_manga" id="root_manga" value="{{.RootManga}}"
             placeholder="/media/Library/Books/Manga">
+          <button type="button" class="btn-browse" title="Browse filesystem"
+            hx-get="/api/browse/fragment?path=/media&amp;target=root_manga"
+            hx-target="#browse-modal-body"
+            hx-swap="innerHTML"
+            onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>
+            Browse
+          </button>
         </div>
       </div>
       <div class="settings-row">
         <label class="settings-label">Manhwa root</label>
-        <div class="settings-input-wrap">
-          <input type="text" name="root_manhwa" value="{{.RootManhwa}}"
+        <div class="settings-input-wrap settings-input-with-browse">
+          <input type="text" name="root_manhwa" id="root_manhwa" value="{{.RootManhwa}}"
             placeholder="/media/Library/Books/Manhwa">
+          <button type="button" class="btn-browse" title="Browse filesystem"
+            hx-get="/api/browse/fragment?path=/media&amp;target=root_manhwa"
+            hx-target="#browse-modal-body"
+            hx-swap="innerHTML"
+            onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>
+            Browse
+          </button>
         </div>
       </div>
       <div class="settings-row">
         <label class="settings-label">Manhua root</label>
-        <div class="settings-input-wrap">
-          <input type="text" name="root_manhua" value="{{.RootManhua}}"
+        <div class="settings-input-wrap settings-input-with-browse">
+          <input type="text" name="root_manhua" id="root_manhua" value="{{.RootManhua}}"
             placeholder="/media/Library/Books/Manhua">
+          <button type="button" class="btn-browse" title="Browse filesystem"
+            hx-get="/api/browse/fragment?path=/media&amp;target=root_manhua"
+            hx-target="#browse-modal-body"
+            hx-swap="innerHTML"
+            onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>
+            Browse
+          </button>
         </div>
       </div>
     </div>
@@ -210,12 +240,6 @@
   </div>
 
 </div><!-- /.settings-sections -->
-
-<div class="settings-footer" style="margin-top:20px;">
-  <span class="settings-note">Kavita connection, file mode, and poll interval take effect on the next restart.</span>
-  <button type="submit" class="btn btn-primary">Save settings</button>
-</div>
-
 </form>
 
 <!-- Backups card (outside the settings form — has its own HTMX action) -->
@@ -268,6 +292,14 @@
       </div>
     </div>
   </div>
+</div>
+
+<!-- Sticky save footer — outside the form; stays visible while scrolling.
+     The button submits via JS because the form tag is further up the DOM. -->
+<div class="settings-footer">
+  <span class="settings-note">Kavita connection, file mode, and poll interval take effect on the next restart.</span>
+  <button type="button" class="btn btn-primary"
+    onclick="document.querySelector('form[method=POST]').submit()">Save settings</button>
 </div>
 
   </div>
