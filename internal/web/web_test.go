@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/dbbackup"
+	"github.com/gavinmcfall/mangarr/internal/diskspace"
 	"github.com/gavinmcfall/mangarr/internal/health"
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
@@ -166,7 +167,12 @@ func newEmptyHandler() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "/config/recycle-bin", 7, nil, nil, nil, nil)
+	return NewHandler(HandlerOpts{
+		Store:                   st,
+		Runner:                  &fakeRunner{},
+		RecycleBinPath:          "/config/recycle-bin",
+		RecycleBinRetentionDays: 7,
+	})
 }
 
 // newTestHandler builds a Handler with test fixtures.
@@ -189,7 +195,13 @@ func newTestHandler() (*Handler, *fakeStore, *fakeRunner) {
 		},
 	}
 	runner := &fakeRunner{}
-	return NewHandler(st, runner, "/config/recycle-bin", 7, nil, nil, nil, nil), st, runner
+	h := NewHandler(HandlerOpts{
+		Store:                   st,
+		Runner:                  runner,
+		RecycleBinPath:          "/config/recycle-bin",
+		RecycleBinRetentionDays: 7,
+	})
+	return h, st, runner
 }
 
 // newTestHandlerWithRegistry builds a Handler with a seeded task registry.
@@ -200,7 +212,13 @@ func newTestHandlerWithRegistry() (*Handler, *fakeStore, *fakeRunner, *fakeTaskR
 		runner.called++
 		return nil
 	})
-	h := NewHandler(st, runner, "/config/recycle-bin", 7, reg, nil, nil, nil)
+	h := NewHandler(HandlerOpts{
+		Store:                   st,
+		Runner:                  runner,
+		TaskReg:                 reg,
+		RecycleBinPath:          "/config/recycle-bin",
+		RecycleBinRetentionDays: 7,
+	})
 	return h, st, runner, reg
 }
 
@@ -397,11 +415,15 @@ func TestAPIRescanCallsRunOnce(t *testing.T) {
 }
 
 func TestAPIRescanWithoutRunnerReturns503(t *testing.T) {
-	h := NewHandler(&fakeStore{
-		series:   []model.Series{},
-		activity: []model.ActivityEntry{},
-		settings: model.Settings{LibraryRoots: map[model.ContentType]string{}, KavitaLibIDsByType: map[model.ContentType]int64{}},
-	}, nil, "/config/recycle-bin", 7, nil, nil, nil, nil)
+	h := NewHandler(HandlerOpts{
+		Store: &fakeStore{
+			series:   []model.Series{},
+			activity: []model.ActivityEntry{},
+			settings: model.Settings{LibraryRoots: map[model.ContentType]string{}, KavitaLibIDsByType: map[model.ContentType]int64{}},
+		},
+		RecycleBinPath:          "/config/recycle-bin",
+		RecycleBinRetentionDays: 7,
+	})
 	req := httptest.NewRequest(http.MethodPost, "/api/rescan", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -596,7 +618,11 @@ func newBackupHandler(t *testing.T) (*Handler, string) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandlerWithBackup(st, &fakeRunner{}, "", 0, cfg, backupFn, nil, nil, nil, nil)
+	h := NewHandler(HandlerOpts{
+		Store:  st,
+		Runner: &fakeRunner{},
+		Backup: BackupOpts{Config: cfg, Fn: backupFn},
+	})
 	return h, dir
 }
 
@@ -729,18 +755,20 @@ func snippet(s, marker string, n int) string {
 
 // newHandlerWithRoots builds a Handler that includes a real /tmp download root
 // and a library root so we can assert disk-space rendering.
+// Download roots are now stored in Settings (not the Handler constructor).
 func newHandlerWithRoots() *Handler {
 	st := &fakeStore{
 		series:   nil,
 		activity: nil,
 		settings: model.Settings{
+			DownloadRoots: []string{"/tmp"},
 			LibraryRoots: map[model.ContentType]string{
 				model.TypeManga: "/tmp",
 			},
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil, "/tmp")
+	return NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
 }
 
 func TestAPIDiskSpaceReturnsJSONArray(t *testing.T) {
@@ -788,13 +816,14 @@ func TestAPIDiskSpaceReturnsJSONArray(t *testing.T) {
 
 func TestAPIDiskSpaceEmptyWhenNoRoots(t *testing.T) {
 	// Handler with no download roots and no library roots → empty array.
+	// Roots are now in Settings, not the constructor.
 	st := &fakeStore{
 		settings: model.Settings{
 			LibraryRoots:       map[model.ContentType]string{},
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil) // no downloadRoots
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
 	req := httptest.NewRequest(http.MethodGet, "/api/diskspace", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -895,7 +924,12 @@ func TestSettingsPageRendersRecycleBin(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "/tmp/mg-bin", 14, nil, nil, nil, nil)
+	h := NewHandler(HandlerOpts{
+		Store:                   st,
+		Runner:                  &fakeRunner{},
+		RecycleBinPath:          "/tmp/mg-bin",
+		RecycleBinRetentionDays: 14,
+	})
 	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -989,7 +1023,7 @@ func TestAPIRunTaskTriggersRunFn(t *testing.T) {
 		return nil
 	})
 
-	h := NewHandler(st, &fakeRunner{}, "", 0, reg, nil, nil, nil)
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}, TaskReg: reg})
 	req := httptest.NewRequest(http.MethodPost, "/api/tasks/test-task/run", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1075,7 +1109,7 @@ func newHealthHandler(results []health.Result) *Handler {
 		},
 	}
 	reg := &fakeHealthRegistry{results: results}
-	return NewHandler(st, &fakeRunner{}, "", 0, nil, reg, nil, nil)
+	return NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}, HealthReg: reg})
 }
 
 func TestHealthPageReturns200(t *testing.T) {
@@ -1146,7 +1180,7 @@ func TestHealthPageWithoutRegistryShowsWarning(t *testing.T) {
 		},
 	}
 	// nil healthReg
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil)
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1166,7 +1200,7 @@ func TestAPIHealthWithoutRegistryReturnsWarn(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil)
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
 	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1207,7 +1241,7 @@ func newHandlerWithMetrics() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, &fakeMetricsSink{}, nil)
+	return NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}, Metrics: &fakeMetricsSink{}})
 }
 
 func TestMetricsEndpointServesPrometheus(t *testing.T) {
@@ -1233,7 +1267,7 @@ func TestMetricsEndpointWithoutHandlerReturns503(t *testing.T) {
 		},
 	}
 	// nil metrics — /metrics should return 503
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil)
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1295,7 +1329,7 @@ func newPreviewHandler() *Handler {
 			},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, prev)
+	return NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}, Previewer: prev})
 }
 
 func TestPreviewPageReturns200(t *testing.T) {
@@ -1357,12 +1391,15 @@ func TestAPIPreviewReturnsJSON(t *testing.T) {
 
 func TestPreviewPageWithoutPreviewerShowsPlaceholder(t *testing.T) {
 	// nil previewer → placeholder message.
-	h := NewHandler(&fakeStore{
-		settings: model.Settings{
-			LibraryRoots:       map[model.ContentType]string{},
-			KavitaLibIDsByType: map[model.ContentType]int64{},
+	h := NewHandler(HandlerOpts{
+		Store: &fakeStore{
+			settings: model.Settings{
+				LibraryRoots:       map[model.ContentType]string{},
+				KavitaLibIDsByType: map[model.ContentType]int64{},
+			},
 		},
-	}, &fakeRunner{}, "", 0, nil, nil, nil, nil)
+		Runner: &fakeRunner{},
+	})
 	req := httptest.NewRequest(http.MethodGet, "/preview", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1388,7 +1425,7 @@ func newHandlerWithFilerForTest(sf *fakeSeriesFiler) (*Handler, *fakeStore) {
 			KavitaLibIDsByType: map[model.ContentType]int64{model.TypeManga: 3},
 		},
 	}
-	h := NewHandlerWithFiler(st, &fakeRunner{}, sf, "", 0, BackupConfig{}, nil, nil, nil, nil, nil)
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}, SeriesFiler: sf})
 	return h, st
 }
 
@@ -1461,7 +1498,7 @@ func TestAPIAssignWithoutFilerReturns503(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil)
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
 
 	form := url.Values{"type": {"Manga"}}
 	req := httptest.NewRequest(http.MethodPost, "/api/series/1/assign",
@@ -1486,7 +1523,11 @@ func newBrowseHandler(t *testing.T, browseRoots []string) *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandlerWithBrowse(st, &fakeRunner{}, nil, "", 0, BackupConfig{}, nil, nil, nil, nil, nil, browseRoots)
+	return NewHandler(HandlerOpts{
+		Store:       st,
+		Runner:      &fakeRunner{},
+		BrowseRoots: browseRoots,
+	})
 }
 
 func TestAPIBrowseRootViewListsAllowlist(t *testing.T) {
@@ -1675,5 +1716,171 @@ func TestSettingsFooterIsBelowBackups(t *testing.T) {
 	}
 	if idxBackups > idxFooter {
 		t.Fatalf("backups-section appears AFTER settings-footer — want backups before footer (idxBackups=%d idxFooter=%d)", idxBackups, idxFooter)
+	}
+}
+
+// ---- New tests for Settings + Disk Space changes ----
+
+func TestSettingsPageRendersDownloadRootRows(t *testing.T) {
+	st := &fakeStore{
+		settings: model.Settings{
+			DownloadRoots:      []string{"/media/Downloads/suwayomi", "/media/Downloads/tranga"},
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Download Roots") {
+		t.Errorf("'Download Roots' heading not in settings page")
+	}
+	if !strings.Contains(body, "/media/Downloads/suwayomi") {
+		t.Errorf("first download root not rendered")
+	}
+	if !strings.Contains(body, "/media/Downloads/tranga") {
+		t.Errorf("second download root not rendered")
+	}
+	// Each row has a Browse button — check hx-vals pattern.
+	if !strings.Contains(body, `hx-vals='js:{path:`) {
+		t.Errorf("browse-from-current hx-vals not rendered on download root rows")
+	}
+	// Each row has a remove button (✕ character or its HTML entity).
+	removeCount := strings.Count(body, "✕") + strings.Count(body, "&#x2715;")
+	if removeCount < 2 {
+		t.Errorf("expected at least 2 remove (✕) buttons for 2 roots, found %d", removeCount)
+	}
+}
+
+func TestSaveSettingsFormPostUpdatesDownloadRoots(t *testing.T) {
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	form := url.Values{
+		"file_mode":      {"hardlink"},
+		"rename_scheme":  {"{series}/{series} - Ch.{chapter}.cbz"},
+		"poll_minutes":   {"15"},
+		"download_root":  {"/media/Downloads/suwayomi", "/media/Downloads/tranga", ""}, // empty dropped
+	}
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("want 303, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if len(st.settings.DownloadRoots) != 2 {
+		t.Fatalf("want 2 download roots persisted, got %d: %v", len(st.settings.DownloadRoots), st.settings.DownloadRoots)
+	}
+	if st.settings.DownloadRoots[0] != "/media/Downloads/suwayomi" {
+		t.Errorf("want first root=/media/Downloads/suwayomi, got %q", st.settings.DownloadRoots[0])
+	}
+	if st.settings.DownloadRoots[1] != "/media/Downloads/tranga" {
+		t.Errorf("want second root=/media/Downloads/tranga, got %q", st.settings.DownloadRoots[1])
+	}
+}
+
+func TestBrowseFromCurrentPathRendersHxVals(t *testing.T) {
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{model.TypeManga: "/lib/Manga"},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	// All Browse buttons must use hx-vals js: pattern, not static hx-get with hardcoded path.
+	if !strings.Contains(body, `hx-vals='js:{path:`) {
+		t.Errorf("expected hx-vals='js:{path:...' pattern on Browse buttons; body excerpt:\n%s",
+			snippet(body, "btn-browse", 400))
+	}
+	// Must NOT have the old static path pattern.
+	if strings.Contains(body, `hx-get="/api/browse/fragment?path=/media`) {
+		t.Errorf("found old static path pattern — should use hx-vals instead")
+	}
+}
+
+func TestBrowseFragmentReturnsFriendlyErrorForBadPath(t *testing.T) {
+	h := newBrowseHandler(t, []string{"/tmp"})
+
+	// /etc is outside /tmp → previously 403, now 200 + friendly message.
+	req := httptest.NewRequest(http.MethodGet, "/api/browse/fragment?path=/etc&target=root_manga", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	// Must return 200 so HTMX swaps the fragment.
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 (friendly error), got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "outside the allowed") {
+		t.Errorf("expected 'outside the allowed' message in fragment; body:\n%s", body)
+	}
+	// Must have a 'Back to root' button.
+	if !strings.Contains(body, "Back to root") {
+		t.Errorf("expected 'Back to root' button in friendly error fragment; body:\n%s", body)
+	}
+}
+
+func TestDiskRowsGroupedByFSID(t *testing.T) {
+	// Two paths on the same filesystem (/tmp and a subdir of /tmp)
+	// should produce exactly one fsDiskRow with both paths listed.
+	dir := t.TempDir() // under /tmp — same FS
+	st := &fakeStore{
+		settings: model.Settings{
+			DownloadRoots: []string{"/tmp"},
+			LibraryRoots:  map[model.ContentType]string{model.TypeManga: dir},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	rows := h.buildDiskRows(st.settings)
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row (same FS), got %d: %+v", len(rows), rows)
+	}
+	if len(rows[0].Paths) != 2 {
+		t.Fatalf("want 2 paths in the single row, got %d: %+v", len(rows[0].Paths), rows[0].Paths)
+	}
+}
+
+func TestDiskRowsSeparateForDifferentFSIDs(t *testing.T) {
+	// /tmp is typically on tmpfs; / is on a different FS.
+	// If they happen to be the same FS in this environment, skip.
+	infoTmp := diskspace.Stat("/tmp")
+	infoRoot := diskspace.Stat("/")
+	if infoTmp.Err != nil || infoRoot.Err != nil {
+		t.Skip("cannot stat /tmp or /: skip")
+	}
+	if infoTmp.FSID == infoRoot.FSID {
+		t.Skip("/tmp and / share the same FSID in this environment — skip")
+	}
+
+	st := &fakeStore{
+		settings: model.Settings{
+			DownloadRoots: []string{"/tmp"},
+			LibraryRoots:  map[model.ContentType]string{model.TypeManga: "/"},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	rows := h.buildDiskRows(st.settings)
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows (different FSIDs), got %d: %+v", len(rows), rows)
 	}
 }

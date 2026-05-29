@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -20,9 +19,6 @@ type Config struct {
 
 func Load() (Config, error) {
 	rootsRaw := strings.TrimSpace(os.Getenv("MANGARR_DOWNLOAD_ROOTS"))
-	if rootsRaw == "" {
-		return Config{}, fmt.Errorf("MANGARR_DOWNLOAD_ROOTS is required")
-	}
 	var roots []string
 	for _, r := range strings.Split(rootsRaw, ",") {
 		if r = strings.TrimSpace(r); r != "" {

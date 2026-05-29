@@ -19,10 +19,15 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresRoots(t *testing.T) {
+func TestLoadAllowsEmptyDownloadRoots(t *testing.T) {
+	// MANGARR_DOWNLOAD_ROOTS is now optional; roots are managed via UI.
 	t.Setenv("MANGARR_DOWNLOAD_ROOTS", "")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected error when no download roots set")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error for empty MANGARR_DOWNLOAD_ROOTS, got: %v", err)
+	}
+	if len(c.DownloadRoots) != 0 {
+		t.Fatalf("want 0 roots, got %d", len(c.DownloadRoots))
 	}
 }
 

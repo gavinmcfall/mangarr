@@ -113,6 +113,31 @@ type SeriesFiler interface {
 	FileOne(ctx context.Context, seriesID int64, ct model.ContentType) error
 }
 
+// HandlerOpts is passed to NewHandler to wire all dependencies.
+// Using a struct keeps the constructor stable as the surface grows:
+// adding a new optional field is a backwards-compatible change, whereas
+// adding a positional argument is not.
+type HandlerOpts struct {
+	Store       Store
+	Runner      Runner
+	SeriesFiler SeriesFiler  // optional; /api/series/{id}/assign returns 503 when nil
+	TaskReg     TaskRegistry // optional; tasks routes return 503 when nil
+	HealthReg   HealthRegistry // optional; health routes show a placeholder
+	Metrics     MetricsSink  // optional; /metrics returns 503 when nil
+	Previewer   Previewer    // optional; /preview returns placeholder when nil
+
+	BrowseRoots             []string // allowlist for /api/browse; defaults to ["/media", "/config"]
+	RecycleBinPath          string
+	RecycleBinRetentionDays int
+	Backup                  BackupOpts
+}
+
+// BackupOpts groups backup-related configuration for HandlerOpts.
+type BackupOpts struct {
+	Config BackupConfig
+	Fn     func() (dbbackup.Entry, error)
+}
+
 // Handler is the HTTP handler for the web UI and JSON API.
 type Handler struct {
 	mux                     *http.ServeMux
@@ -121,7 +146,6 @@ type Handler struct {
 	runner                  Runner
 	previewer               Previewer                     // optional; /preview returns placeholder when nil
 	seriesFiler             SeriesFiler                   // optional; /api/series/{id}/assign returns 503 when nil
-	downloadRoots           []string // from config.DownloadRoots; used by disk-space endpoints
 	browseRoots             []string // allowlist for /api/browse (injected; tests can override)
 	recycleBinPath          string
 	recycleBinRetentionDays int
@@ -133,63 +157,32 @@ type Handler struct {
 	metricsHandler          http.Handler                   // nil → /metrics returns 503
 }
 
-// NewHandler wires up all routes and parses embedded templates.
-// runner may be nil (RunOnce calls will return 503).
-// recycleBinPath and recycleBinRetentionDays are env-derived config values
-// surfaced read-only on the Settings page.
-// previewer may be nil (/preview returns a placeholder page).
-// downloadRoots is the list of download root paths (may be empty in tests).
-// taskReg may be nil (tasks routes return 503).
-// healthReg may be nil (health routes show a placeholder warning).
-// metrics may be nil (GET /metrics returns 503).
-// Backup API is wired separately via NewHandlerWithBackup (returns 503 here).
-func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, nil, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, healthReg, metrics, previewer, nil, downloadRoots)
-}
-
-// NewHandlerWithBackup is like NewHandler but also wires the backup API.
-func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, nil, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, nil, downloadRoots)
-}
-
-// NewHandlerWithFiler is like NewHandlerWithBackup but also wires the per-series filer
-// used by POST /api/series/{id}/assign. In production main.go passes the *poller.Poller
-// directly as it implements both Runner and SeriesFiler.
-func NewHandlerWithFiler(store Store, runner Runner, seriesFiler SeriesFiler, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, seriesFiler, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, nil, downloadRoots)
-}
-
-// NewHandlerWithBrowse is like NewHandlerWithFiler but also accepts an explicit
-// browseRoots allowlist for the path-browser endpoints. If browseRoots is nil the
-// production default (/media, /config) is used.
-func NewHandlerWithBrowse(store Store, runner Runner, seriesFiler SeriesFiler, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, browseRoots []string, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, seriesFiler, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, browseRoots, downloadRoots)
-}
-
-func newHandlerFull(store Store, runner Runner, seriesFiler SeriesFiler, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, browseRoots []string, downloadRoots []string) *Handler {
+// NewHandler wires up all routes and parses embedded templates from a HandlerOpts struct.
+// All fields are optional except Store.
+func NewHandler(opts HandlerOpts) *Handler {
 	var mh http.Handler
-	if metrics != nil {
-		mh = metrics.Handler()
+	if opts.Metrics != nil {
+		mh = opts.Metrics.Handler()
 	}
+	browseRoots := opts.BrowseRoots
 	if browseRoots == nil {
 		browseRoots = []string{"/media", "/config"}
 	}
 	h := &Handler{
 		mux:                     http.NewServeMux(),
 		tmpls:                   parsePageTemplates(),
-		store:                   store,
-		runner:                  runner,
-		previewer:               previewer,
-		seriesFiler:             seriesFiler,
-		downloadRoots:           downloadRoots,
+		store:                   opts.Store,
+		runner:                  opts.Runner,
+		previewer:               opts.Previewer,
+		seriesFiler:             opts.SeriesFiler,
 		browseRoots:             browseRoots,
-		recycleBinPath:          recycleBinPath,
-		recycleBinRetentionDays: recycleBinRetentionDays,
-		backupDir:               cfg.Dir,
-		backupCfg:               cfg,
-		backupFn:                backupFn,
-		taskReg:                 taskReg,
-		healthReg:               healthReg,
+		recycleBinPath:          opts.RecycleBinPath,
+		recycleBinRetentionDays: opts.RecycleBinRetentionDays,
+		backupDir:               opts.Backup.Config.Dir,
+		backupCfg:               opts.Backup.Config,
+		backupFn:                opts.Backup.Fn,
+		taskReg:                 opts.TaskReg,
+		healthReg:               opts.HealthReg,
 		metricsHandler:          mh,
 	}
 
@@ -321,17 +314,23 @@ type previewRow struct {
 	FileSummary  string // e.g. "3 file, 5 skip"
 }
 
-// diskSpaceRow is a single row in the disk-space display: one path with its
-// space info and presentation fields pre-computed server-side.
-type diskSpaceRow struct {
-	Label          string // e.g. "Download root" or "Manga library"
-	Path           string
-	Free           string // formatted free bytes, e.g. "42.0 GiB"
-	Total          string // formatted total bytes
-	PercentFmt     string // e.g. "73"  (integer %, no decimal, for bar width — represents %used)
-	PercentUsedFmt string // e.g. "73%" — human-readable label shown inside/beside bar
-	BarClass       string // "bar-ok" | "bar-warn" | "bar-err"
-	Err            string // non-empty when path is unavailable
+// diskPathEntry is a labelled path within a filesystem group.
+type diskPathEntry struct {
+	Label string // e.g. "Download root" or "Manga library"
+	Path  string
+}
+
+// fsDiskRow is a single row in the disk-space display: one unique filesystem
+// with its space info and the list of all source paths that share it.
+type fsDiskRow struct {
+	MountLabel     string          // common path prefix or "Filesystem N"
+	Paths          []diskPathEntry // all contributing paths
+	Free           string          // formatted free bytes, e.g. "42.0 GiB"
+	Total          string          // formatted total bytes
+	PercentFmt     string          // e.g. "73"  (integer %, no decimal, for bar width — represents %used)
+	PercentUsedFmt string          // e.g. "73%" — human-readable label shown inside/beside bar
+	BarClass       string          // "bar-ok" | "bar-warn" | "bar-err"
+	Err            string          // non-empty when path is unavailable
 }
 
 // diskSpaceClass returns the CSS class for the bar fill based on percent USED.
@@ -361,6 +360,7 @@ type settingsPageData struct {
 	KavitaAPIKey            string
 	Flash                   string
 	Error                   string
+	DownloadRoots           []string // pre-extracted from Settings for template convenience
 	RootManga               string
 	RootManhwa              string
 	RootManhua              string
@@ -368,7 +368,7 @@ type settingsPageData struct {
 	KavitaLibManhwa         int64
 	KavitaLibManhua         int64
 	RenameExample           string
-	DiskRows                []diskSpaceRow
+	DiskRows                []fsDiskRow
 	RecycleBinPath          string
 	RecycleBinRetentionDays int
 	BackupDir               string
@@ -623,7 +623,7 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		flashMsg = "Settings saved."
 	}
 
-	// Build disk-space rows: download roots first, then library roots.
+	// Build disk-space rows: download roots + library roots, grouped by filesystem.
 	diskRows := h.buildDiskRows(settings)
 
 	// Load backup list — treat a missing dir as empty, not an error.
@@ -646,6 +646,7 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		Settings:                settings,
 		KavitaAPIKey:            settings.KavitaAPIKey,
 		Flash:                   flashMsg,
+		DownloadRoots:           settings.DownloadRoots,
 		RootManga:               settings.LibraryRoots[model.TypeManga],
 		RootManhwa:              settings.LibraryRoots[model.TypeManhwa],
 		RootManhua:              settings.LibraryRoots[model.TypeManhua],
@@ -665,17 +666,24 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildDiskRows gathers disk-space rows for the Settings page.
-// Download roots come from the Handler (config.DownloadRoots).
-// Library roots come from settings (may be partially configured).
-func (h *Handler) buildDiskRows(settings model.Settings) []diskSpaceRow {
+// Download roots come from settings.DownloadRoots (UI-managed).
+// Library roots come from settings.LibraryRoots.
+// Paths that share the same filesystem (same FSID) are grouped into one row.
+func (h *Handler) buildDiskRows(settings model.Settings) []fsDiskRow {
 	type pathSpec struct {
 		label string
 		path  string
 	}
 	var specs []pathSpec
-	for _, p := range h.downloadRoots {
-		specs = append(specs, pathSpec{"Download root", p})
+
+	// Download roots first.
+	for _, p := range settings.DownloadRoots {
+		if p != "" {
+			specs = append(specs, pathSpec{"Download root", p})
+		}
 	}
+
+	// Library roots.
 	libLabels := []struct {
 		ct    model.ContentType
 		label string
@@ -690,46 +698,118 @@ func (h *Handler) buildDiskRows(settings model.Settings) []diskSpaceRow {
 		}
 	}
 
-	// Deduplicate: same physical path should only appear once
-	// (a download root might equal a library root).
-	seen := map[string]bool{}
-	var rows []diskSpaceRow
+	// Deduplicate exact label+path combos before stat'ing.
+	seenKey := map[string]bool{}
+	var unique []pathSpec
 	for _, spec := range specs {
-		key := spec.label + "|" + spec.path
-		if seen[key] {
+		k := spec.label + "|" + spec.path
+		if !seenKey[k] {
+			seenKey[k] = true
+			unique = append(unique, spec)
+		}
+	}
+
+	// Stat each unique path and group by FSID.
+	// Errored paths get their own row (FSID is zero — isolate by path as key).
+	type fsKey struct {
+		fsid [2]int32
+		errPath string // non-empty for error rows; prevents collapsing errors
+	}
+	type fsGroup struct {
+		info  diskspace.Info
+		paths []diskPathEntry
+	}
+	var order []fsKey
+	groups := map[fsKey]*fsGroup{}
+
+	for _, spec := range unique {
+		info := diskspace.Stat(spec.path)
+		var key fsKey
+		if info.Err != nil {
+			key = fsKey{errPath: spec.path}
+		} else {
+			key = fsKey{fsid: info.FSID}
+		}
+		if _, exists := groups[key]; !exists {
+			order = append(order, key)
+			groups[key] = &fsGroup{info: info}
+		}
+		groups[key].paths = append(groups[key].paths, diskPathEntry{
+			Label: spec.label,
+			Path:  spec.path,
+		})
+	}
+
+	// Convert groups to fsDiskRow slice.
+	rows := make([]fsDiskRow, 0, len(order))
+	for _, key := range order {
+		g := groups[key]
+		// Derive a display label: longest common path prefix of all paths in the group.
+		mountLabel := commonPathPrefix(g.paths)
+
+		if g.info.Err != nil {
+			rows = append(rows, fsDiskRow{
+				MountLabel: mountLabel,
+				Paths:      g.paths,
+				Err:        "unavailable",
+				BarClass:   "bar-err",
+			})
 			continue
 		}
-		seen[key] = true
-		rows = append(rows, makeDiskRow(spec.label, spec.path))
+		pctUsed := 100.0 - g.info.PercentFree()
+		if pctUsed < 0 {
+			pctUsed = 0
+		}
+		pctUsedInt := int(pctUsed)
+		rows = append(rows, fsDiskRow{
+			MountLabel:     mountLabel,
+			Paths:          g.paths,
+			Free:           diskspace.FormatBytes(g.info.FreeBytes),
+			Total:          diskspace.FormatBytes(g.info.TotalBytes),
+			PercentFmt:     fmt.Sprintf("%d", pctUsedInt),
+			PercentUsedFmt: fmt.Sprintf("%d%% used", pctUsedInt),
+			BarClass:       diskSpaceClass(pctUsed),
+		})
 	}
 	return rows
 }
 
-// makeDiskRow builds a single diskSpaceRow from a path.
-func makeDiskRow(label, path string) diskSpaceRow {
-	info := diskspace.Stat(path)
-	if info.Err != nil {
-		return diskSpaceRow{
-			Label:    label,
-			Path:     path,
-			Err:      "unavailable",
-			BarClass: "bar-err",
+// commonPathPrefix returns the longest directory prefix shared by all paths
+// in the group. If there is only one path, or no common ancestor exists beyond
+// the filesystem root, it returns the first path's directory or the path itself.
+func commonPathPrefix(paths []diskPathEntry) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	if len(paths) == 1 {
+		return filepath.Dir(paths[0].Path)
+	}
+	// Walk path segments of the first path and keep those that match all others.
+	parts := strings.Split(filepath.Clean(paths[0].Path), string(filepath.Separator))
+	for _, entry := range paths[1:] {
+		other := strings.Split(filepath.Clean(entry.Path), string(filepath.Separator))
+		n := len(parts)
+		if len(other) < n {
+			n = len(other)
+		}
+		for i := 0; i < n; i++ {
+			if parts[i] != other[i] {
+				parts = parts[:i]
+				break
+			}
+		}
+		if len(other) < len(parts) {
+			parts = parts[:len(other)]
 		}
 	}
-	pctUsed := 100.0 - info.PercentFree()
-	if pctUsed < 0 {
-		pctUsed = 0
+	if len(parts) == 0 {
+		return "/"
 	}
-	pctUsedInt := int(pctUsed)
-	return diskSpaceRow{
-		Label:          label,
-		Path:           path,
-		Free:           diskspace.FormatBytes(info.FreeBytes),
-		Total:          diskspace.FormatBytes(info.TotalBytes),
-		PercentFmt:     fmt.Sprintf("%d", pctUsedInt),
-		PercentUsedFmt: fmt.Sprintf("%d%% used", pctUsedInt),
-		BarClass:       diskSpaceClass(pctUsed),
+	result := strings.Join(parts, string(filepath.Separator))
+	if result == "" {
+		result = "/"
 	}
+	return result
 }
 
 func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
@@ -743,6 +823,15 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Read download_root[] — repeated field name; empty values dropped.
+	var downloadRoots []string
+	for _, v := range r.Form["download_root"] {
+		if v = strings.TrimSpace(v); v != "" {
+			downloadRoots = append(downloadRoots, v)
+		}
+	}
+	settings.DownloadRoots = downloadRoots
 
 	settings.FileMode = model.FileMode(r.FormValue("file_mode"))
 	settings.RenameScheme = r.FormValue("rename_scheme")
@@ -776,6 +865,7 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 			Settings:        settings,
 			KavitaAPIKey:    settings.KavitaAPIKey,
 			Error:           "Invalid rename scheme: " + err.Error(),
+			DownloadRoots:   settings.DownloadRoots,
 			RootManga:       settings.LibraryRoots[model.TypeManga],
 			RootManhwa:      settings.LibraryRoots[model.TypeManhwa],
 			RootManhua:      settings.LibraryRoots[model.TypeManhua],
@@ -954,14 +1044,11 @@ func (h *Handler) apiDiskSpace(w http.ResponseWriter, r *http.Request) {
 		settings.LibraryRoots = map[model.ContentType]string{}
 	}
 
-	// Collect all unique paths: download roots + configured library roots.
-	type pathEntry struct {
-		path string
-	}
+	// Collect all unique paths: Settings.DownloadRoots + configured library roots.
 	seen := map[string]bool{}
 	var paths []string
-	for _, p := range h.downloadRoots {
-		if !seen[p] {
+	for _, p := range settings.DownloadRoots {
+		if p != "" && !seen[p] {
 			seen[p] = true
 			paths = append(paths, p)
 		}
@@ -1312,20 +1399,27 @@ func (h *Handler) apiBrowse(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiBrowseFragment renders the HTMX HTML fragment for the path-browser modal.
+// Both "forbidden" and error cases return HTTP 200 with a friendly HTML message so
+// HTMX always swaps the fragment and the user sees a readable error in the modal.
 func (h *Handler) apiBrowseFragment(w http.ResponseWriter, r *http.Request) {
 	rawPath := r.URL.Query().Get("path")
 	target := r.URL.Query().Get("target") // e.g. "root_manga"
 	abs, errMsg, synthetic := h.resolveBrowsePath(rawPath)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if errMsg == "forbidden" {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprint(w, `<div class="browse-error">Path is outside the allowed filesystem roots.</div>`)
+		fmt.Fprintf(w,
+			`<div class="browse-fragment"><div class="browse-error">This path is outside the allowed filesystem roots.</div>`+
+				`<div class="browse-actions"><button type="button" class="btn" `+
+				`hx-get="/api/browse/fragment?target=%s" hx-target="#browse-modal-body" hx-swap="innerHTML">Back to root</button>`+
+				`<button type="button" class="btn browse-cancel-btn" `+
+				`onclick="var w=document.getElementById('browse-modal');w.classList.remove('browse-modal-open');document.getElementById('browse-modal-body').innerHTML=''">Cancel</button>`+
+				`</div></div>`,
+			html(target),
+		)
 		return
 	}
 	if errMsg != "" {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, `<div class="browse-error">%s</div>`, html(errMsg))
+		fmt.Fprintf(w, `<div class="browse-fragment"><div class="browse-error">%s</div></div>`, html(errMsg))
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -72,6 +72,7 @@ const (
 
 // Settings is the single mutable config row (id=1).
 type Settings struct {
+	DownloadRoots      []string               `json:"download_roots"`   // managed via UI; env seeds on first boot
 	FileMode           FileMode
 	RenameScheme       string                  // e.g. "{series}/{series} - Ch.{chapter}.cbz"
 	PollMinutes        int
