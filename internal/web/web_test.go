@@ -17,8 +17,9 @@ import (
 
 	"github.com/gavinmcfall/mangarr/internal/dbbackup"
 	"github.com/gavinmcfall/mangarr/internal/diskspace"
-	"github.com/gavinmcfall/mangarr/internal/health"
 	"github.com/gavinmcfall/mangarr/internal/filer"
+	"github.com/gavinmcfall/mangarr/internal/health"
+	"github.com/gavinmcfall/mangarr/internal/kavita"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/poller"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
@@ -450,11 +451,15 @@ func TestAPIReclassifySetsType(t *testing.T) {
 
 func TestSaveSettingsFormPost(t *testing.T) {
 	h, st, _ := newTestHandler()
+	// Stub Kavita server so the round-trip GET /settings doesn't block on a real
+	// DNS lookup for the placeholder hostname. Returns empty library list = OK.
+	stub := kavitaStubServer(t, nil, 0, 0)
+	defer stub.Close()
 	form := url.Values{
 		"file_mode":         {"copy"},
 		"rename_scheme":     {"{series}/{series} - Ch.{chapter}.cbz"},
 		"poll_minutes":      {"60"},
-		"kavita_base_url":   {"http://kavita:5000"},
+		"kavita_base_url":   {stub.URL},
 		"kavita_api_key":    {"test-key"},
 		"root_manga":        {"/lib/Manga"},
 		"root_manhwa":       {"/lib/Manhwa"},
@@ -1882,5 +1887,297 @@ func TestDiskRowsSeparateForDifferentFSIDs(t *testing.T) {
 	rows := h.buildDiskRows(st.settings)
 	if len(rows) != 2 {
 		t.Fatalf("want 2 rows (different FSIDs), got %d: %+v", len(rows), rows)
+	}
+}
+
+// ---- Kavita library picker tests ----
+
+// kavitaStubServer returns an httptest server that mimics Kavita's auth + library endpoints.
+// libs is the canned library list returned from /api/Library. authStatus controls the
+// HTTP status code of the auth endpoint (0 = default 200 OK + jwt123 token). libraryStatus
+// controls the /api/Library status (0 = default 200 OK + libs JSON).
+func kavitaStubServer(t *testing.T, libs []kavita.Library, authStatus, libraryStatus int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/api/plugin/authenticate"):
+			if authStatus != 0 {
+				w.WriteHeader(authStatus)
+				return
+			}
+			w.Write([]byte(`{"token":"jwt123"}`))
+		case strings.Contains(r.URL.Path, "/api/Library"):
+			if libraryStatus != 0 {
+				w.WriteHeader(libraryStatus)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			body, _ := json.Marshal(libs)
+			w.Write(body)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+// newKavitaLibHandler builds a Handler whose store returns settings pointing at the
+// given Kavita base URL (use a kavitaStubServer for happy-path tests, an unreachable
+// URL for failure tests). The API key is fixed to "stubkey" — the stub server doesn't
+// check it.
+func newKavitaLibHandler(kavitaURL string, savedManga, savedManhwa, savedManhua int64) *Handler {
+	st := &fakeStore{
+		settings: model.Settings{
+			KavitaBaseURL: kavitaURL,
+			KavitaAPIKey:  "stubkey",
+			LibraryRoots:  map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{
+				model.TypeManga:  savedManga,
+				model.TypeManhwa: savedManhwa,
+				model.TypeManhua: savedManhua,
+			},
+		},
+	}
+	return NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+}
+
+func TestAPIKavitaLibrariesReturnsJSON(t *testing.T) {
+	libs := []kavita.Library{
+		{ID: 1, Name: "Manga", Type: 0},
+		{ID: 2, Name: "Comics", Type: 1},
+	}
+	srv := kavitaStubServer(t, libs, 0, 0)
+	defer srv.Close()
+	h := newKavitaLibHandler(srv.URL, 0, 0, 0)
+	req := httptest.NewRequest(http.MethodGet, "/api/kavita/libraries", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("want application/json, got %q", ct)
+	}
+	var resp struct {
+		Libraries []struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		} `json:"libraries"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if len(resp.Libraries) != 2 {
+		t.Fatalf("want 2 libraries, got %d", len(resp.Libraries))
+	}
+	// kavita.ListLibraries sorts by Name (case-insensitive): Comics before Manga.
+	if resp.Libraries[0].Name != "Comics" || resp.Libraries[1].Name != "Manga" {
+		t.Fatalf("unexpected library names (want sorted [Comics, Manga]): %+v", resp.Libraries)
+	}
+}
+
+func TestAPIKavitaLibrariesWhenUnconfiguredReturns503(t *testing.T) {
+	// Settings has no Kavita URL/key → endpoint returns 503 with a JSON error.
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/api/kavita/libraries", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503 when Kavita not configured, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestKavitaLibrariesFragmentRendersSelects(t *testing.T) {
+	libs := []kavita.Library{
+		{ID: 3, Name: "Manhwa", Type: 0},
+		{ID: 7, Name: "Manga JP", Type: 0},
+	}
+	srv := kavitaStubServer(t, libs, 0, 0)
+	defer srv.Close()
+	h := newKavitaLibHandler(srv.URL, 7, 3, 0)
+	req := httptest.NewRequest(http.MethodGet, "/api/kavita/libraries/fragment", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("want text/html, got %q", ct)
+	}
+	body := rr.Body.String()
+	// All three select name= attributes must be present.
+	if !strings.Contains(body, `name="kavita_lib_manga"`) {
+		t.Errorf("kavita_lib_manga select not in fragment; body:\n%s", body)
+	}
+	if !strings.Contains(body, `name="kavita_lib_manhwa"`) {
+		t.Errorf("kavita_lib_manhwa select not in fragment; body:\n%s", body)
+	}
+	if !strings.Contains(body, `name="kavita_lib_manhua"`) {
+		t.Errorf("kavita_lib_manhua select not in fragment; body:\n%s", body)
+	}
+	// Library names must appear as options.
+	if !strings.Contains(body, "Manga JP") {
+		t.Errorf("library 'Manga JP' not in fragment; body:\n%s", body)
+	}
+	if !strings.Contains(body, "Manhwa") {
+		t.Errorf("library 'Manhwa' not in fragment; body:\n%s", body)
+	}
+	// The currently-saved IDs (manga=7, manhwa=3) must be selected.
+	if !strings.Contains(body, `value="7" selected`) {
+		t.Errorf("manga library ID 7 not selected in fragment; body:\n%s", body)
+	}
+	if !strings.Contains(body, `value="3" selected`) {
+		t.Errorf("manhwa library ID 3 not selected in fragment; body:\n%s", body)
+	}
+}
+
+func TestKavitaLibrariesFragmentShowsErrorOnFailure(t *testing.T) {
+	// Use an httptest server that returns 401 on auth → kavita.ListLibraries
+	// fails immediately (no real network hang), and the fragment endpoint
+	// renders an inline error + the three placeholder selects.
+	srv := kavitaStubServer(t, nil, http.StatusUnauthorized, 0)
+	defer srv.Close()
+	h := newKavitaLibHandler(srv.URL, 0, 0, 0)
+	req := httptest.NewRequest(http.MethodGet, "/api/kavita/libraries/fragment", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	// Must return 200 so HTMX swaps the content.
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 (UX > strict HTTP), got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Kavita unreachable") {
+		t.Errorf("expected 'Kavita unreachable' inline error; body:\n%s", body)
+	}
+	// The three select placeholders must still render so layout doesn't shift.
+	if !strings.Contains(body, `name="kavita_lib_manga"`) {
+		t.Errorf("kavita_lib_manga select not in error fragment; body:\n%s", body)
+	}
+	if !strings.Contains(body, `name="kavita_lib_manhua"`) {
+		t.Errorf("kavita_lib_manhua select not in error fragment; body:\n%s", body)
+	}
+}
+
+func TestKavitaLibrariesFragmentWhenUnconfiguredShowsConfigurePrompt(t *testing.T) {
+	// Settings has no URL/key configured → fragment 200 with "not configured" message.
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/api/kavita/libraries/fragment", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "not configured") {
+		t.Errorf("expected 'not configured' message; body:\n%s", body)
+	}
+	if !strings.Contains(body, `name="kavita_lib_manga"`) {
+		t.Errorf("placeholder select for kavita_lib_manga missing; body:\n%s", body)
+	}
+}
+
+func TestKavitaLibrariesFragmentRendersUnknownOption(t *testing.T) {
+	// Saved manga ID=99 is not in the fetched library list.
+	libs := []kavita.Library{
+		{ID: 1, Name: "Comics", Type: 1},
+	}
+	srv := kavitaStubServer(t, libs, 0, 0)
+	defer srv.Close()
+	h := newKavitaLibHandler(srv.URL, 99, 0, 0)
+	req := httptest.NewRequest(http.MethodGet, "/api/kavita/libraries/fragment", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Unknown (ID: 99)") {
+		t.Errorf("expected 'Unknown (ID: 99)' option for orphaned saved ID; body:\n%s", body)
+	}
+}
+
+func TestSettingsPageRendersKavitaLibSelectsWhenKavitaConfigured(t *testing.T) {
+	libs := []kavita.Library{
+		{ID: 5, Name: "My Manga", Type: 0},
+		{ID: 6, Name: "My Manhwa", Type: 0},
+	}
+	srv := kavitaStubServer(t, libs, 0, 0)
+	defer srv.Close()
+	h := newKavitaLibHandler(srv.URL, 5, 6, 0)
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	// Section heading.
+	if !strings.Contains(body, "Kavita Libraries") {
+		t.Errorf("'Kavita Libraries' heading not in settings page; body excerpt:\n%s", snippet(body, "Kavita", 300))
+	}
+	// Sync button.
+	if !strings.Contains(body, "Sync") {
+		t.Errorf("'Sync' button not in settings page; body excerpt:\n%s", snippet(body, "Kavita", 300))
+	}
+	// Populated selects — library names must appear.
+	if !strings.Contains(body, "My Manga") {
+		t.Errorf("library 'My Manga' not in settings page; body excerpt:\n%s", snippet(body, "kavita_lib", 400))
+	}
+	if !strings.Contains(body, "My Manhwa") {
+		t.Errorf("library 'My Manhwa' not in settings page; body excerpt:\n%s", snippet(body, "kavita_lib", 400))
+	}
+	// Select name= attributes must be present (for existing TestSettingsPageReturns200 compat).
+	if !strings.Contains(body, `name="kavita_lib_manhua"`) {
+		t.Errorf("kavita_lib_manhua select not in settings page; body:\n%s", snippet(body, "kavita_lib", 500))
+	}
+}
+
+func TestSettingsPageRendersPlaceholderSelectsWhenKavitaNotConfigured(t *testing.T) {
+	// No Kavita URL configured → placeholder selects with the name= attribute preserved.
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	// The name= attributes must still be present for backwards compat.
+	if !strings.Contains(body, `name="kavita_lib_manga"`) {
+		t.Errorf("kavita_lib_manga select not present as placeholder; body:\n%s", snippet(body, "kavita_lib", 400))
+	}
+	if !strings.Contains(body, `name="kavita_lib_manhwa"`) {
+		t.Errorf("kavita_lib_manhwa select not present as placeholder; body:\n%s", snippet(body, "kavita_lib", 400))
+	}
+	if !strings.Contains(body, `name="kavita_lib_manhua"`) {
+		t.Errorf("kavita_lib_manhua select not present as placeholder; body:\n%s", snippet(body, "kavita_lib", 400))
+	}
+	// Must be disabled placeholders (no real options).
+	if !strings.Contains(body, "Click Sync after configuring Kavita") {
+		t.Errorf("placeholder text not present in selects; body:\n%s", snippet(body, "kavita_lib", 500))
 	}
 }

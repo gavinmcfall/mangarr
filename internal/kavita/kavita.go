@@ -8,8 +8,18 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 	"time"
 )
+
+// Library is one entry from Kavita's GET /api/Library response.
+type Library struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	Type int    `json:"type"` // Kavita's LibraryType enum
+	// (0=Manga, 1=Comic, 2=Book, 3=Image, 4=LightNovel, 5=ComicVine)
+}
 
 // Client authenticates against Kavita's plugin API and triggers library scans.
 type Client struct {
@@ -30,10 +40,18 @@ func New(base, apiKey string) *Client {
 
 // authenticate exchanges the API key for a short-lived JWT.
 // POST /api/plugin/authenticate?apiKey=...&pluginName=mangarr
-func (c *Client) authenticate() (string, error) {
+//
+// ctx is honoured so cancellation/deadlines flow through to the underlying
+// HTTP request. Callers without a context can pass context.Background().
+func (c *Client) authenticate(ctx context.Context) (string, error) {
 	u := fmt.Sprintf("%s/api/plugin/authenticate?apiKey=%s&pluginName=mangarr",
 		c.base, url.QueryEscape(c.apiKey))
-	resp, err := c.http.Post(u, "application/json", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		return "", fmt.Errorf("kavita auth request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("kavita auth request: %w", err)
 	}
@@ -58,15 +76,48 @@ func (c *Client) authenticate() (string, error) {
 // and discarding the token. It is used by the health check to confirm the
 // base URL and API key are correct without triggering any library operations.
 func (c *Client) Ping(ctx context.Context) error {
-	_, err := c.authenticate()
+	_, err := c.authenticate(ctx)
 	return err
+}
+
+// ListLibraries authenticates to Kavita and returns all libraries the
+// authenticated user can see (Kavita's GET /api/Library is per-user-scoped).
+//
+// The returned slice is sorted by Library.Name for stable UI ordering.
+func (c *Client) ListLibraries(ctx context.Context) ([]Library, error) {
+	token, err := c.authenticate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/Library", nil)
+	if err != nil {
+		return nil, fmt.Errorf("kavita list libraries request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("kavita list libraries: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		io.Copy(io.Discard, resp.Body) // drain for keep-alive reuse
+		return nil, fmt.Errorf("kavita list libraries status %d", resp.StatusCode)
+	}
+	var libs []Library
+	if err := json.NewDecoder(resp.Body).Decode(&libs); err != nil {
+		return nil, fmt.Errorf("kavita list libraries decode: %w", err)
+	}
+	sort.Slice(libs, func(i, j int) bool {
+		return strings.ToLower(libs[i].Name) < strings.ToLower(libs[j].Name)
+	})
+	return libs, nil
 }
 
 // ScanLibrary triggers a full library scan for the given library ID.
 // It authenticates first, then POST /api/library/scan with the bearer token.
 // libraryID is int64 to match model.Settings.KavitaLibIDs []int64.
 func (c *Client) ScanLibrary(libraryID int64) error {
-	token, err := c.authenticate()
+	token, err := c.authenticate(context.Background())
 	if err != nil {
 		return err
 	}

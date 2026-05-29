@@ -29,6 +29,8 @@
 //	GET  /api/backups                → JSON list of backup entries (newest first)
 //	POST /api/backups/run            → Trigger immediate backup; returns new Entry as JSON
 //	GET  /api/backups/{name}         → Download a backup file
+//	GET  /api/kavita/libraries       → JSON list of Kavita libraries
+//	GET  /api/kavita/libraries/fragment → HTMX HTML fragment: three library <select> elements
 //	GET  /metrics                    → Prometheus metrics (text/plain; version=0.0.4)
 //	GET  /static/*                   → Embedded static assets (htmx.min.js)
 package web
@@ -53,6 +55,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/diskspace"
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/health"
+	"github.com/gavinmcfall/mangarr/internal/kavita"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/poller"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
@@ -120,11 +123,11 @@ type SeriesFiler interface {
 type HandlerOpts struct {
 	Store       Store
 	Runner      Runner
-	SeriesFiler SeriesFiler  // optional; /api/series/{id}/assign returns 503 when nil
-	TaskReg     TaskRegistry // optional; tasks routes return 503 when nil
+	SeriesFiler SeriesFiler    // optional; /api/series/{id}/assign returns 503 when nil
+	TaskReg     TaskRegistry   // optional; tasks routes return 503 when nil
 	HealthReg   HealthRegistry // optional; health routes show a placeholder
-	Metrics     MetricsSink  // optional; /metrics returns 503 when nil
-	Previewer   Previewer    // optional; /preview returns placeholder when nil
+	Metrics     MetricsSink    // optional; /metrics returns 503 when nil
+	Previewer   Previewer      // optional; /preview returns placeholder when nil
 
 	BrowseRoots             []string // allowlist for /api/browse; defaults to ["/media", "/config"]
 	RecycleBinPath          string
@@ -146,7 +149,7 @@ type Handler struct {
 	runner                  Runner
 	previewer               Previewer                     // optional; /preview returns placeholder when nil
 	seriesFiler             SeriesFiler                   // optional; /api/series/{id}/assign returns 503 when nil
-	browseRoots             []string // allowlist for /api/browse (injected; tests can override)
+	browseRoots             []string                      // allowlist for /api/browse (injected; tests can override)
 	recycleBinPath          string
 	recycleBinRetentionDays int
 	backupDir               string
@@ -219,6 +222,10 @@ func NewHandler(opts HandlerOpts) *Handler {
 	h.mux.HandleFunc("GET /api/browse", h.apiBrowse)
 	h.mux.HandleFunc("GET /api/browse/fragment", h.apiBrowseFragment)
 
+	// Kavita library picker API
+	h.mux.HandleFunc("GET /api/kavita/libraries", h.apiKavitaLibraries)
+	h.mux.HandleFunc("GET /api/kavita/libraries/fragment", h.apiKavitaLibrariesFragment)
+
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
 
@@ -280,6 +287,26 @@ func templateFuncs() template.FuncMap {
 		"formatAge": formatAge,
 		// formatInterval renders a task IntervalMs as a short string, e.g. "15m".
 		"formatInterval": formatInterval,
+		// kavitaLibInList returns true if the given ID exists in the Library slice.
+		// Used in settings.html to detect orphaned saved IDs.
+		"kavitaLibInList": func(id int64, libs []kavita.Library) bool {
+			for _, lib := range libs {
+				if lib.ID == id {
+					return true
+				}
+			}
+			return false
+		},
+		// kavitaLibNotInList returns true if the given ID is NOT in the Library slice.
+		// Avoids shadowing the built-in `not` template function which works on any truthy value.
+		"kavitaLibNotInList": func(id int64, libs []kavita.Library) bool {
+			for _, lib := range libs {
+				if lib.ID == id {
+					return false
+				}
+			}
+			return true
+		},
 	}
 }
 
@@ -367,6 +394,11 @@ type settingsPageData struct {
 	KavitaLibManga          int64
 	KavitaLibManhwa         int64
 	KavitaLibManhua         int64
+	// KavitaLibraries holds the fetched Kavita library list for the select dropdowns.
+	// Nil/empty means Kavita is not configured or unreachable → render placeholders.
+	KavitaLibraries []kavita.Library
+	// KavitaLibError is set when a library fetch attempt failed; displayed inline.
+	KavitaLibError string
 	RenameExample           string
 	DiskRows                []fsDiskRow
 	RecycleBinPath          string
@@ -638,6 +670,22 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Try fetching Kavita libraries for the select dropdowns if Kavita is configured.
+	// We build a fresh client from CURRENT settings each call so URL/key changes
+	// take effect immediately (no restart needed).
+	var kavitaLibs []kavita.Library
+	var kavitaLibErr string
+	if settings.KavitaBaseURL != "" && settings.KavitaAPIKey != "" {
+		fetchCtx, fetchCancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer fetchCancel()
+		client := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)
+		if libs, err := client.ListLibraries(fetchCtx); err != nil {
+			kavitaLibErr = err.Error()
+		} else {
+			kavitaLibs = libs
+		}
+	}
+
 	// Pre-extract values typed-keyed by model.ContentType into plain fields,
 	// so the template can use {{.RootManga}} etc. with no reflection-time
 	// type mismatch. See settingsPageData doc comment.
@@ -653,6 +701,8 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		KavitaLibManga:          settings.KavitaLibIDsByType[model.TypeManga],
 		KavitaLibManhwa:         settings.KavitaLibIDsByType[model.TypeManhwa],
 		KavitaLibManhua:         settings.KavitaLibIDsByType[model.TypeManhua],
+		KavitaLibraries:         kavitaLibs,
+		KavitaLibError:          kavitaLibErr,
 		RenameExample:           renameExample(settings.RenameScheme),
 		DiskRows:                diskRows,
 		RecycleBinPath:          h.recycleBinPath,
@@ -880,6 +930,8 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 			KavitaLibManhwa: settings.KavitaLibIDsByType[model.TypeManhwa],
 			KavitaLibManhua: settings.KavitaLibIDsByType[model.TypeManhua],
 			RenameExample:   renameExample(settings.RenameScheme),
+			// Kavita libraries not re-fetched on validation error — user will see
+			// placeholder selects, which is acceptable since this is an error path.
 		})
 		return
 	}
@@ -1513,6 +1565,159 @@ func (h *Handler) apiBrowseFragment(w http.ResponseWriter, r *http.Request) {
 			`onclick="var w=document.getElementById('browse-modal');w.classList.remove('browse-modal-open');document.getElementById('browse-modal-body').innerHTML=''">Cancel</button>`,
 	)
 	fmt.Fprint(w, `</div></div>`)
+}
+
+// ---- Kavita library picker API ----
+
+// kavitaLibrariesResponse is the JSON shape for GET /api/kavita/libraries.
+type kavitaLibrariesResponse struct {
+	Libraries []kavita.Library `json:"libraries"`
+}
+
+// apiKavitaLibraries handles GET /api/kavita/libraries.
+// Returns JSON {libraries:[{id,name,type},...]} or {error:"..."} + appropriate status.
+// Builds a fresh kavita.Client from current Settings so URL/key changes apply
+// immediately without requiring a restart.
+func (h *Handler) apiKavitaLibraries(w http.ResponseWriter, r *http.Request) {
+	settings, err := h.store.GetSettings()
+	if err != nil {
+		jsonErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	if settings.KavitaBaseURL == "" || settings.KavitaAPIKey == "" {
+		jsonErr(w, fmt.Errorf("kavita base URL and API key not configured"), http.StatusServiceUnavailable)
+		return
+	}
+	client := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)
+	libs, err := client.ListLibraries(r.Context())
+	if err != nil {
+		jsonErr(w, err, http.StatusBadGateway)
+		return
+	}
+	if libs == nil {
+		libs = []kavita.Library{}
+	}
+	jsonOK(w, kavitaLibrariesResponse{Libraries: libs})
+}
+
+// apiKavitaLibrariesFragment handles GET /api/kavita/libraries/fragment.
+// Returns an HTML fragment for HTMX: three labeled <select> elements populated
+// with Kavita library options. On failure returns HTTP 200 with an inline error
+// message (so HTMX always swaps the content and the user sees a readable message).
+//
+// Builds a fresh kavita.Client from current Settings each call so the user can
+// change Kavita URL/key in the form, click Save, then click Sync — and it just
+// works without any restart.
+func (h *Handler) apiKavitaLibrariesFragment(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	settings, err := h.store.GetSettings()
+	if err != nil {
+		// Can't read settings — render error + disabled placeholders.
+		fmt.Fprintf(w, `<div class="form-error">Cannot read settings: %s</div>`, html(err.Error()))
+		writeKavitaLibPlaceholders(w, 0, 0, 0)
+		return
+	}
+	if settings.KavitaLibIDsByType == nil {
+		settings.KavitaLibIDsByType = map[model.ContentType]int64{}
+	}
+	savedManga := settings.KavitaLibIDsByType[model.TypeManga]
+	savedManhwa := settings.KavitaLibIDsByType[model.TypeManhwa]
+	savedManhua := settings.KavitaLibIDsByType[model.TypeManhua]
+
+	if settings.KavitaBaseURL == "" || settings.KavitaAPIKey == "" {
+		fmt.Fprint(w, `<div class="form-error">Kavita not configured. Set the base URL and API key in Settings &#8594; Kavita Connection above, click Save, then Sync.</div>`)
+		writeKavitaLibPlaceholders(w, savedManga, savedManhwa, savedManhua)
+		return
+	}
+
+	fetchCtx, fetchCancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer fetchCancel()
+	client := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)
+	libs, err := client.ListLibraries(fetchCtx)
+	if err != nil {
+		fmt.Fprintf(w, `<div class="form-error">Kavita unreachable: %s. Check Settings &#8594; Kavita Connection.</div>`,
+			html(err.Error()))
+		writeKavitaLibPlaceholders(w, savedManga, savedManhwa, savedManhua)
+		return
+	}
+
+	writeKavitaLibSelects(w, libs, savedManga, savedManhwa, savedManhua)
+}
+
+// writeKavitaLibSelects renders three labeled <select> elements populated with
+// the given Kavita library list. The currently-saved IDs get the selected attribute.
+// If a saved ID is non-zero but missing from the list, an "Unknown (ID: N)" option
+// is prepended.
+func writeKavitaLibSelects(w http.ResponseWriter, libs []kavita.Library, savedManga, savedManhwa, savedManhua int64) {
+	type entry struct {
+		label   string
+		name    string
+		savedID int64
+	}
+	rows := []entry{
+		{"MANGA LIBRARY", "kavita_lib_manga", savedManga},
+		{"MANHWA LIBRARY", "kavita_lib_manhwa", savedManhwa},
+		{"MANHUA LIBRARY", "kavita_lib_manhua", savedManhua},
+	}
+	for _, row := range rows {
+		fmt.Fprintf(w, `<div class="settings-row"><label class="settings-label">%s</label><div class="settings-input-wrap">`,
+			html(row.label))
+		fmt.Fprintf(w, `<select name="%s">`, html(row.name))
+		fmt.Fprint(w, `<option value="0">(none)</option>`)
+		// Prepend unknown option if saved ID is non-zero but not in list.
+		if row.savedID > 0 {
+			found := false
+			for _, lib := range libs {
+				if lib.ID == row.savedID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				fmt.Fprintf(w, `<option value="%d" selected>Unknown (ID: %d)</option>`,
+					row.savedID, row.savedID)
+			}
+		}
+		for _, lib := range libs {
+			sel := ""
+			if lib.ID == row.savedID {
+				sel = " selected"
+			}
+			fmt.Fprintf(w, `<option value="%d"%s>%s</option>`,
+				lib.ID, sel, html(lib.Name))
+		}
+		fmt.Fprint(w, `</select></div></div>`)
+	}
+}
+
+// writeKavitaLibPlaceholders renders three disabled <select> elements with a
+// placeholder option. The select name= attributes are preserved so form POST
+// parsing keeps working. A non-zero savedID renders a "(saved: N)" hint so the
+// user knows a value is persisted even though the list is unavailable.
+func writeKavitaLibPlaceholders(w http.ResponseWriter, savedManga, savedManhwa, savedManhua int64) {
+	type entry struct {
+		label   string
+		name    string
+		savedID int64
+	}
+	rows := []entry{
+		{"MANGA LIBRARY", "kavita_lib_manga", savedManga},
+		{"MANHWA LIBRARY", "kavita_lib_manhwa", savedManhwa},
+		{"MANHUA LIBRARY", "kavita_lib_manhua", savedManhua},
+	}
+	for _, row := range rows {
+		fmt.Fprintf(w, `<div class="settings-row"><label class="settings-label">%s</label><div class="settings-input-wrap">`,
+			html(row.label))
+		if row.savedID > 0 {
+			fmt.Fprintf(w, `<select name="%s" disabled><option value="%d" selected>Click Sync after configuring Kavita above (saved: %d)</option></select>`,
+				html(row.name), row.savedID, row.savedID)
+		} else {
+			fmt.Fprintf(w, `<select name="%s" disabled><option value="0">Click Sync after configuring Kavita above</option></select>`,
+				html(row.name))
+		}
+		fmt.Fprint(w, `</div></div>`)
+	}
 }
 
 // breadcrumb represents one segment in the path-browser breadcrumbs.
