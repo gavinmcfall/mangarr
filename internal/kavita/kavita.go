@@ -2,6 +2,7 @@ package kavita
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,6 +52,14 @@ func (c *Client) authenticate() (string, error) {
 		return "", fmt.Errorf("kavita auth: empty token in response")
 	}
 	return out.Token, nil
+}
+
+// Ping verifies that the Kavita credentials are valid by calling authenticate()
+// and discarding the token. It is used by the health check to confirm the
+// base URL and API key are correct without triggering any library operations.
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.authenticate()
+	return err
 }
 
 // ScanLibrary triggers a full library scan for the given library ID.

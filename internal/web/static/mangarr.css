@@ -522,3 +522,14 @@ input[type="number"].input-narrow {
   color: #e15554;
   font-style: italic;
 }
+
+/* ---- Health page ---- */
+.health-warn-banner {
+  background: #4f3a1a;
+  color: #e6a23c;
+  border: 1px solid #7a5c2a;
+  border-radius: 6px;
+  padding: 12px 16px;
+  font-size: 14px;
+}
+.health-warn-banner p { margin: 0; }

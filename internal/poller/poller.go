@@ -64,6 +64,16 @@ type ActivityWriter interface {
 	AddActivity(e model.ActivityEntry) error
 }
 
+// MetricsSink is the subset of the metrics.Registry interface the poller uses.
+// A nil value is safe: all methods are guarded with a nil check.
+type MetricsSink interface {
+	IncFilesFiled(category string)
+	IncKavitaScan(result string)
+	IncUnmatched()
+	IncFileError()
+	SetPollerLastRun(t time.Time)
+}
+
 // Poller holds the wired-up dependencies and configuration for one orchestration tick.
 type Poller struct {
 	Scanner      Scanner
@@ -72,6 +82,7 @@ type Poller struct {
 	Kavita       Kavita
 	Unmatched    UnmatchedSink
 	Activity     ActivityWriter
+	Metrics      MetricsSink                  // optional; nil disables all metric calls
 	LibraryRoots map[model.ContentType]string // content type → absolute library path
 	LibraryIDs   map[model.ContentType]int64  // content type → Kavita library ID
 	RecycleBin   *recyclebin.Bin              // optional; GC is called at end of each RunOnce tick
@@ -110,6 +121,9 @@ func (p *Poller) RunOnce() error {
 				continue
 			}
 			p.recordActivity(s.Title, model.ActionUnmatched, "")
+			if p.Metrics != nil {
+				p.Metrics.IncUnmatched()
+			}
 			continue
 		}
 
@@ -129,10 +143,16 @@ func (p *Poller) RunOnce() error {
 			// Filer error: record, do NOT trigger scan, move on.
 			p.recordActivity(s.Title, model.ActionError,
 				fmt.Sprintf("file: %v", err))
+			if p.Metrics != nil {
+				p.Metrics.IncFileError()
+			}
 			continue
 		}
 		p.recordActivity(s.Title, model.ActionFiled,
 			fmt.Sprintf("filed into %s", root))
+		if p.Metrics != nil {
+			p.Metrics.IncFilesFiled(string(ct))
+		}
 
 		// Trigger a Kavita scan for this library (once per library per tick,
 		// gated on SUCCESS so a transient failure can be retried by the next
@@ -141,11 +161,17 @@ func (p *Poller) RunOnce() error {
 			if err := p.Kavita.ScanLibrary(id); err != nil {
 				p.recordActivity(s.Title, model.ActionError,
 					fmt.Sprintf("kavita scan library %d: %v", id, err))
+				if p.Metrics != nil {
+					p.Metrics.IncKavitaScan("error")
+				}
 				// Do NOT mark scanned[id] — let the next same-type series retry.
 				continue
 			}
 			p.recordActivity(s.Title, model.ActionScanTriggered,
 				fmt.Sprintf("library %d", id))
+			if p.Metrics != nil {
+				p.Metrics.IncKavitaScan("success")
+			}
 			scanned[id] = true
 		}
 	}
@@ -158,6 +184,11 @@ func (p *Poller) RunOnce() error {
 		} else if files > 0 || dirs > 0 {
 			log.Printf("poller: recycle bin GC removed %d file(s) and %d empty dir(s)", files, dirs)
 		}
+	}
+
+	// Update the poller-last-run gauge at the end of every successful tick.
+	if p.Metrics != nil {
+		p.Metrics.SetPollerLastRun(time.Now())
 	}
 
 	return nil

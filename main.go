@@ -34,8 +34,12 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/classifier"
 	"github.com/gavinmcfall/mangarr/internal/config"
 	"github.com/gavinmcfall/mangarr/internal/dbbackup"
+	"github.com/gavinmcfall/mangarr/internal/diskspace"
 	"github.com/gavinmcfall/mangarr/internal/filer"
+	"github.com/gavinmcfall/mangarr/internal/health"
+	healthchecks "github.com/gavinmcfall/mangarr/internal/health/checks"
 	"github.com/gavinmcfall/mangarr/internal/kavita"
+	"github.com/gavinmcfall/mangarr/internal/metrics"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/poller"
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
@@ -74,10 +78,14 @@ func main() {
 		log.Fatalf("recycle bin: create root %s: %v", bin.Root, err)
 	}
 
+	// ---- metrics registry ----
+	metricsReg := metrics.NewRegistry()
+
 	// ---- classifier (with store-backed cache) ----
 	// AniList endpoint: use env override if set, else empty string = default (https://graphql.anilist.co).
 	anilistEndpoint := os.Getenv("MANGARR_ANILIST_ENDPOINT")
 	clf := classifier.NewWithCache(anilistEndpoint, st)
+	clf.Metrics = metricsReg
 
 	// ---- kavita client ----
 	kavitaClient := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)
@@ -121,6 +129,7 @@ func main() {
 		Unmatched: st,
 		// store.Store.AddActivity satisfies poller.ActivityWriter directly.
 		Activity:     st,
+		Metrics:      metricsReg,
 		LibraryRoots: settings.LibraryRoots,
 		LibraryIDs:   libIDs,
 		RecycleBin:   bin,
@@ -166,12 +175,29 @@ func main() {
 		log.Fatalf("tasks: register poll-scan: %v", err)
 	}
 
+	// ---- health registry ----
+	healthReg := health.NewRegistry()
+	settingsLoader := func() (model.Settings, error) { return st.GetSettings() }
+	for _, check := range []health.Check{
+		healthchecks.DownloadRootsCheck(cfg.DownloadRoots),
+		healthchecks.LibraryRootsCheck(settingsLoader),
+		healthchecks.KavitaCheck(kavitaClient),
+		healthchecks.AniListCheck(anilistEndpoint),
+		healthchecks.SQLiteCheck(st.DB()),
+		healthchecks.DiskSpaceCheck(cfg.DownloadRoots, 15, 5),
+		healthchecks.RenameSchemeCheck(settingsLoader),
+	} {
+		if err := healthReg.Register(check); err != nil {
+			log.Fatalf("health: %v", err)
+		}
+	}
+
 	// ---- web handler ----
 	h := web.NewHandlerWithBackup(st, p, cfg.RecycleBinPath, cfg.RecycleBinRetentionDays, web.BackupConfig{
 		Dir:           cfg.BackupDir,
 		RetentionDays: cfg.BackupRetentionDays,
 		IntervalHours: cfg.BackupIntervalHours,
-	}, backupFn, reg, cfg.DownloadRoots...)
+	}, backupFn, reg, healthReg, metricsReg, cfg.DownloadRoots...)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           h,
@@ -181,6 +207,96 @@ func main() {
 	// ---- graceful shutdown context ----
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// ---- metrics sweeper ----
+	// Runs every 30 s; populates gauges from store + disk + health state.
+	// Individual step errors are logged and skipped — never abort the sweep.
+	metricsTicker := time.NewTicker(30 * time.Second)
+	go func() {
+		sweep := func() {
+			// 1. Series counts by category.
+			if seriesList, err := st.ListSeries(); err != nil {
+				log.Printf("metrics sweeper: list series: %v", err)
+			} else {
+				counts := map[string]int{}
+				for _, s := range seriesList {
+					counts[string(s.Type)]++
+				}
+				for cat, n := range counts {
+					metricsReg.SetSeriesCount(cat, n)
+				}
+			}
+
+			// 2. Unmatched count.
+			if unmatched, err := st.ListUnmatched(); err != nil {
+				log.Printf("metrics sweeper: list unmatched: %v", err)
+			} else {
+				metricsReg.SetUnmatchedCount(len(unmatched))
+			}
+
+			// 3. Disk space for download roots + library roots.
+			sweepSettings, err := st.GetSettings()
+			if err != nil {
+				log.Printf("metrics sweeper: get settings: %v", err)
+			} else {
+				paths := make(map[string]bool)
+				for _, p := range cfg.DownloadRoots {
+					paths[p] = true
+				}
+				for _, root := range sweepSettings.LibraryRoots {
+					if root != "" {
+						paths[root] = true
+					}
+				}
+				for path := range paths {
+					info := diskspace.Stat(path)
+					if info.Err != nil {
+						log.Printf("metrics sweeper: diskspace %q: %v", path, info.Err)
+						continue
+					}
+					metricsReg.SetDiskFreeBytes(path, info.FreeBytes)
+					metricsReg.SetDiskTotalBytes(path, info.TotalBytes)
+				}
+			}
+
+			// 4. Health check statuses.
+			healthResults := healthReg.RunAll(ctx)
+			for _, res := range healthResults {
+				var statusInt int
+				switch res.Status {
+				case health.StatusOK:
+					statusInt = 0
+				case health.StatusWarn:
+					statusInt = 1
+				default: // error
+					statusInt = 2
+				}
+				metricsReg.SetHealthStatus(res.ID, statusInt)
+			}
+
+			// 5. Backup count + newest mod time.
+			if entries, err := dbbackup.List(cfg.BackupDir); err != nil {
+				log.Printf("metrics sweeper: list backups: %v", err)
+			} else {
+				metricsReg.SetBackupCount(len(entries))
+				if len(entries) > 0 {
+					metricsReg.SetBackupLastModTime(entries[0].ModTime)
+				}
+			}
+		}
+
+		// Run immediately on startup so metrics are populated before first scrape.
+		sweep()
+		for {
+			select {
+			case <-metricsTicker.C:
+				sweep()
+			case <-ctx.Done():
+				metricsTicker.Stop()
+				return
+			}
+		}
+	}()
 
 	// ---- poll scheduler ----
 	pollMinutes := settings.PollMinutes
