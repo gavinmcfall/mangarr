@@ -8,11 +8,14 @@ import (
 )
 
 type Config struct {
-	DownloadRoots          []string
-	DBPath                 string
-	HTTPAddr               string
-	RecycleBinPath         string
+	DownloadRoots           []string
+	DBPath                  string
+	HTTPAddr                string
+	RecycleBinPath          string
 	RecycleBinRetentionDays int
+	BackupDir               string
+	BackupRetentionDays     int
+	BackupIntervalHours     int
 }
 
 func Load() (Config, error) {
@@ -44,11 +47,30 @@ func Load() (Config, error) {
 			binRetention = n
 		}
 	}
+	backupDir := os.Getenv("MANGARR_BACKUP_DIR")
+	if backupDir == "" {
+		backupDir = "/config/backups"
+	}
+	retentionDays := 14
+	if s := strings.TrimSpace(os.Getenv("MANGARR_BACKUP_RETENTION_DAYS")); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			retentionDays = n
+		}
+	}
+	intervalHours := 24
+	if s := strings.TrimSpace(os.Getenv("MANGARR_BACKUP_INTERVAL_HOURS")); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			intervalHours = n
+		}
+	}
 	return Config{
 		DownloadRoots:           roots,
 		DBPath:                  db,
 		HTTPAddr:                addr,
 		RecycleBinPath:          binPath,
 		RecycleBinRetentionDays: binRetention,
+		BackupDir:               backupDir,
+		BackupRetentionDays:     retentionDays,
+		BackupIntervalHours:     intervalHours,
 	}, nil
 }

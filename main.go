@@ -9,12 +9,17 @@
 //   - kavita     (library scan trigger)
 //   - poller     (orchestrate one pass; scheduler ticker)
 //   - web        (embedded HTMX UI + JSON API)
+//   - dbbackup   (scheduled VACUUM INTO + download API)
 //
 // Required env var: MANGARR_DOWNLOAD_ROOTS (comma-separated paths).
 // Optional:
-//   MANGARR_DB_PATH         (default /config/mangarr.db)
-//   MANGARR_HTTP_ADDR       (default :8590)
-//   MANGARR_ANILIST_ENDPOINT (override AniList GraphQL URL; default https://graphql.anilist.co)
+//
+//	MANGARR_DB_PATH                (default /config/mangarr.db)
+//	MANGARR_HTTP_ADDR              (default :8590)
+//	MANGARR_ANILIST_ENDPOINT       (override AniList GraphQL URL; default https://graphql.anilist.co)
+//	MANGARR_BACKUP_DIR             (default /config/backups)
+//	MANGARR_BACKUP_RETENTION_DAYS  (default 14)
+//	MANGARR_BACKUP_INTERVAL_HOURS  (default 24)
 package main
 
 import (
@@ -28,6 +33,7 @@ import (
 
 	"github.com/gavinmcfall/mangarr/internal/classifier"
 	"github.com/gavinmcfall/mangarr/internal/config"
+	"github.com/gavinmcfall/mangarr/internal/dbbackup"
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/kavita"
 	"github.com/gavinmcfall/mangarr/internal/model"
@@ -119,8 +125,32 @@ func main() {
 		RecycleBin:   bin,
 	}
 
+	// ---- backup function (closure over db and config) ----
+	backupFn := func() (dbbackup.Entry, error) {
+		path, err := dbbackup.Backup(st.DB(), cfg.BackupDir, time.Now())
+		if err != nil {
+			return dbbackup.Entry{}, err
+		}
+		// Build an Entry from the freshly-written file.
+		entries, err := dbbackup.List(cfg.BackupDir)
+		if err != nil {
+			return dbbackup.Entry{}, err
+		}
+		for _, e := range entries {
+			if e.Path == path {
+				return e, nil
+			}
+		}
+		// Fallback: return a minimal entry if List can't find it immediately.
+		return dbbackup.Entry{Name: lastPathComponent(path), Path: path}, nil
+	}
+
 	// ---- web handler ----
-	h := web.NewHandler(st, p, cfg.RecycleBinPath, cfg.RecycleBinRetentionDays, cfg.DownloadRoots...)
+	h := web.NewHandlerWithBackup(st, p, cfg.RecycleBinPath, cfg.RecycleBinRetentionDays, web.BackupConfig{
+		Dir:           cfg.BackupDir,
+		RetentionDays: cfg.BackupRetentionDays,
+		IntervalHours: cfg.BackupIntervalHours,
+	}, backupFn, cfg.DownloadRoots...)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           h,
@@ -153,6 +183,44 @@ func main() {
 			case <-ctx.Done():
 				log.Printf("poller: shutting down")
 				ticker.Stop()
+				return
+			}
+		}
+	}()
+
+	// ---- backup scheduler ----
+	backupTicker := time.NewTicker(time.Duration(cfg.BackupIntervalHours) * time.Hour)
+	retention := time.Duration(cfg.BackupRetentionDays) * 24 * time.Hour
+	go func() {
+		// Run once immediately on startup so there is always at least one backup.
+		log.Printf("backup: initial backup starting")
+		if path, err := dbbackup.Backup(st.DB(), cfg.BackupDir, time.Now()); err != nil {
+			log.Printf("backup: initial backup error: %v", err)
+		} else {
+			log.Printf("backup: initial backup written to %s", path)
+		}
+		if n, err := dbbackup.GC(cfg.BackupDir, retention, time.Now()); err != nil {
+			log.Printf("backup: gc error: %v", err)
+		} else if n > 0 {
+			log.Printf("backup: gc removed %d old backup(s)", n)
+		}
+		for {
+			select {
+			case <-backupTicker.C:
+				log.Printf("backup: scheduled tick — running backup")
+				if path, err := dbbackup.Backup(st.DB(), cfg.BackupDir, time.Now()); err != nil {
+					log.Printf("backup: error: %v", err)
+				} else {
+					log.Printf("backup: written to %s", path)
+				}
+				if n, err := dbbackup.GC(cfg.BackupDir, retention, time.Now()); err != nil {
+					log.Printf("backup: gc error: %v", err)
+				} else if n > 0 {
+					log.Printf("backup: gc removed %d old backup(s)", n)
+				}
+			case <-ctx.Done():
+				log.Printf("backup: shutting down")
+				backupTicker.Stop()
 				return
 			}
 		}

@@ -24,6 +24,9 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB returns the underlying *sql.DB handle. Used by the backup scheduler.
+func (s *Store) DB() *sql.DB { return s.db }
+
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS series (
