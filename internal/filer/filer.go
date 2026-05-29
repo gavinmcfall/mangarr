@@ -12,6 +12,79 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/model"
 )
 
+// knownTokens is the set of substitution tokens recognised by RenderName.
+var knownTokens = []string{"{series}", "{chapter}"}
+
+// tokenRe matches any {…} placeholder in a scheme string.
+var tokenRe = regexp.MustCompile(`\{[^}]+\}`)
+
+// ValidateScheme checks that scheme is safe and well-formed before it is
+// persisted. It returns a non-nil error for any of the following conditions:
+//
+//   - scheme is empty
+//   - scheme does not contain {series}
+//   - scheme does not contain {chapter}
+//   - scheme contains an unrecognised {token}
+//   - scheme contains ".." (path traversal)
+//   - scheme contains "\" (backslash — Windows-style paths are not supported)
+//   - scheme starts with "/" (absolute paths are not allowed)
+//   - scheme contains a NUL byte
+//   - after rendering with fixed sample values, the resulting path escapes
+//     the library root when joined to a fake root "/lib"
+func ValidateScheme(scheme string) error {
+	if scheme == "" {
+		return fmt.Errorf("rename scheme must not be empty")
+	}
+
+	// Structural safety checks on the raw scheme text.
+	if strings.Contains(scheme, "..") {
+		return fmt.Errorf("rename scheme must not contain \"..\"")
+	}
+	if strings.Contains(scheme, `\`) {
+		return fmt.Errorf("rename scheme must not contain backslashes")
+	}
+	if strings.HasPrefix(scheme, "/") {
+		return fmt.Errorf("rename scheme must not start with \"/\"")
+	}
+	if strings.ContainsRune(scheme, 0) {
+		return fmt.Errorf("rename scheme must not contain NUL bytes")
+	}
+
+	// Required token checks.
+	if !strings.Contains(scheme, "{series}") {
+		return fmt.Errorf("rename scheme must contain {series}")
+	}
+	if !strings.Contains(scheme, "{chapter}") {
+		return fmt.Errorf("rename scheme must contain {chapter}")
+	}
+
+	// Unknown token check — first unknown token wins.
+	for _, tok := range tokenRe.FindAllString(scheme, -1) {
+		known := false
+		for _, k := range knownTokens {
+			if tok == k {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return fmt.Errorf("unknown token %s", tok)
+		}
+	}
+
+	// Belt-and-braces: render with fixed sample values and verify the
+	// resulting path stays inside a fake library root.
+	rendered := RenderName(scheme, "Berserk", "Ch. 350.cbz")
+	fakeRoot := "/lib"
+	joined := filepath.Join(fakeRoot, rendered)
+	cleanRoot := filepath.Clean(fakeRoot) + string(os.PathSeparator)
+	if !strings.HasPrefix(filepath.Clean(joined)+string(os.PathSeparator), cleanRoot) {
+		return fmt.Errorf("rendered path escapes library root")
+	}
+
+	return nil
+}
+
 // chapterNum matches the first integer or decimal number in a filename.
 // Examples: "Ch. 001.cbz" → "001", "Ch. 7.5.cbz" → "7.5", "1.0.cbz" → "1.0"
 var chapterNum = regexp.MustCompile(`(\d+(?:\.\d+)?)`)

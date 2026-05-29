@@ -3,6 +3,7 @@ package filer
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
@@ -121,6 +122,89 @@ func TestFileRejectsPathTraversal(t *testing.T) {
 	// The library root itself must remain empty after a rejected traversal.
 	if entries, _ := os.ReadDir(dstRoot); len(entries) != 0 {
 		t.Fatalf("library root should be empty after rejected traversal, got %d entries", len(entries))
+	}
+}
+
+func TestValidateScheme(t *testing.T) {
+	tests := []struct {
+		name    string
+		scheme  string
+		wantErr string // non-empty → expect error containing this substring
+	}{
+		{
+			name:   "happy path",
+			scheme: "{series}/{series} - Ch.{chapter}.cbz",
+		},
+		{
+			name:    "empty scheme",
+			scheme:  "",
+			wantErr: "must not be empty",
+		},
+		{
+			name:    "missing {chapter}",
+			scheme:  "{series}/{series}.cbz",
+			wantErr: "must contain {chapter}",
+		},
+		{
+			name:    "missing {series}",
+			scheme:  "{chapter}.cbz",
+			wantErr: "must contain {series}",
+		},
+		{
+			name:    "unknown token {volume}",
+			scheme:  "{series}/{series} - Vol.{volume} Ch.{chapter}.cbz",
+			wantErr: "unknown token {volume}",
+		},
+		{
+			name:    "unknown token {quality}",
+			scheme:  "{series}/{quality}/{series} - Ch.{chapter}.cbz",
+			wantErr: "unknown token {quality}",
+		},
+		{
+			name:    "contains dotdot",
+			scheme:  "../{series}/{series} - Ch.{chapter}.cbz",
+			wantErr: "must not contain \"..\"",
+		},
+		{
+			name:    "contains backslash",
+			scheme:  `{series}\{series} - Ch.{chapter}.cbz`,
+			wantErr: "must not contain backslashes",
+		},
+		{
+			name:    "starts with slash",
+			scheme:  "/{series}/{series} - Ch.{chapter}.cbz",
+			wantErr: "must not start with \"/\"",
+		},
+		{
+			name:    "contains NUL byte",
+			scheme:  "{series}/\x00{series} - Ch.{chapter}.cbz",
+			wantErr: "must not contain NUL",
+		},
+		{
+			name: "escape via template (series title substituted but scheme itself is safe)",
+			// The scheme is structurally safe; a crafted series title would be
+			// caught at File() time by the runtime traversal check. Confirm
+			// ValidateScheme passes for a well-formed scheme (sample series
+			// "Berserk" is safe so the belt-and-braces check also passes).
+			scheme: "{series}/{series} - Ch.{chapter}.cbz",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateScheme(tc.scheme)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("wanted no error, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("wanted error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("wanted error containing %q, got %q", tc.wantErr, err.Error())
+			}
+		})
 	}
 }
 

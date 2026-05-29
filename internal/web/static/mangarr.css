@@ -440,6 +440,13 @@ input[type="number"].input-narrow {
   margin-top: 4px;
 }
 
+.rename-example {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  color: #9aa0a6;
+  background: transparent;
+}
+
 .settings-footer {
   display: flex;
   align-items: center;
