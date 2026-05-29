@@ -212,7 +212,7 @@ func main() {
 			return pm
 		}()) * time.Minute,
 		RunFn: func(ctx context.Context) error {
-			return p.RunOnce()
+			return p.RunOnce(ctx)
 		},
 	}); err != nil {
 		log.Fatalf("tasks: register poll-scan: %v", err)

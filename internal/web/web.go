@@ -75,8 +75,13 @@ type Store interface {
 }
 
 // Runner can execute one poll pass on demand.
+//
+// ctx is plumbed only to the Suwayomi PathCache.Refresh step inside
+// RunOnce (Plan B). Older Scanner/Filer/Kavita calls inside RunOnce
+// retain their pre-Plan-B signatures and ignore ctx — that wider
+// refactor is intentionally out of scope here.
 type Runner interface {
-	RunOnce() error
+	RunOnce(ctx context.Context) error
 }
 
 // BackupConfig holds the backup-scheduler configuration passed into the Handler
@@ -1077,7 +1082,7 @@ func (h *Handler) apiRescan(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, fmt.Errorf("poller not configured"), http.StatusServiceUnavailable)
 		return
 	}
-	if err := h.runner.RunOnce(); err != nil {
+	if err := h.runner.RunOnce(r.Context()); err != nil {
 		jsonErr(w, err, http.StatusInternalServerError)
 		return
 	}

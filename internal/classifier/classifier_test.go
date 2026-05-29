@@ -439,6 +439,49 @@ func TestClassifySeriesNilPathCacheSkipsOverride(t *testing.T) {
 	}
 }
 
+// TestClassifySeriesDuplicateLibIDDeterministic asserts the
+// fixed-priority reverse lookup: if two ContentTypes happen to point at
+// the same Kavita library ID (a Settings misconfig), the same winner
+// must come back on every call. Manga → Manhwa → Manhua priority.
+// Without the fix, `range m` would randomise the result and the same
+// override would route to different libraries across ticks.
+func TestClassifySeriesDuplicateLibIDDeterministic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("AniList must not be hit on override path")
+	}))
+	defer srv.Close()
+
+	settings := &stubSettings{s: model.Settings{
+		SuwayomiCategoryOverrides: map[int64]int64{42: 7},
+		// Three ContentTypes all pointing at library 7. Deterministic
+		// priority must pick Manga (highest priority) every time.
+		KavitaLibIDsByType: map[model.ContentType]int64{
+			model.TypeManga:  7,
+			model.TypeManhwa: 7,
+			model.TypeManhua: 7,
+		},
+	}}
+	cache := &stubPathLookup{entries: map[string]suwayomi.CacheEntry{
+		"/dl/dup": {MangaID: 1, CategoryIDs: []int64{42}},
+	}}
+	c := New(srv.URL).WithSuwayomi(cache, settings)
+
+	// Run many times — map iteration would have flipped the winner by
+	// now if we were still walking `range m`.
+	for i := 0; i < 50; i++ {
+		ct, via, err := c.ClassifySeries(model.Series{Title: "Dup", SourcePath: "/dl/dup"})
+		if err != nil {
+			t.Fatalf("iter %d: ClassifySeries: %v", i, err)
+		}
+		if ct != model.TypeManga {
+			t.Fatalf("iter %d: want Manga (priority winner), got %q", i, ct)
+		}
+		if via != "suwayomi-override:category=42" {
+			t.Fatalf("iter %d: Via: want suwayomi-override:category=42, got %q", i, via)
+		}
+	}
+}
+
 // countingLookup wraps a PathLookup and flips a flag when Lookup is called.
 type countingLookup struct {
 	inner *stubPathLookup

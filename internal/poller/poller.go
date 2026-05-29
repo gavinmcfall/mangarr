@@ -180,7 +180,7 @@ type Poller struct {
 // Every outcome is recorded via ActivityWriter (filed / unmatched /
 // scan-triggered / error) AFTER the action completes — never before — so a
 // mid-tick crash cannot produce a phantom success entry.
-func (p *Poller) RunOnce() error {
+func (p *Poller) RunOnce(ctx context.Context) error {
 	// Library Map (Plan B): refresh the Suwayomi path cache at the top
 	// of every tick, BEFORE we scan, so the classifier's override path
 	// has fresh data when classifying any files this tick discovers.
@@ -190,7 +190,13 @@ func (p *Poller) RunOnce() error {
 	// (PathCache.Refresh swaps atomically on success only). One warning
 	// log per failed refresh, no activity entry — these are operator
 	// concerns, not per-series events.
-	p.refreshSuwayomiCache(context.Background())
+	//
+	// ctx scope is intentionally narrow: only the Suwayomi refresh
+	// observes cancellation today. Plumbing ctx into Scanner.ScanAll,
+	// Classifier, Filer.File, Kavita.ScanLibrary, etc. is a separate
+	// refactor and not in Plan B's scope — those calls retain their
+	// pre-Plan-B signatures.
+	p.refreshSuwayomiCache(ctx)
 
 	series, err := p.Scanner.ScanAll()
 	if err != nil {

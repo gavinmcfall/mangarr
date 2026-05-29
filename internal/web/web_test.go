@@ -75,7 +75,7 @@ func (f *fakeStore) SetSeriesType(id int64, ct model.ContentType) error {
 // fakeRunner records RunOnce calls.
 type fakeRunner struct{ called int }
 
-func (r *fakeRunner) RunOnce() error { r.called++; return nil }
+func (r *fakeRunner) RunOnce(_ context.Context) error { r.called++; return nil }
 
 // fakeSeriesFiler records FileOne calls and optionally returns an error.
 type fakeSeriesFiler struct {

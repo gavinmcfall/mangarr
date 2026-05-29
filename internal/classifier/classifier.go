@@ -168,9 +168,18 @@ func (c *Classifier) ClassifySeries(s model.Series) (model.ContentType, string, 
 // entry equals libID. Returns TypeUnknown if no entry matches — the
 // poller will then route the series to Unmatched, which surfaces the
 // misconfiguration to the user.
+//
+// We iterate a fixed slice rather than `range m` because Go's map
+// iteration order is randomised. If two ContentTypes happen to point at
+// the same Kavita library ID (a Settings misconfig Plan C's UI will
+// eventually prevent), a `range m` walk would return a different winner
+// on each call → the same series routed to different libraries across
+// poll ticks. Deterministic-by-priority is the better failure mode:
+// Manga → Manhwa → Manhua wins in that order, which mirrors the
+// CountryToType priority and gives operators a single fact to debug.
 func reverseKavitaLibLookup(m map[model.ContentType]int64, libID int64) model.ContentType {
-	for ct, id := range m {
-		if id == libID {
+	for _, ct := range []model.ContentType{model.TypeManga, model.TypeManhwa, model.TypeManhua} {
+		if m[ct] == libID {
 			return ct
 		}
 	}

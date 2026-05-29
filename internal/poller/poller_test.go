@@ -147,7 +147,7 @@ func TestRunOnceFilesAndScans(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 2},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if len(rec.filed) != 1 || rec.filed[0].Type != model.TypeManhwa {
@@ -170,7 +170,7 @@ func TestRunOnceUnmatchedWhenUnknown(t *testing.T) {
 		LibraryRoots: map[model.ContentType]string{},
 		LibraryIDs:   map[model.ContentType]int64{},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if len(rec.unmatched) != 1 || len(rec.filed) != 0 {
@@ -197,7 +197,7 @@ func TestRunOnceDeduplicatesKavitaScan(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 5},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if len(rec.filed) != 2 {
@@ -225,7 +225,7 @@ func TestRunOnceNoKavitaWhenNoLibraryID(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{}, // no entry for Manga
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if len(rec.filed) != 1 {
@@ -252,7 +252,7 @@ func TestRunOnceRecordsFiledActivity(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 2},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if got := rec.countActions(model.ActionFiled); got != 1 {
@@ -279,7 +279,7 @@ func TestRunOnceRecordsUnmatchedActivity(t *testing.T) {
 		LibraryRoots: map[model.ContentType]string{},
 		LibraryIDs:   map[model.ContentType]int64{},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if got := rec.countActions(model.ActionUnmatched); got != 1 {
@@ -301,7 +301,7 @@ func TestRunOnceRecordsScanTriggeredActivity(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 7},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if got := rec.countActions(model.ActionScanTriggered); got != 1 {
@@ -320,7 +320,7 @@ func TestRunOnceRecordsErrorOnFilerFailure(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 2},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if got := rec.countActions(model.ActionError); got != 1 {
@@ -352,7 +352,7 @@ func TestRunOnceRecordsErrorOnKavitaFailure(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 9},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	// Both series filed.
@@ -406,7 +406,7 @@ func TestRunOnceCallsGCWhenBinPresent(t *testing.T) {
 		RecycleBin:   bin,
 	}
 
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
@@ -429,7 +429,7 @@ func TestRunOnceMissingLibraryRootIsActionError(t *testing.T) {
 		LibraryRoots: map[model.ContentType]string{}, // no root configured for Manga
 		LibraryIDs:   map[model.ContentType]int64{},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if got := rec.countActions(model.ActionError); got != 1 {
@@ -463,7 +463,7 @@ func TestMetricsFiledAndScan(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 1},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if fm.filesFiled["Manga"] != 1 {
@@ -489,7 +489,7 @@ func TestMetricsUnmatched(t *testing.T) {
 		LibraryRoots: map[model.ContentType]string{},
 		LibraryIDs:   map[model.ContentType]int64{},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if fm.unmatched != 1 {
@@ -514,7 +514,7 @@ func TestMetricsFilerError(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 3},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if fm.fileErrors != 1 {
@@ -539,7 +539,7 @@ func TestMetricsKavitaError(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 4},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
 	if fm.kavitaScans["error"] != 1 {
@@ -563,7 +563,7 @@ func TestMetricsNilSafe(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 5},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce with nil metrics: %v", err)
 	}
 }
@@ -1024,7 +1024,7 @@ func TestRunOnceCallsSuwayomiRefreshWhenConfigured(t *testing.T) {
 		}},
 	}
 
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if got := atomic.LoadInt32(&factoryCalls); got != 1 {
@@ -1075,7 +1075,7 @@ func TestRunOnceContinuesWhenSuwayomiRefreshFails(t *testing.T) {
 		}},
 	}
 
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce returned error after refresh failure: %v", err)
 	}
 	if len(rec.filed) != 1 {
@@ -1104,7 +1104,7 @@ func TestRunOnceSkipsRefreshWhenSuwayomiURLEmpty(t *testing.T) {
 			// SuwayomiBaseURL deliberately empty.
 		}},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if got := atomic.LoadInt32(&factoryCalls); got != 0 {
@@ -1129,7 +1129,7 @@ func TestRunOnceWritesViaIntoActivity(t *testing.T) {
 		},
 		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 2},
 	}
-	if err := p.RunOnce(); err != nil {
+	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	var sawFiled bool

@@ -3,11 +3,28 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log"
 	"strings"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
 	_ "modernc.org/sqlite"
 )
+
+// sqliteDupColumnMarker is the substring modernc.org/sqlite returns when
+// ALTER TABLE ... ADD COLUMN runs against a column that already exists.
+// Promoted to a documented constant so a future driver-wording shift is
+// a one-line fix rather than a quiet swallow of a legitimate error.
+//
+// Upstream SQLite source:
+//
+//	https://github.com/sqlite/sqlite — alter.c, sqlite3AlterFinishAddColumn
+//
+// NOTE: this is the last single-column inline migration. The next time
+// we need to add a column or table, introduce a proper migrations table
+// (e.g. a `schema_migrations(version INTEGER PRIMARY KEY)` row + a
+// switch over version) instead of stacking more ALTER TABLE swallows.
+const sqliteDupColumnMarker = "duplicate column"
 
 type Store struct{ db *sql.DB }
 
@@ -59,15 +76,18 @@ CREATE TABLE IF NOT EXISTS classification_cache (
 		return err
 	}
 	// Additive migrations — idempotent. Each ADD COLUMN runs once per
-	// fresh DB; on subsequent boots SQLite returns "duplicate column" and
-	// we ignore it. This avoids a separate migrations table for what is
-	// effectively a one-off Plan B addition.
+	// fresh DB; on subsequent boots SQLite reports the dup-column
+	// marker and we ignore it. This avoids a separate migrations table
+	// for what is currently a one-off Plan B addition; see the const
+	// doc comment for the "next time this happens, build the table"
+	// rule. Logging on the swallow path makes a future driver-wording
+	// change surface fast in operator logs instead of silently breaking
+	// the idempotency contract.
 	if _, err := s.db.Exec(`ALTER TABLE activity ADD COLUMN via TEXT NOT NULL DEFAULT ''`); err != nil {
-		// SQLite reports "duplicate column name: via" once the migration
-		// has run. Any other error is fatal.
-		if !strings.Contains(err.Error(), "duplicate column") {
-			return err
+		if !strings.Contains(err.Error(), sqliteDupColumnMarker) {
+			return fmt.Errorf("store: add activity.via column: %w", err)
 		}
+		log.Printf("store: activity.via column already present (sqlite ADD COLUMN returned: %v)", err)
 	}
 	return nil
 }
