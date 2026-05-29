@@ -473,6 +473,130 @@ func snippet(s, marker string, n int) string {
 	return s[start:end]
 }
 
+// ---- disk space API + Settings page tests ----
+
+// newHandlerWithRoots builds a Handler that includes a real /tmp download root
+// and a library root so we can assert disk-space rendering.
+func newHandlerWithRoots() *Handler {
+	st := &fakeStore{
+		series:   nil,
+		activity: nil,
+		settings: model.Settings{
+			LibraryRoots: map[model.ContentType]string{
+				model.TypeManga: "/tmp",
+			},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	return NewHandler(st, &fakeRunner{}, "/tmp")
+}
+
+func TestAPIDiskSpaceReturnsJSONArray(t *testing.T) {
+	h := newHandlerWithRoots()
+	req := httptest.NewRequest(http.MethodGet, "/api/diskspace", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("want application/json, got %q", ct)
+	}
+
+	var entries []struct {
+		Path        string  `json:"path"`
+		TotalBytes  uint64  `json:"total_bytes"`
+		FreeBytes   uint64  `json:"free_bytes"`
+		PercentFree float64 `json:"percent_free"`
+		Error       string  `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &entries); err != nil {
+		t.Fatalf("parse JSON: %v; body=%s", err, rr.Body.String())
+	}
+	// /tmp is a download root AND the manga library root — deduplication
+	// means only one entry with path=/tmp.
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry (/tmp deduped), got %d: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.Path != "/tmp" {
+		t.Fatalf("want path=/tmp, got %q", e.Path)
+	}
+	if e.TotalBytes == 0 {
+		t.Fatal("TotalBytes is 0 for /tmp")
+	}
+	if e.Error != "" {
+		t.Fatalf("unexpected error for /tmp: %q", e.Error)
+	}
+	if e.PercentFree < 0 || e.PercentFree > 100 {
+		t.Fatalf("PercentFree out of range: %f", e.PercentFree)
+	}
+}
+
+func TestAPIDiskSpaceEmptyWhenNoRoots(t *testing.T) {
+	// Handler with no download roots and no library roots → empty array.
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(st, &fakeRunner{}) // no downloadRoots
+	req := httptest.NewRequest(http.MethodGet, "/api/diskspace", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	var entries []interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &entries); err != nil {
+		t.Fatalf("parse JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if len(entries) != 0 {
+		t.Fatalf("want empty array, got %d entries", len(entries))
+	}
+}
+
+func TestSettingsPageRendersDiskSpaceSection(t *testing.T) {
+	h := newHandlerWithRoots()
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	// Section heading must be present.
+	if !strings.Contains(body, "Disk Space") {
+		t.Fatalf("'Disk Space' section heading not found in settings body")
+	}
+	// The /tmp path must be rendered.
+	if !strings.Contains(body, "/tmp") {
+		t.Fatalf("path '/tmp' not rendered in disk-space section")
+	}
+	// The bar element must be present.
+	if !strings.Contains(body, "space-bar") {
+		t.Fatalf("disk-space bar element not rendered in settings page")
+	}
+}
+
+func TestSettingsPageNoDiskSectionWhenNoRoots(t *testing.T) {
+	// With no download roots and no library roots, the disk-space section
+	// should be omitted entirely.
+	h := newEmptyHandler()
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "Disk Space") {
+		t.Fatalf("'Disk Space' section should not render when no roots are configured")
+	}
+}
+
 // ---- empty-state tests: prove the `<p class="empty">` element renders when
 // the store returns no items, and the `<table>` does NOT render. Guards
 // against regression of the broken `not` helper that previously hid the

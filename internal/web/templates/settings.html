@@ -8,6 +8,44 @@
   <div class="content-container">
 {{if .Flash}}<div class="flash flash-ok">{{.Flash}}</div>{{end}}
 {{if .Error}}<div class="flash flash-err">{{.Error}}</div>{{end}}
+
+{{if .DiskRows}}
+<!-- Disk Space -->
+<div class="settings-sections" style="margin-bottom:20px;">
+  <div class="settings-card">
+    <div class="settings-card-header">
+      <p class="settings-card-title">Disk Space</p>
+      <p class="settings-card-desc">Free space for each download root and library root. Red &lt; 10%, orange 10–25%, green ≥ 25% free.</p>
+    </div>
+    <div class="settings-card-body">
+      <table class="disk-space-table">
+        {{range .DiskRows}}
+        <tr>
+          <td class="disk-path" title="{{.Path}}">
+            <span class="td-dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.4px;">{{.Label}}</span><br>
+            {{.Path}}
+          </td>
+          {{if .Err}}
+          <td class="disk-sizes"><span class="disk-unavailable">{{.Err}}</span></td>
+          <td class="disk-bar-cell">
+            <div class="space-bar"><div class="space-bar-fill bar-err" style="width:100%"></div></div>
+          </td>
+          {{else}}
+          <td class="disk-sizes">{{.Free}} free / {{.Total}}</td>
+          <td class="disk-bar-cell">
+            <div class="space-bar">
+              <div class="space-bar-fill {{.BarClass}}" style="width:{{.PercentFmt}}%"></div>
+            </div>
+          </td>
+          {{end}}
+        </tr>
+        {{end}}
+      </table>
+    </div>
+  </div>
+</div>
+{{end}}
+
 <form method="POST" action="/settings">
 <div class="settings-sections">
 

@@ -108,7 +108,7 @@ func main() {
 	}
 
 	// ---- web handler ----
-	h := web.NewHandler(st, p)
+	h := web.NewHandler(st, p, cfg.DownloadRoots...)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           h,
