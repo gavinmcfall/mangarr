@@ -51,6 +51,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gavinmcfall/mangarr/internal/classifier"
 	"github.com/gavinmcfall/mangarr/internal/dbbackup"
 	"github.com/gavinmcfall/mangarr/internal/diskspace"
 	"github.com/gavinmcfall/mangarr/internal/filer"
@@ -58,7 +59,6 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/kavita"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/poller"
-	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
 )
 
@@ -278,18 +278,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // definition rather than whichever happened to be parsed last globally.
 func parsePageTemplates() map[string]*template.Template {
 	pages := []string{"series.html", "preview.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "settings.html"}
-	m := make(map[string]*template.Template, len(pages))
+	// Pages that need the override-rows partial. Listed explicitly so
+	// adding the partial to a new page is a one-line change here, not a
+	// fan-out across the codebase.
+	withOverrideRows := map[string]bool{"settings.html": true}
+	m := make(map[string]*template.Template, len(pages)+1)
 	for _, name := range pages {
 		// Parse base + the specific page. This gives each page its own
 		// independent template set so block overrides don't bleed across pages.
+		files := []string{"templates/base.html", "templates/" + name}
+		if withOverrideRows[name] {
+			files = append(files, "templates/override-rows.html")
+		}
 		t := template.Must(
-			template.New("").Funcs(templateFuncs()).ParseFS(assets,
-				"templates/base.html",
-				"templates/"+name,
-			),
+			template.New("").Funcs(templateFuncs()).ParseFS(assets, files...),
 		)
 		m[name] = t
 	}
+	// Standalone override-fragment template for the HTMX swap target.
+	// Same source file, so the override-rows partial is byte-for-byte
+	// identical to what Settings renders. Single source of truth.
+	m["override-fragment"] = template.Must(
+		template.New("").Funcs(templateFuncs()).ParseFS(assets,
+			"templates/override-rows.html",
+		),
+	)
 	return m
 }
 
@@ -425,27 +438,15 @@ type settingsPageData struct {
 	// KavitaLibError is set when a library fetch attempt failed; displayed inline.
 	KavitaLibError string
 
-	// --- Library Map: Suwayomi connection + overrides ---
+	// --- Library Map: Suwayomi connection ---
 	SuwayomiBaseURL  string
 	SuwayomiAuthType model.SuwayomiAuthType
 	SuwayomiUsername string
 	SuwayomiPassword string
-	// SuwayomiCategories holds the resolved category list when Suwayomi is
-	// reachable; nil/empty triggers the placeholder rendering in the
-	// override card and an inline "configure first" prompt when the
-	// base URL is unset.
-	SuwayomiCategories []suwayomi.Category
-	SuwayomiCatError   string
-	// OverrideRows is the prepared list of saved overrides, sorted for
-	// stable display. Empty when no overrides are configured.
-	OverrideRows []overrideRowView
-	// OverrideLibChoices is the filtered Kavita library list the
-	// override-row dropdown shows. Derived from KavitaLibIDsByType +
-	// Kavita names (Plan B carry-forward).
-	OverrideLibChoices []overrideLibraryChoice
-	// SuwayomiOverridesUnconfigured is true when no AniList classifications
-	// are saved → override card renders the inline prompt.
-	SuwayomiOverridesUnconfigured bool
+	// LibraryMap carries the override-card view-model shared with the
+	// HTMX fragment endpoint. Single source of truth for the override
+	// rows, library-name resolution, and configure-first prompts.
+	LibraryMap libraryMapData
 	RenameExample           string
 	DiskRows                []fsDiskRow
 	RecycleBinPath          string
@@ -655,7 +656,7 @@ func buildActivityRows(ctx context.Context, st Store, list []model.ActivityEntry
 	var catNamesByID map[int64]string
 	needSuwayomi := false
 	for _, e := range list {
-		if strings.HasPrefix(e.Via, "suwayomi-override:") {
+		if strings.HasPrefix(e.Via, classifier.ViaSuwayomiOverridePrefix) {
 			needSuwayomi = true
 			break
 		}
@@ -695,16 +696,16 @@ func formatVia(via string, catNamesByID map[int64]string) string {
 	switch {
 	case via == "":
 		return "—"
-	case via == "unmatched":
+	case via == classifier.ViaUnmatched:
 		return "Unmatched"
-	case strings.HasPrefix(via, "anilist:"):
-		code := strings.TrimPrefix(via, "anilist:")
+	case strings.HasPrefix(via, classifier.ViaAniListPrefix):
+		code := strings.TrimPrefix(via, classifier.ViaAniListPrefix)
 		if code == "" {
 			return "AniList"
 		}
 		return "AniList (" + code + ")"
-	case strings.HasPrefix(via, "suwayomi-override:category="):
-		rawID := strings.TrimPrefix(via, "suwayomi-override:category=")
+	case strings.HasPrefix(via, classifier.ViaSuwayomiOverridePrefix):
+		rawID := strings.TrimPrefix(via, classifier.ViaSuwayomiOverridePrefix)
 		id, err := strconv.ParseInt(rawID, 10, 64)
 		if err != nil {
 			return via // surface raw on unparseable
@@ -828,33 +829,12 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- Library Map: Suwayomi + Override rows ---
-	libChoices := overrideLibraryChoices(settings)
-	suwayomiOverridesUnconfigured := len(libChoices) == 0
-	var suwayomiCats []suwayomi.Category
-	var suwayomiCatErr string
-	if base := strings.TrimSpace(settings.SuwayomiBaseURL); base != "" && !suwayomiOverridesUnconfigured {
-		// Best-effort fetch so the override card can populate its dropdowns
-		// on first GET. Errors are surfaced inline; saved rows still render
-		// using the Unknown fallback in writeOverrideRow.
-		swCtx, swCancel := context.WithTimeout(r.Context(), 3*time.Second)
-		client, ok := newSuwayomiClient(settings)
-		if ok {
-			cats, err := client.ListCategories(swCtx)
-			if err != nil {
-				suwayomiCatErr = sanitiseSuwayomiError(err, settings)
-			} else {
-				suwayomiCats = cats
-			}
-		}
-		swCancel()
-	}
-	// Upgrade override-library labels with real Kavita names where possible.
-	if len(libChoices) > 0 {
-		nameCtx, nameCancel := context.WithTimeout(r.Context(), 3*time.Second)
-		libChoices = resolveOverrideLibraryNames(nameCtx, settings, libChoices)
-		nameCancel()
-	}
-	overrideRows := buildOverrideRows(settings.SuwayomiCategoryOverrides, suwayomiCats, libChoices)
+	// Both /settings and the override-fragment HTMX endpoint route
+	// through buildLibraryMapData → identical rendering on initial GET
+	// and after the user clicks Refresh.
+	lmCtx, lmCancel := context.WithTimeout(r.Context(), 3*time.Second)
+	libraryMap := buildLibraryMapData(lmCtx, settings)
+	lmCancel()
 
 	// Pre-extract values typed-keyed by model.ContentType into plain fields,
 	// so the template can use {{.RootManga}} etc. with no reflection-time
@@ -877,11 +857,7 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		SuwayomiAuthType:        settings.SuwayomiAuthType,
 		SuwayomiUsername:        settings.SuwayomiUsername,
 		SuwayomiPassword:        settings.SuwayomiPassword,
-		SuwayomiCategories:      suwayomiCats,
-		SuwayomiCatError:        suwayomiCatErr,
-		OverrideRows:            overrideRows,
-		OverrideLibChoices:      libChoices,
-		SuwayomiOverridesUnconfigured: suwayomiOverridesUnconfigured,
+		LibraryMap:              libraryMap,
 		RenameExample:           renameExample(settings.RenameScheme),
 		DiskRows:                diskRows,
 		RecycleBinPath:          h.recycleBinPath,
@@ -1980,6 +1956,18 @@ func (h *Handler) serveMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- helpers ----
+
+// renderTemplate executes a named template within a template set without
+// the base.html wrapping. Used by the override-fragment HTMX endpoint
+// where we want raw inner HTML, not a full page. Returns the underlying
+// ExecuteTemplate error so the caller can surface it inline.
+func (h *Handler) renderTemplate(w http.ResponseWriter, set, name string, data interface{}) error {
+	t, ok := h.tmpls[set]
+	if !ok {
+		return fmt.Errorf("template set not found: %s", set)
+	}
+	return t.ExecuteTemplate(w, name, data)
+}
 
 func (h *Handler) render(w http.ResponseWriter, name string, data interface{}) {
 	t, ok := h.tmpls[name]

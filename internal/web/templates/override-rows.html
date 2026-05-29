@@ -1,0 +1,54 @@
+{{define "override-rows"}}
+{{$cats := .SuwayomiCategories}}
+{{$libs := .OverrideLibChoices}}
+<div class="override-rows" id="override-rows-body">
+{{range .OverrideRows}}
+  <div class="settings-row override-row" data-idx="{{.Index}}">
+    <div class="settings-input-wrap">
+      <select name="override_category_{{.Index}}">
+        <option value="0">(select category)</option>
+        {{if not .CatKnown}}<option value="{{.CatID}}" selected>{{.CatName}}</option>{{end}}
+        {{$saved := .CatID}}
+        {{range $cats}}<option value="{{.ID}}"{{if eq .ID $saved}} selected{{end}}>{{.Name}}</option>{{end}}
+      </select>
+    </div>
+    <span class="override-arrow">&rarr;</span>
+    <div class="settings-input-wrap">
+      <select name="override_library_{{.Index}}">
+        <option value="0">(select library)</option>
+        {{$savedLib := .LibID}}
+        {{range $libs}}<option value="{{.ID}}"{{if eq .ID $savedLib}} selected{{end}}>{{.Label}}</option>{{end}}
+      </select>
+    </div>
+    {{if .ContentType}}<span class="override-badge pill pill-{{.ContentType | lower}}">{{.ContentType}}</span>{{else if gt .LibID 0}}<span class="override-badge pill pill-error">unmapped</span>{{end}}
+    <button type="button" class="btn-sm override-delete" onclick="this.closest('.override-row').remove()">&#x2715;</button>
+  </div>
+{{end}}
+</div>
+<input type="hidden" id="override-next-idx" value="{{len .OverrideRows}}">
+<div class="override-actions" style="margin-top:12px;">
+  <button type="button" class="btn-sm" onclick="mangarrAddOverrideRow()">+ Add override</button>
+</div>
+<template id="override-row-template">
+  <div class="settings-row override-row" data-idx="__IDX__">
+    <div class="settings-input-wrap">
+      <select name="override_category___IDX__">
+        <option value="0">(select category)</option>
+        {{range $cats}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+      </select>
+    </div>
+    <span class="override-arrow">&rarr;</span>
+    <div class="settings-input-wrap">
+      <select name="override_library___IDX__">
+        <option value="0">(select library)</option>
+        {{range $libs}}<option value="{{.ID}}">{{.Label}}</option>{{end}}
+      </select>
+    </div>
+    <button type="button" class="btn-sm override-delete" onclick="this.closest('.override-row').remove()">&#x2715;</button>
+  </div>
+</template>
+{{end}}
+
+{{define "override-fragment"}}
+{{if .OverrideUnconfigured}}<div class="form-error">Configure AniList Classification above before adding Suwayomi overrides — overrides can only route to one of the three primary content-type libraries.</div>{{else if .OverrideSuwayomiUnconfigured}}<div class="form-error">Suwayomi not configured. Set the base URL in the Suwayomi Connection panel above, click Save, then Refresh.</div>{{template "override-rows" .}}{{else}}{{if .OverrideError}}<div class="form-error">Suwayomi unreachable: {{.OverrideError}}. Check Settings &#8594; Suwayomi Connection.</div>{{end}}{{template "override-rows" .}}{{end}}
+{{end}}

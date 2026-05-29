@@ -581,3 +581,115 @@ func TestSuwayomiCategoriesEndpoint(t *testing.T) {
 	}
 }
 
+// Critical #1 regression test: parseSuwayomiOverrides MUST be deterministic
+// when two rows reference the same Suwayomi category. The contract is
+// LAST-INDEX-WINS — the highest-index row clobbers earlier rows. Run the
+// parser many times to defeat Go's randomised map iteration.
+func TestParseSuwayomiOverridesDuplicateCategoryDeterministic(t *testing.T) {
+	form := map[string][]string{
+		"override_category_0":  {"5"},
+		"override_library_0":   {"100"},
+		"override_category_1":  {"5"}, // same category as row 0
+		"override_library_1":   {"200"},
+		"override_category_2":  {"5"}, // same category as rows 0 + 1
+		"override_library_2":   {"300"},
+	}
+	const want = int64(300) // index 2 is highest → its library wins
+	for i := 0; i < 200; i++ {
+		got := parseSuwayomiOverrides(form)
+		if got[5] != want {
+			t.Fatalf("iteration %d: want overrides[5]=%d (last-index-wins), got %d (parser nondeterministic)",
+				i, want, got[5])
+		}
+	}
+}
+
+// Critical #2 regression test: clicking Refresh (the fragment endpoint) MUST
+// produce the same Kavita library-name labels that /settings produces on
+// initial GET. Before the consolidation refactor the fragment only called
+// overrideLibraryChoices() and skipped resolveOverrideLibraryNames(),
+// regressing labels to "Library #N (Manga)" placeholders.
+func TestRefreshFragmentResolvesKavitaLibraryNames(t *testing.T) {
+	// Suwayomi stub: one category.
+	swCats := []map[string]any{
+		{"id": 5, "name": "Korean Webtoons", "order": 1},
+	}
+	swSrv := suwayomiStubServer(t, swCats, 0)
+	defer swSrv.Close()
+
+	// Kavita stub: two libraries the user has mapped to content types.
+	kavLibs := []kavitaTestLibrary{
+		{ID: 100, Name: "My Manga Library"},
+		{ID: 200, Name: "My Manhwa Library"},
+	}
+	kavSrv := kavitaStubLibServer(t, kavLibs)
+	defer kavSrv.Close()
+
+	st := &fakeStore{
+		settings: model.Settings{
+			SuwayomiBaseURL:           swSrv.URL,
+			SuwayomiAuthType:          model.SuwayomiAuthNone,
+			SuwayomiCategoryOverrides: map[int64]int64{5: 200},
+			KavitaBaseURL:             kavSrv.URL,
+			KavitaAPIKey:              "stubkey",
+			LibraryRoots:              map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{
+				model.TypeManga:  100,
+				model.TypeManhwa: 200,
+			},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/suwayomi/categories/fragment", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+
+	// Resolved Kavita library names must appear, not the "Library #N" placeholder.
+	if !strings.Contains(body, "My Manga Library") {
+		t.Errorf("fragment missing resolved name 'My Manga Library'; body:\n%s", body)
+	}
+	if !strings.Contains(body, "My Manhwa Library") {
+		t.Errorf("fragment missing resolved name 'My Manhwa Library'; body:\n%s", body)
+	}
+	if strings.Contains(body, "Library #100") || strings.Contains(body, "Library #200") {
+		t.Errorf("fragment still shows placeholder 'Library #N' label — name-resolution regressed; body:\n%s", body)
+	}
+
+	// The saved row's library option must be the selected one.
+	if !strings.Contains(body, `value="200"`) {
+		t.Errorf("fragment missing library option value=200; body:\n%s", body)
+	}
+}
+
+// kavitaTestLibrary is the trimmed Kavita library shape the stub server returns.
+type kavitaTestLibrary struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	Type int    `json:"type"`
+}
+
+// kavitaStubLibServer mimics the subset of the Kavita API the override-name
+// resolver hits: /api/Plugin/authenticate + /api/Library/Libraries.
+func kavitaStubLibServer(t *testing.T, libs []kavitaTestLibrary) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/api/plugin/authenticate"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"token":"jwt123"}`))
+		case strings.Contains(r.URL.Path, "/api/Library"):
+			w.Header().Set("Content-Type", "application/json")
+			body, _ := json.Marshal(libs)
+			w.Write(body)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+

@@ -107,8 +107,14 @@ func sanitiseSuwayomiError(err error, s model.Settings) string {
 //
 // Returns nil when no valid overrides are found, so the round-trip JSON
 // stays compact when the feature is unused.
+//
+// Determinism on duplicate categories: indices are walked in ascending
+// numeric order (non-numeric indices sort lexicographically and run last),
+// and the LAST-INDEX-WINS rule applies. This matches the UI semantic of
+// "the row I most recently added is the one that takes effect" — appending
+// a second override for category 5 after seeing the first one rendered
+// will save the appended row.
 func parseSuwayomiOverrides(form map[string][]string) map[int64]int64 {
-	out := map[int64]int64{}
 	// Index field names by suffix so we can pair them up regardless of
 	// which JS-counter idx was used.
 	cats := map[string]string{}
@@ -124,12 +130,36 @@ func parseSuwayomiOverrides(form map[string][]string) map[int64]int64 {
 			libs[strings.TrimPrefix(k, "override_library_")] = vs[0]
 		}
 	}
-	for idx, catRaw := range cats {
+	// Collect the suffix keys and sort them with a numeric-aware comparator
+	// so iteration order is deterministic regardless of Go's map-iteration
+	// randomisation.
+	keys := make([]string, 0, len(cats))
+	for k := range cats {
+		keys = append(keys, k)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		ai, errA := strconv.Atoi(keys[i])
+		bi, errB := strconv.Atoi(keys[j])
+		if errA == nil && errB == nil {
+			return ai < bi
+		}
+		// Mixed / non-numeric: numerics first (sorted), then lex.
+		if errA == nil {
+			return true
+		}
+		if errB == nil {
+			return false
+		}
+		return keys[i] < keys[j]
+	})
+
+	out := map[int64]int64{}
+	for _, idx := range keys {
 		libRaw, ok := libs[idx]
 		if !ok {
 			continue
 		}
-		catID, err := strconv.ParseInt(strings.TrimSpace(catRaw), 10, 64)
+		catID, err := strconv.ParseInt(strings.TrimSpace(cats[idx]), 10, 64)
 		if err != nil || catID <= 0 {
 			continue
 		}
@@ -137,6 +167,9 @@ func parseSuwayomiOverrides(form map[string][]string) map[int64]int64 {
 		if err != nil || libID <= 0 {
 			continue
 		}
+		// LAST-INDEX-WINS: later-index rows overwrite earlier rows that
+		// reference the same Suwayomi category. Plain map assignment
+		// achieves this because we walk indices in ascending order.
 		out[catID] = libID
 	}
 	if len(out) == 0 {
@@ -199,12 +232,86 @@ func (h *Handler) apiSuwayomiCategories(w http.ResponseWriter, r *http.Request) 
 	jsonOK(w, suwayomiCategoriesResponse{Categories: out})
 }
 
+// libraryMapData is the view-model shared by /settings and the
+// /api/suwayomi/categories/fragment HTMX swap target. Both paths build it
+// via buildLibraryMapData → the rendered HTML stays byte-for-byte identical
+// across both routes (single source of truth, fixes the Refresh-button
+// label-regression that surfaced in code review).
+type libraryMapData struct {
+	SuwayomiCategories []suwayomi.Category
+	OverrideLibChoices []overrideLibraryChoice
+	OverrideRows       []overrideRowView
+	// OverrideUnconfigured is true when KavitaLibIDsByType is empty →
+	// override card renders the "configure AniList first" prompt and no
+	// rows.
+	OverrideUnconfigured bool
+	// OverrideSuwayomiUnconfigured is true when Suwayomi base URL is
+	// empty → override card renders the "configure Suwayomi" prompt
+	// AND the saved rows (so the user can see what is persisted).
+	OverrideSuwayomiUnconfigured bool
+	// OverrideError carries a Suwayomi fetch error (sanitised) when
+	// Suwayomi is configured but unreachable.
+	OverrideError string
+}
+
+// buildLibraryMapData assembles the override-card view-model. It is the
+// single source of truth for what /settings AND the fragment endpoint
+// render. Both call sites pass through here so the Kavita library-name
+// upgrade (and any future enrichment) cannot drift between them.
+//
+// Network calls inside (Suwayomi categories + Kavita library names) are
+// bounded by the supplied context. Errors are surfaced via OverrideError /
+// OverrideSuwayomiUnconfigured rather than returned, so the caller can
+// always render the card even when the upstreams are down.
+func buildLibraryMapData(ctx context.Context, settings model.Settings) libraryMapData {
+	out := libraryMapData{}
+	libChoices := overrideLibraryChoices(settings)
+
+	// Empty KavitaLibIDsByType = nothing to route to. Render the
+	// configure-first prompt; don't fetch anything from Suwayomi.
+	if len(libChoices) == 0 {
+		out.OverrideUnconfigured = true
+		return out
+	}
+
+	// Upgrade override-library labels with real Kavita names where
+	// possible. Best-effort: failure leaves placeholder labels in place.
+	libChoices = resolveOverrideLibraryNames(ctx, settings, libChoices)
+	out.OverrideLibChoices = libChoices
+
+	if strings.TrimSpace(settings.SuwayomiBaseURL) == "" {
+		out.OverrideSuwayomiUnconfigured = true
+		// Render saved rows even with empty SuwayomiCategories — they
+		// fall back to "Unknown (ID: N)" so the user sees what's saved.
+		out.OverrideRows = buildOverrideRows(settings.SuwayomiCategoryOverrides, nil, libChoices)
+		return out
+	}
+
+	client, ok := newSuwayomiClient(settings)
+	if !ok {
+		out.OverrideSuwayomiUnconfigured = true
+		out.OverrideRows = buildOverrideRows(settings.SuwayomiCategoryOverrides, nil, libChoices)
+		return out
+	}
+	cats, err := client.ListCategories(ctx)
+	if err != nil {
+		out.OverrideError = sanitiseSuwayomiError(err, settings)
+		out.OverrideRows = buildOverrideRows(settings.SuwayomiCategoryOverrides, nil, libChoices)
+		return out
+	}
+	out.SuwayomiCategories = cats
+	out.OverrideRows = buildOverrideRows(settings.SuwayomiCategoryOverrides, cats, libChoices)
+	return out
+}
+
 // apiSuwayomiCategoriesFragment handles GET /api/suwayomi/categories/fragment.
 //
 // Returns the override-card body: one row per entry in
 // SuwayomiCategoryOverrides plus an empty "Add" row template (rendered via
-// JS on click). Mirrors apiKavitaLibrariesFragment in shape — always returns
-// 200 with HTML so HTMX can swap the result cleanly even on failure.
+// JS on click). Renders via the shared override-fragment template so the
+// output is byte-for-byte identical to what the Settings page renders on
+// initial GET. Always returns 200 with HTML so HTMX can swap the result
+// cleanly even when Suwayomi is unreachable.
 func (h *Handler) apiSuwayomiCategoriesFragment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	settings, err := h.store.GetSettings()
@@ -212,41 +319,12 @@ func (h *Handler) apiSuwayomiCategoriesFragment(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(w, `<div class="form-error">Cannot read settings: %s</div>`, html(err.Error()))
 		return
 	}
-
-	libChoices := overrideLibraryChoices(settings)
-
-	// Empty base URL = feature disabled. Render the configure-first prompt
-	// without making any outbound call.
-	if strings.TrimSpace(settings.SuwayomiBaseURL) == "" {
-		fmt.Fprint(w, `<div class="form-error">Suwayomi not configured. Set the base URL in the Suwayomi Connection panel above, click Save, then Sync.</div>`)
-		writeOverrideRows(w, settings.SuwayomiCategoryOverrides, nil, libChoices)
-		return
-	}
-
-	// Empty content-type → library mapping = override card has nothing to
-	// route to. Surface a configure-first prompt rather than render rows
-	// with empty dropdowns.
-	if len(libChoices) == 0 {
-		fmt.Fprint(w, `<div class="form-error">Configure AniList Classification above before adding Suwayomi overrides.</div>`)
-		return
-	}
-
-	client, ok := newSuwayomiClient(settings)
-	if !ok {
-		fmt.Fprint(w, `<div class="form-error">Suwayomi not configured.</div>`)
-		writeOverrideRows(w, settings.SuwayomiCategoryOverrides, nil, libChoices)
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	cats, err := client.ListCategories(ctx)
-	if err != nil {
-		fmt.Fprintf(w, `<div class="form-error">Suwayomi unreachable: %s. Check Settings &#8594; Suwayomi Connection.</div>`,
-			html(sanitiseSuwayomiError(err, settings)))
-		writeOverrideRows(w, settings.SuwayomiCategoryOverrides, nil, libChoices)
-		return
+	data := buildLibraryMapData(ctx, settings)
+	if err := h.renderTemplate(w, "override-fragment", "override-fragment", data); err != nil {
+		fmt.Fprintf(w, `<div class="form-error">render error: %s</div>`, html(err.Error()))
 	}
-	writeOverrideRows(w, settings.SuwayomiCategoryOverrides, cats, libChoices)
 }
 
 // overrideLibraryChoice is one entry in the override-row Kavita library
@@ -318,18 +396,6 @@ func resolveOverrideLibraryNames(ctx context.Context, s model.Settings, choices 
 	return out
 }
 
-// findContentTypeForLibrary returns the ContentType assigned to libID in
-// Settings.KavitaLibIDsByType, or empty when libID is not in the map.
-// Used by the activity log + override-row badge.
-func findContentTypeForLibrary(s model.Settings, libID int64) model.ContentType {
-	for _, ct := range []model.ContentType{model.TypeManga, model.TypeManhwa, model.TypeManhua} {
-		if s.KavitaLibIDsByType[ct] == libID {
-			return ct
-		}
-	}
-	return ""
-}
-
 // buildOverrideRows assembles the view-models the Settings template renders
 // directly (initial GET /settings). cats may be nil — saved categories then
 // render as "Unknown (ID: N)".
@@ -370,127 +436,3 @@ func buildOverrideRows(overrides map[int64]int64, cats []suwayomi.Category, libC
 	return out
 }
 
-// writeOverrideRows emits one row per override entry, an empty row template
-// (the JS "Add" button stamps out copies), and a hidden index counter. cats
-// may be nil when Suwayomi is unreachable — rows still render with the
-// saved category ID as "Unknown (ID: N)".
-func writeOverrideRows(w http.ResponseWriter, overrides map[int64]int64, cats []suwayomi.Category, libChoices []overrideLibraryChoice) {
-	// Stable display order: by saved category ID ascending. cats may
-	// provide a richer order field, but the saved row always shows even
-	// when Suwayomi is unreachable, so use the only key we always know:
-	// the saved category ID.
-	type savedRow struct {
-		catID int64
-		libID int64
-	}
-	var rows []savedRow
-	for catID, libID := range overrides {
-		rows = append(rows, savedRow{catID, libID})
-	}
-	sort.SliceStable(rows, func(i, j int) bool { return rows[i].catID < rows[j].catID })
-
-	catByID := make(map[int64]suwayomi.Category, len(cats))
-	for _, c := range cats {
-		catByID[c.ID] = c
-	}
-
-	fmt.Fprint(w, `<div class="override-rows" id="override-rows-body">`)
-	for i, r := range rows {
-		writeOverrideRow(w, i, r.catID, r.libID, cats, catByID, libChoices)
-	}
-	fmt.Fprint(w, `</div>`)
-
-	// Hidden state for JS "Add" handler: next index to use + the available
-	// category/library options encoded as data attributes. Categories are
-	// JSON-encoded so the JS can re-render dropdowns identically.
-	fmt.Fprintf(w, `<input type="hidden" id="override-next-idx" value="%d">`, len(rows))
-	// "Add" button — JS appends a fresh row by cloning the template.
-	fmt.Fprint(w, `<div class="override-actions" style="margin-top:12px;">`)
-	fmt.Fprint(w, `<button type="button" class="btn-sm" onclick="mangarrAddOverrideRow()">+ Add override</button>`)
-	fmt.Fprint(w, `</div>`)
-
-	// Template kept off-screen so JS can clone it. Mirrors the rendered row.
-	fmt.Fprint(w, `<template id="override-row-template">`)
-	writeOverrideRow(w, -1, 0, 0, cats, catByID, libChoices)
-	fmt.Fprint(w, `</template>`)
-}
-
-// writeOverrideRow renders one override row.
-// idx < 0 = the template (no rendered ID, JS rewrites name="" suffix on clone).
-func writeOverrideRow(w http.ResponseWriter, idx int, savedCatID, savedLibID int64,
-	cats []suwayomi.Category, catByID map[int64]suwayomi.Category,
-	libChoices []overrideLibraryChoice) {
-	idxAttr := strconv.Itoa(idx)
-	if idx < 0 {
-		idxAttr = "__IDX__"
-	}
-	fmt.Fprintf(w, `<div class="settings-row override-row" data-idx="%s">`, html(idxAttr))
-
-	// Category dropdown
-	fmt.Fprint(w, `<div class="settings-input-wrap">`)
-	fmt.Fprintf(w, `<select name="override_category_%s">`, html(idxAttr))
-	fmt.Fprint(w, `<option value="0">(select category)</option>`)
-	// Unknown saved ID gets prepended.
-	if savedCatID > 0 {
-		if _, found := catByID[savedCatID]; !found {
-			fmt.Fprintf(w, `<option value="%d" selected>Unknown (ID: %d)</option>`, savedCatID, savedCatID)
-		}
-	}
-	for _, c := range cats {
-		sel := ""
-		if c.ID == savedCatID {
-			sel = " selected"
-		}
-		fmt.Fprintf(w, `<option value="%d"%s>%s</option>`, c.ID, sel, html(c.Name))
-	}
-	fmt.Fprint(w, `</select></div>`)
-
-	// Arrow separator
-	fmt.Fprint(w, `<span class="override-arrow">&rarr;</span>`)
-
-	// Library dropdown (filtered to KavitaLibIDsByType libraries)
-	fmt.Fprint(w, `<div class="settings-input-wrap">`)
-	fmt.Fprintf(w, `<select name="override_library_%s">`, html(idxAttr))
-	fmt.Fprint(w, `<option value="0">(select library)</option>`)
-	for _, lc := range libChoices {
-		sel := ""
-		if lc.ID == savedLibID {
-			sel = " selected"
-		}
-		fmt.Fprintf(w, `<option value="%d"%s>%s</option>`, lc.ID, sel, html(lc.Label))
-	}
-	// Saved library ID not in choices → render as Unknown so user sees + can re-pick.
-	if savedLibID > 0 {
-		found := false
-		for _, lc := range libChoices {
-			if lc.ID == savedLibID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			fmt.Fprintf(w, `<option value="%d" selected>Unknown library (ID: %d)</option>`, savedLibID, savedLibID)
-		}
-	}
-	fmt.Fprint(w, `</select></div>`)
-
-	// Resolved content-type badge (Plan B carry-forward: shows which
-	// AniList content type this override maps to via the reverse lookup).
-	ct := ""
-	for _, lc := range libChoices {
-		if lc.ID == savedLibID {
-			ct = string(lc.ContentType)
-			break
-		}
-	}
-	if ct != "" {
-		fmt.Fprintf(w, `<span class="override-badge pill pill-%s">%s</span>`, html(strings.ToLower(ct)), html(ct))
-	} else if savedLibID > 0 {
-		fmt.Fprint(w, `<span class="override-badge pill pill-error">unmapped</span>`)
-	}
-
-	// Delete button
-	fmt.Fprint(w, `<button type="button" class="btn-sm override-delete" onclick="this.closest('.override-row').remove()">&#x2715;</button>`)
-
-	fmt.Fprint(w, `</div>`)
-}
