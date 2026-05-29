@@ -51,6 +51,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gavinmcfall/mangarr/internal/classifier"
 	"github.com/gavinmcfall/mangarr/internal/dbbackup"
 	"github.com/gavinmcfall/mangarr/internal/diskspace"
 	"github.com/gavinmcfall/mangarr/internal/filer"
@@ -60,6 +61,20 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/poller"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
 )
+
+// overrideRowView is the view-model for one Suwayomi category override row
+// on the Settings page. It pre-resolves the display name (from a fresh
+// Suwayomi snapshot) and the AniList content-type badge (from a reverse
+// lookup against KavitaLibIDsByType — the Plan B carry-forward constraint).
+type overrideRowView struct {
+	Index       int
+	CatID       int64
+	CatName     string // resolved category name, or "Unknown (ID: N)" when stale
+	CatKnown    bool   // false → render the "Unknown" hint inline
+	LibID       int64
+	LibLabel    string
+	ContentType model.ContentType
+}
 
 //go:embed templates/*.html static/htmx.min.js static/mangarr.css
 var assets embed.FS
@@ -231,6 +246,11 @@ func NewHandler(opts HandlerOpts) *Handler {
 	h.mux.HandleFunc("GET /api/kavita/libraries", h.apiKavitaLibraries)
 	h.mux.HandleFunc("GET /api/kavita/libraries/fragment", h.apiKavitaLibrariesFragment)
 
+	// Suwayomi connection + category override API
+	h.mux.HandleFunc("GET /api/suwayomi/test", h.apiSuwayomiTest)
+	h.mux.HandleFunc("GET /api/suwayomi/categories", h.apiSuwayomiCategories)
+	h.mux.HandleFunc("GET /api/suwayomi/categories/fragment", h.apiSuwayomiCategoriesFragment)
+
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
 
@@ -258,18 +278,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // definition rather than whichever happened to be parsed last globally.
 func parsePageTemplates() map[string]*template.Template {
 	pages := []string{"series.html", "preview.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "settings.html"}
-	m := make(map[string]*template.Template, len(pages))
+	// Pages that need the override-rows partial. Listed explicitly so
+	// adding the partial to a new page is a one-line change here, not a
+	// fan-out across the codebase.
+	withOverrideRows := map[string]bool{"settings.html": true}
+	m := make(map[string]*template.Template, len(pages)+1)
 	for _, name := range pages {
 		// Parse base + the specific page. This gives each page its own
 		// independent template set so block overrides don't bleed across pages.
+		files := []string{"templates/base.html", "templates/" + name}
+		if withOverrideRows[name] {
+			files = append(files, "templates/override-rows.html")
+		}
 		t := template.Must(
-			template.New("").Funcs(templateFuncs()).ParseFS(assets,
-				"templates/base.html",
-				"templates/"+name,
-			),
+			template.New("").Funcs(templateFuncs()).ParseFS(assets, files...),
 		)
 		m[name] = t
 	}
+	// Standalone override-fragment template for the HTMX swap target.
+	// Same source file, so the override-rows partial is byte-for-byte
+	// identical to what Settings renders. Single source of truth.
+	m["override-fragment"] = template.Must(
+		template.New("").Funcs(templateFuncs()).ParseFS(assets,
+			"templates/override-rows.html",
+		),
+	)
 	return m
 }
 
@@ -404,6 +437,16 @@ type settingsPageData struct {
 	KavitaLibraries []kavita.Library
 	// KavitaLibError is set when a library fetch attempt failed; displayed inline.
 	KavitaLibError string
+
+	// --- Library Map: Suwayomi connection ---
+	SuwayomiBaseURL  string
+	SuwayomiAuthType model.SuwayomiAuthType
+	SuwayomiUsername string
+	SuwayomiPassword string
+	// LibraryMap carries the override-card view-model shared with the
+	// HTMX fragment endpoint. Single source of truth for the override
+	// rows, library-name resolution, and configure-first prompts.
+	LibraryMap libraryMapData
 	RenameExample           string
 	DiskRows                []fsDiskRow
 	RecycleBinPath          string
@@ -579,7 +622,101 @@ func (h *Handler) pageActivity(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	h.render(w, "activity.html", pageData{Page: "activity", Items: list})
+	// Resolve Via labels (suwayomi-override:category=N → category name).
+	// We fetch the Suwayomi category list once for the entire page render
+	// so per-row resolution is O(1). Failure to reach Suwayomi falls back
+	// to "Unknown (ID: N)" — the override still rendered through Plan B,
+	// so the user just sees a degraded label, not an error page.
+	rows := buildActivityRows(r.Context(), h.store, list)
+	h.render(w, "activity.html", activityPageData{Page: "activity", Items: rows})
+}
+
+// activityRow is the view-model for one ActivityEntry, with Via pre-resolved
+// to a human-readable label.
+type activityRow struct {
+	model.ActivityEntry
+	ViaLabel string
+}
+
+// activityPageData is passed to activity.html.
+type activityPageData struct {
+	Page  string
+	Items []activityRow
+}
+
+// buildActivityRows resolves the Via field of every entry to a display label.
+// suwayomi-override:category=N is joined against the current Suwayomi
+// category list; missing IDs render as "Unknown (ID: N)". anilist:JP/KR/CN/TW
+// render as "AniList (XX)". unmatched/empty are handled in a switch.
+//
+// The Suwayomi category list is fetched at most once per page render — when
+// at least one row carries a suwayomi-override Via.
+func buildActivityRows(ctx context.Context, st Store, list []model.ActivityEntry) []activityRow {
+	rows := make([]activityRow, 0, len(list))
+	var catNamesByID map[int64]string
+	needSuwayomi := false
+	for _, e := range list {
+		if strings.HasPrefix(e.Via, classifier.ViaSuwayomiOverridePrefix) {
+			needSuwayomi = true
+			break
+		}
+	}
+	if needSuwayomi {
+		settings, err := st.GetSettings()
+		if err == nil {
+			if client, ok := newSuwayomiClient(settings); ok {
+				fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				cats, err := client.ListCategories(fetchCtx)
+				cancel()
+				if err == nil {
+					catNamesByID = make(map[int64]string, len(cats))
+					for _, c := range cats {
+						catNamesByID[c.ID] = c.Name
+					}
+				}
+			}
+		}
+	}
+	for _, e := range list {
+		rows = append(rows, activityRow{
+			ActivityEntry: e,
+			ViaLabel:      formatVia(e.Via, catNamesByID),
+		})
+	}
+	return rows
+}
+
+// formatVia renders a raw Via value into a human-readable label.
+//
+//	"anilist:JP"                  → "AniList (JP)"
+//	"suwayomi-override:category=5" → "<categoryName>" or "Unknown (ID: 5)"
+//	"unmatched"                   → "Unmatched"
+//	""                            → "—" (pre-Plan-B legacy rows)
+func formatVia(via string, catNamesByID map[int64]string) string {
+	switch {
+	case via == "":
+		return "—"
+	case via == classifier.ViaUnmatched:
+		return "Unmatched"
+	case strings.HasPrefix(via, classifier.ViaAniListPrefix):
+		code := strings.TrimPrefix(via, classifier.ViaAniListPrefix)
+		if code == "" {
+			return "AniList"
+		}
+		return "AniList (" + code + ")"
+	case strings.HasPrefix(via, classifier.ViaSuwayomiOverridePrefix):
+		rawID := strings.TrimPrefix(via, classifier.ViaSuwayomiOverridePrefix)
+		id, err := strconv.ParseInt(rawID, 10, 64)
+		if err != nil {
+			return via // surface raw on unparseable
+		}
+		if name, ok := catNamesByID[id]; ok && name != "" {
+			return name
+		}
+		return fmt.Sprintf("Unknown (ID: %d)", id)
+	default:
+		return via
+	}
 }
 
 func (h *Handler) pageTasks(w http.ResponseWriter, r *http.Request) {
@@ -691,6 +828,14 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// --- Library Map: Suwayomi + Override rows ---
+	// Both /settings and the override-fragment HTMX endpoint route
+	// through buildLibraryMapData → identical rendering on initial GET
+	// and after the user clicks Refresh.
+	lmCtx, lmCancel := context.WithTimeout(r.Context(), 3*time.Second)
+	libraryMap := buildLibraryMapData(lmCtx, settings)
+	lmCancel()
+
 	// Pre-extract values typed-keyed by model.ContentType into plain fields,
 	// so the template can use {{.RootManga}} etc. with no reflection-time
 	// type mismatch. See settingsPageData doc comment.
@@ -708,6 +853,11 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		KavitaLibManhua:         settings.KavitaLibIDsByType[model.TypeManhua],
 		KavitaLibraries:         kavitaLibs,
 		KavitaLibError:          kavitaLibErr,
+		SuwayomiBaseURL:         settings.SuwayomiBaseURL,
+		SuwayomiAuthType:        settings.SuwayomiAuthType,
+		SuwayomiUsername:        settings.SuwayomiUsername,
+		SuwayomiPassword:        settings.SuwayomiPassword,
+		LibraryMap:              libraryMap,
 		RenameExample:           renameExample(settings.RenameScheme),
 		DiskRows:                diskRows,
 		RecycleBinPath:          h.recycleBinPath,
@@ -916,6 +1066,28 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 	setLibID(settings.KavitaLibIDsByType, model.TypeManga, r.FormValue("kavita_lib_manga"))
 	setLibID(settings.KavitaLibIDsByType, model.TypeManhwa, r.FormValue("kavita_lib_manhwa"))
 	setLibID(settings.KavitaLibIDsByType, model.TypeManhua, r.FormValue("kavita_lib_manhua"))
+
+	// --- Suwayomi connection + category overrides ---
+	settings.SuwayomiBaseURL = strings.TrimRight(strings.TrimSpace(r.FormValue("suwayomi_base_url")), "/")
+	switch model.SuwayomiAuthType(r.FormValue("suwayomi_auth_type")) {
+	case model.SuwayomiAuthBasic:
+		settings.SuwayomiAuthType = model.SuwayomiAuthBasic
+	case model.SuwayomiAuthSimple:
+		settings.SuwayomiAuthType = model.SuwayomiAuthSimple
+	case model.SuwayomiAuthUI:
+		settings.SuwayomiAuthType = model.SuwayomiAuthUI
+	default:
+		settings.SuwayomiAuthType = model.SuwayomiAuthNone
+	}
+	settings.SuwayomiUsername = strings.TrimSpace(r.FormValue("suwayomi_username"))
+	// Password kept as-is; trimming would silently break credentials with a
+	// leading/trailing space.
+	settings.SuwayomiPassword = r.FormValue("suwayomi_password")
+
+	// Parse override rows. Form fields come as override_category_<idx> +
+	// override_library_<idx> pairs (idx is the JS counter, not stable).
+	// Walk r.Form and pick out matching pairs.
+	settings.SuwayomiCategoryOverrides = parseSuwayomiOverrides(r.Form)
 
 	// Validate the rename scheme before persisting. On failure, re-render the
 	// Settings page with the error shown inline and all form values preserved
@@ -1784,6 +1956,18 @@ func (h *Handler) serveMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- helpers ----
+
+// renderTemplate executes a named template within a template set without
+// the base.html wrapping. Used by the override-fragment HTMX endpoint
+// where we want raw inner HTML, not a full page. Returns the underlying
+// ExecuteTemplate error so the caller can surface it inline.
+func (h *Handler) renderTemplate(w http.ResponseWriter, set, name string, data interface{}) error {
+	t, ok := h.tmpls[set]
+	if !ok {
+		return fmt.Errorf("template set not found: %s", set)
+	}
+	return t.ExecuteTemplate(w, name, data)
+}
 
 func (h *Handler) render(w http.ResponseWriter, name string, data interface{}) {
 	t, ok := h.tmpls[name]

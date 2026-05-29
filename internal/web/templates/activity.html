@@ -25,6 +25,7 @@
     <th>Time</th>
     <th>Series</th>
     <th>Action</th>
+    <th>Via</th>
     <th>Detail</th>
   </tr></thead>
   <tbody>
@@ -33,6 +34,7 @@
     <td class="td-dim">{{.Time.Format "2006-01-02 15:04"}}</td>
     <td>{{.SeriesTitle}}</td>
     <td><span class="pill pill-{{.Action | lower}}">{{.Action}}</span></td>
+    <td class="td-dim">{{.ViaLabel}}</td>
     <td class="td-dim">{{.Detail}}</td>
   </tr>
   {{end}}

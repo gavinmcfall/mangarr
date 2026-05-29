@@ -2128,9 +2128,9 @@ func TestSettingsPageRendersKavitaLibSelectsWhenKavitaConfigured(t *testing.T) {
 		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
 	}
 	body := rr.Body.String()
-	// Section heading.
-	if !strings.Contains(body, "Kavita Libraries") {
-		t.Errorf("'Kavita Libraries' heading not in settings page; body excerpt:\n%s", snippet(body, "Kavita", 300))
+	// Section heading: renamed to "Library Map" in Plan C.
+	if !strings.Contains(body, "Library Map") {
+		t.Errorf("'Library Map' heading not in settings page; body excerpt:\n%s", snippet(body, "Library", 300))
 	}
 	// Sync button.
 	if !strings.Contains(body, "Sync") {
