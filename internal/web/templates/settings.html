@@ -18,29 +18,32 @@
       <p class="settings-card-desc">Free space per filesystem. Green &lt; 75% used, orange 75–90%, red &gt; 90%.</p>
     </div>
     <div class="settings-card-body">
-      <table class="disk-space-table">
+      <ul class="disk-list">
         {{range .DiskRows}}
-        <tr>
-          <td class="disk-path">
-            <span style="font-weight:600;">{{.MountLabel}}</span>
-          </td>
-          {{if .Err}}
-          <td class="disk-sizes"><span class="disk-unavailable">{{.Err}}</span></td>
-          <td class="disk-bar-cell">
-            <div class="space-bar"><div class="space-bar-fill bar-err" style="width:100%"></div></div>
-          </td>
-          {{else}}
-          <td class="disk-sizes">{{.Free}} free / {{.Total}}</td>
-          <td class="disk-bar-cell">
+        <li class="disk-row">
+          <div class="disk-row-head">
+            <span class="disk-mount-label">{{.MountLabel}}</span>
+            {{if .Err}}
+            <span class="disk-unavailable">{{.Err}}</span>
+            {{else}}
+            <span class="disk-sizes">{{.Free}} free of {{.Total}}</span>
+            {{end}}
+          </div>
+          {{if not .Err}}
+          <div class="disk-row-bar">
             <div class="space-bar">
               <div class="space-bar-fill {{.BarClass}}" style="width:{{.PercentFmt}}%"></div>
             </div>
             <span class="disk-pct-label">{{.PercentUsedFmt}}</span>
-          </td>
+          </div>
+          {{else}}
+          <div class="disk-row-bar">
+            <div class="space-bar"><div class="space-bar-fill bar-err" style="width:100%"></div></div>
+          </div>
           {{end}}
-        </tr>
+        </li>
         {{end}}
-      </table>
+      </ul>
     </div>
   </div>
 </div>
