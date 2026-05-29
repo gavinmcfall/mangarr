@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/dbbackup"
+	"github.com/gavinmcfall/mangarr/internal/health"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
 	_ "modernc.org/sqlite"
@@ -145,7 +146,7 @@ func newEmptyHandler() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "/config/recycle-bin", 7, nil)
+	return NewHandler(st, &fakeRunner{}, "/config/recycle-bin", 7, nil, nil)
 }
 
 // newTestHandler builds a Handler with test fixtures.
@@ -168,7 +169,7 @@ func newTestHandler() (*Handler, *fakeStore, *fakeRunner) {
 		},
 	}
 	runner := &fakeRunner{}
-	return NewHandler(st, runner, "/config/recycle-bin", 7, nil), st, runner
+	return NewHandler(st, runner, "/config/recycle-bin", 7, nil, nil), st, runner
 }
 
 // newTestHandlerWithRegistry builds a Handler with a seeded task registry.
@@ -179,7 +180,7 @@ func newTestHandlerWithRegistry() (*Handler, *fakeStore, *fakeRunner, *fakeTaskR
 		runner.called++
 		return nil
 	})
-	h := NewHandler(st, runner, "/config/recycle-bin", 7, reg)
+	h := NewHandler(st, runner, "/config/recycle-bin", 7, reg, nil)
 	return h, st, runner, reg
 }
 
@@ -380,7 +381,7 @@ func TestAPIRescanWithoutRunnerReturns503(t *testing.T) {
 		series:   []model.Series{},
 		activity: []model.ActivityEntry{},
 		settings: model.Settings{LibraryRoots: map[model.ContentType]string{}, KavitaLibIDsByType: map[model.ContentType]int64{}},
-	}, nil, "/config/recycle-bin", 7, nil)
+	}, nil, "/config/recycle-bin", 7, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/rescan", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -575,7 +576,7 @@ func newBackupHandler(t *testing.T) (*Handler, string) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandlerWithBackup(st, &fakeRunner{}, "", 0, cfg, backupFn, nil)
+	h := NewHandlerWithBackup(st, &fakeRunner{}, "", 0, cfg, backupFn, nil, nil)
 	return h, dir
 }
 
@@ -719,7 +720,7 @@ func newHandlerWithRoots() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "", 0, nil, "/tmp")
+	return NewHandler(st, &fakeRunner{}, "", 0, nil, nil, "/tmp")
 }
 
 func TestAPIDiskSpaceReturnsJSONArray(t *testing.T) {
@@ -773,7 +774,7 @@ func TestAPIDiskSpaceEmptyWhenNoRoots(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "", 0, nil) // no downloadRoots
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil) // no downloadRoots
 	req := httptest.NewRequest(http.MethodGet, "/api/diskspace", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -874,7 +875,7 @@ func TestSettingsPageRendersRecycleBin(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "/tmp/mg-bin", 14, nil)
+	h := NewHandler(st, &fakeRunner{}, "/tmp/mg-bin", 14, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -968,7 +969,7 @@ func TestAPIRunTaskTriggersRunFn(t *testing.T) {
 		return nil
 	})
 
-	h := NewHandler(st, &fakeRunner{}, "", 0, reg)
+	h := NewHandler(st, &fakeRunner{}, "", 0, reg, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/tasks/test-task/run", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -1032,5 +1033,133 @@ func TestAPIRescanRoutesThroughRegistry(t *testing.T) {
 	}
 	if time.Since(info.LastRun) > 5*time.Second {
 		t.Errorf("poll-scan LastRun %v is too old", info.LastRun)
+	}
+}
+
+// ---- Health page + API tests ----
+
+// fakeHealthRegistry is a minimal in-process HealthRegistry for tests.
+type fakeHealthRegistry struct {
+	results []health.Result
+}
+
+func (f *fakeHealthRegistry) RunAll(ctx context.Context) []health.Result {
+	return f.results
+}
+
+func newHealthHandler(results []health.Result) *Handler {
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	reg := &fakeHealthRegistry{results: results}
+	return NewHandler(st, &fakeRunner{}, "", 0, nil, reg)
+}
+
+func TestHealthPageReturns200(t *testing.T) {
+	results := []health.Result{
+		{ID: "sqlite", Name: "SQLite database", Status: health.StatusOK, Message: "Ping OK"},
+		{ID: "download-roots", Name: "Download roots", Status: health.StatusWarn, Message: "No roots configured"},
+	}
+	h := newHealthHandler(results)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	// Should contain at least one row.
+	if !strings.Contains(body, "SQLite database") {
+		t.Fatalf("health page missing 'SQLite database' row; body:\n%s", body)
+	}
+	if !strings.Contains(body, "Download roots") {
+		t.Fatalf("health page missing 'Download roots' row; body:\n%s", body)
+	}
+	// Page title must appear.
+	if !strings.Contains(body, "Health") {
+		t.Fatalf("health page title missing; body:\n%s", body)
+	}
+}
+
+func TestAPIHealthReturnsJSON(t *testing.T) {
+	results := []health.Result{
+		{ID: "sqlite", Name: "SQLite database", Status: health.StatusOK, Message: "Ping OK"},
+		{ID: "kavita", Name: "Kavita", Status: health.StatusError, Message: "connection refused"},
+	}
+	h := newHealthHandler(results)
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("want application/json, got %q", ct)
+	}
+	var resp struct {
+		Status  string `json:"status"`
+		Results []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse JSON: %v; body=%s", err, rr.Body.String())
+	}
+	// Overall status should be the worst (error).
+	if resp.Status != "error" {
+		t.Errorf("want overall status 'error', got %q", resp.Status)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("want 2 results, got %d", len(resp.Results))
+	}
+}
+
+func TestHealthPageWithoutRegistryShowsWarning(t *testing.T) {
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	// nil healthReg
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "not wired") {
+		t.Fatalf("expected 'not wired' placeholder in health page; body:\n%s", body)
+	}
+}
+
+func TestAPIHealthWithoutRegistryReturnsWarn(t *testing.T) {
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if resp.Status != "warn" {
+		t.Errorf("want status 'warn' for nil registry, got %q", resp.Status)
 	}
 }

@@ -35,6 +35,8 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/config"
 	"github.com/gavinmcfall/mangarr/internal/dbbackup"
 	"github.com/gavinmcfall/mangarr/internal/filer"
+	"github.com/gavinmcfall/mangarr/internal/health"
+	healthchecks "github.com/gavinmcfall/mangarr/internal/health/checks"
 	"github.com/gavinmcfall/mangarr/internal/kavita"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/poller"
@@ -166,12 +168,29 @@ func main() {
 		log.Fatalf("tasks: register poll-scan: %v", err)
 	}
 
+	// ---- health registry ----
+	healthReg := health.NewRegistry()
+	settingsLoader := func() (model.Settings, error) { return st.GetSettings() }
+	for _, check := range []health.Check{
+		healthchecks.DownloadRootsCheck(cfg.DownloadRoots),
+		healthchecks.LibraryRootsCheck(settingsLoader),
+		healthchecks.KavitaCheck(kavitaClient),
+		healthchecks.AniListCheck(anilistEndpoint),
+		healthchecks.SQLiteCheck(st.DB()),
+		healthchecks.DiskSpaceCheck(cfg.DownloadRoots, 15, 5),
+		healthchecks.RenameSchemeCheck(settingsLoader),
+	} {
+		if err := healthReg.Register(check); err != nil {
+			log.Fatalf("health: %v", err)
+		}
+	}
+
 	// ---- web handler ----
 	h := web.NewHandlerWithBackup(st, p, cfg.RecycleBinPath, cfg.RecycleBinRetentionDays, web.BackupConfig{
 		Dir:           cfg.BackupDir,
 		RetentionDays: cfg.BackupRetentionDays,
 		IntervalHours: cfg.BackupIntervalHours,
-	}, backupFn, reg, cfg.DownloadRoots...)
+	}, backupFn, reg, healthReg, cfg.DownloadRoots...)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           h,

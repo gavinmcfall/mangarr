@@ -6,6 +6,7 @@
 //	GET  /series                     → Series page (HTMX)
 //	GET  /unmatched                  → Unmatched page (HTMX)
 //	GET  /activity                   → Activity/History page (HTMX)
+//	GET  /health                     → Health checks page (HTMX)
 //	GET  /tasks                      → Tasks page (HTMX)
 //	GET  /settings                   → Settings page (HTMX)
 //	POST /settings                   → Save settings (form POST, redirect back)
@@ -14,6 +15,7 @@
 //	GET  /api/series                 → JSON list of all series
 //	GET  /api/unmatched              → JSON list of unmatched series
 //	GET  /api/activity               → JSON activity log
+//	GET  /api/health                 → JSON health check results (Gatus-compatible)
 //	GET  /api/tasks                  → JSON list of registered tasks
 //	POST /api/tasks/{id}/run         → Run a task by ID
 //	GET  /api/settings               → JSON current settings
@@ -40,6 +42,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/dbbackup"
 	"github.com/gavinmcfall/mangarr/internal/diskspace"
 	"github.com/gavinmcfall/mangarr/internal/filer"
+	"github.com/gavinmcfall/mangarr/internal/health"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
 )
@@ -77,6 +80,11 @@ type TaskRegistry interface {
 	RunNow(ctx context.Context, id string) (tasks.Info, error)
 }
 
+// HealthRegistry is the subset of health.Registry the web package needs.
+type HealthRegistry interface {
+	RunAll(ctx context.Context) []health.Result
+}
+
 // Handler is the HTTP handler for the web UI and JSON API.
 type Handler struct {
 	mux                     *http.ServeMux
@@ -90,6 +98,7 @@ type Handler struct {
 	backupCfg               BackupConfig
 	backupFn                func() (dbbackup.Entry, error) // injected for on-demand backup
 	taskReg                 TaskRegistry                   // injected for Tasks page + /api/tasks
+	healthReg               HealthRegistry                 // injected for Health page + /api/health
 }
 
 // NewHandler wires up all routes and parses embedded templates.
@@ -98,17 +107,18 @@ type Handler struct {
 // surfaced read-only on the Settings page.
 // downloadRoots is the list of download root paths (may be empty in tests).
 // taskReg may be nil (tasks routes return 503).
+// healthReg may be nil (health routes show a placeholder warning).
 // Backup API is wired separately via NewHandlerWithBackup (returns 503 here).
-func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, taskReg TaskRegistry, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, downloadRoots)
+func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, taskReg TaskRegistry, healthReg HealthRegistry, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, healthReg, downloadRoots)
 }
 
 // NewHandlerWithBackup is like NewHandler but also wires the backup API.
-func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, downloadRoots)
+func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, downloadRoots)
 }
 
-func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, downloadRoots []string) *Handler {
+func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, downloadRoots []string) *Handler {
 	h := &Handler{
 		mux:                     http.NewServeMux(),
 		tmpls:                   parsePageTemplates(),
@@ -121,6 +131,7 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 		backupCfg:               cfg,
 		backupFn:                backupFn,
 		taskReg:                 taskReg,
+		healthReg:               healthReg,
 	}
 
 	// Static assets
@@ -133,6 +144,7 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 	h.mux.HandleFunc("GET /series", h.pageSeries)
 	h.mux.HandleFunc("GET /unmatched", h.pageUnmatched)
 	h.mux.HandleFunc("GET /activity", h.pageActivity)
+	h.mux.HandleFunc("GET /health", h.pageHealth)
 	h.mux.HandleFunc("GET /tasks", h.pageTasks)
 	h.mux.HandleFunc("GET /settings", h.pageSettings)
 	h.mux.HandleFunc("POST /settings", h.saveSettings)
@@ -141,6 +153,7 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 	h.mux.HandleFunc("GET /api/series", h.apiListSeries)
 	h.mux.HandleFunc("GET /api/unmatched", h.apiListUnmatched)
 	h.mux.HandleFunc("GET /api/activity", h.apiListActivity)
+	h.mux.HandleFunc("GET /api/health", h.apiHealth)
 	h.mux.HandleFunc("GET /api/tasks", h.apiListTasks)
 	h.mux.HandleFunc("POST /api/tasks/{id}/run", h.apiRunTask)
 	h.mux.HandleFunc("GET /api/settings", h.apiGetSettings)
@@ -168,7 +181,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // overlaid, ensuring that {{block "content"}} resolves to THAT page's
 // definition rather than whichever happened to be parsed last globally.
 func parsePageTemplates() map[string]*template.Template {
-	pages := []string{"series.html", "unmatched.html", "activity.html", "tasks.html", "settings.html"}
+	pages := []string{"series.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "settings.html"}
 	m := make(map[string]*template.Template, len(pages))
 	for _, name := range pages {
 		// Parse base + the specific page. This gives each page its own
@@ -293,6 +306,21 @@ type tasksPageData struct {
 	Items []taskRow
 }
 
+// healthRow is the view-model for one row on the Health page.
+type healthRow struct {
+	health.Result
+	// StatusClass is the CSS class for the status pill.
+	StatusClass string // "success" | "warn" | "error"
+}
+
+// healthPageData is passed to templates/health.html.
+type healthPageData struct {
+	Page        string
+	Items       []healthRow
+	OverallStatus health.Status
+	Unregistered  bool // true when healthReg is nil
+}
+
 // ---- HTML page handlers ----
 
 // renameExample computes a live preview string for the Settings page.
@@ -356,6 +384,41 @@ func buildTaskRow(info tasks.Info) taskRow {
 		IntervalLabel: formatInterval(info.IntervalMs),
 		LastRunLabel:  formatAge(time.Now(), info.LastRun),
 		ResultClass:   rc,
+	}
+}
+
+func (h *Handler) pageHealth(w http.ResponseWriter, r *http.Request) {
+	if h.healthReg == nil {
+		h.render(w, "health.html", healthPageData{
+			Page:         "health",
+			Unregistered: true,
+		})
+		return
+	}
+	results := h.healthReg.RunAll(r.Context())
+	rows := make([]healthRow, 0, len(results))
+	for _, res := range results {
+		rows = append(rows, healthRow{
+			Result:      res,
+			StatusClass: healthStatusClass(res.Status),
+		})
+	}
+	h.render(w, "health.html", healthPageData{
+		Page:          "health",
+		Items:         rows,
+		OverallStatus: health.WorstStatus(results),
+	})
+}
+
+// healthStatusClass maps a health.Status to the CSS pill class.
+func healthStatusClass(s health.Status) string {
+	switch s {
+	case health.StatusOK:
+		return "success"
+	case health.StatusWarn:
+		return "warn"
+	default:
+		return "error"
 	}
 }
 
@@ -575,6 +638,37 @@ func (h *Handler) apiListActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, list)
+}
+
+// apiHealthResponse is the JSON shape for GET /api/health.
+type apiHealthResponse struct {
+	Status  health.Status  `json:"status"`
+	Results []health.Result `json:"results"`
+}
+
+func (h *Handler) apiHealth(w http.ResponseWriter, r *http.Request) {
+	if h.healthReg == nil {
+		// Return a single warning result when the registry isn't wired.
+		resp := apiHealthResponse{
+			Status: health.StatusWarn,
+			Results: []health.Result{
+				{
+					ID:          "registry",
+					Name:        "Health registry",
+					Status:      health.StatusWarn,
+					Message:     "Health checks not wired.",
+					Remediation: "Ensure a HealthRegistry is passed to the web handler.",
+				},
+			},
+		}
+		jsonOK(w, resp)
+		return
+	}
+	results := h.healthReg.RunAll(r.Context())
+	jsonOK(w, apiHealthResponse{
+		Status:  health.WorstStatus(results),
+		Results: results,
+	})
 }
 
 func (h *Handler) apiListTasks(w http.ResponseWriter, r *http.Request) {
