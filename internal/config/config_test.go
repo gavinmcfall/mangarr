@@ -25,3 +25,36 @@ func TestLoadRequiresRoots(t *testing.T) {
 		t.Fatal("expected error when no download roots set")
 	}
 }
+
+func TestLoadRecycleBinDefaults(t *testing.T) {
+	t.Setenv("MANGARR_DOWNLOAD_ROOTS", "/media/Downloads/suwayomi")
+	// Ensure the env vars are unset so defaults kick in.
+	t.Setenv("MANGARR_RECYCLE_BIN_PATH", "")
+	t.Setenv("MANGARR_RECYCLE_BIN_RETENTION_DAYS", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.RecycleBinPath != "/config/recycle-bin" {
+		t.Fatalf("want RecycleBinPath=/config/recycle-bin, got %q", c.RecycleBinPath)
+	}
+	if c.RecycleBinRetentionDays != 7 {
+		t.Fatalf("want RecycleBinRetentionDays=7, got %d", c.RecycleBinRetentionDays)
+	}
+}
+
+func TestLoadRecycleBinCustom(t *testing.T) {
+	t.Setenv("MANGARR_DOWNLOAD_ROOTS", "/media/Downloads/suwayomi")
+	t.Setenv("MANGARR_RECYCLE_BIN_PATH", "/data/trash")
+	t.Setenv("MANGARR_RECYCLE_BIN_RETENTION_DAYS", "14")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.RecycleBinPath != "/data/trash" {
+		t.Fatalf("want RecycleBinPath=/data/trash, got %q", c.RecycleBinPath)
+	}
+	if c.RecycleBinRetentionDays != 14 {
+		t.Fatalf("want RecycleBinRetentionDays=14, got %d", c.RecycleBinRetentionDays)
+	}
+}

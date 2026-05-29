@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
+	"github.com/gavinmcfall/mangarr/internal/recyclebin"
 )
 
 // knownTokens is the set of substitution tokens recognised by RenderName.
@@ -108,9 +110,15 @@ func RenderName(scheme, series, origFile string) string {
 
 // Filer places .cbz files from a source directory into a destination library root
 // using the configured mode (hardlink/move/copy) and rename scheme.
+//
+// RecycleBin is optional (nil-safe). When non-nil and move-mode encounters a
+// destination that already exists, the existing file is sent to the bin before
+// the rename is retried. If RecycleBin is nil, the original rename error is
+// returned unchanged.
 type Filer struct {
-	Mode   model.FileMode
-	Scheme string
+	Mode       model.FileMode
+	Scheme     string
+	RecycleBin *recyclebin.Bin
 }
 
 // File places every .cbz from srcDir into dstRoot per the scheme + mode.
@@ -161,7 +169,10 @@ func (f *Filer) File(series, srcDir, dstRoot string) error {
 // cross-device / EXDEV on Linux), falls back to a byte-copy and logs a
 // warning so the operator knows a hardlink was not possible.
 //
-// Move mode: os.Rename; cross-device moves are handled by the OS on most
+// Move mode: os.Rename. If the rename fails because the destination already
+// exists and RecycleBin is non-nil, the existing destination is sent to the
+// bin and the rename is retried once. If RecycleBin is nil, the original
+// rename error is returned. Cross-device moves are handled by the OS on most
 // platforms, but will fail on Linux across mount points — the caller is
 // responsible for ensuring move-mode is only configured within a single FS.
 //
@@ -169,7 +180,22 @@ func (f *Filer) File(series, srcDir, dstRoot string) error {
 func (f *Filer) place(src, dst string) error {
 	switch f.Mode {
 	case model.ModeMove:
-		return os.Rename(src, dst)
+		err := os.Rename(src, dst)
+		if err == nil {
+			return nil
+		}
+		// If dst already exists and we have a recycle bin, send the old dst to
+		// the bin and retry. This path is currently unreachable in normal
+		// operation (File's idempotent skip prevents it) but makes the failure
+		// mode safe if any future change removes the skip.
+		if _, statErr := os.Stat(dst); statErr == nil && f.RecycleBin != nil {
+			if _, binErr := f.RecycleBin.Send(dst, time.Now()); binErr != nil {
+				log.Printf("filer: recyclebin send %s failed (%v); returning original rename error", dst, binErr)
+				return err
+			}
+			return os.Rename(src, dst)
+		}
+		return err
 	case model.ModeCopy:
 		return copyFile(src, dst)
 	default: // ModeHardlink (and any unrecognised value)
