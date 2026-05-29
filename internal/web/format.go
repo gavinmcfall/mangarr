@@ -21,8 +21,11 @@ func formatBytes(n int64) string {
 }
 
 // formatAge returns a short human-readable age string like "just now",
-// "5m ago", "3h ago", or "7d ago".
+// "5m ago", "3h ago", or "7d ago". Returns "never" when mtime is zero.
 func formatAge(now, mtime time.Time) string {
+	if mtime.IsZero() {
+		return "never"
+	}
 	d := now.Sub(mtime)
 	if d < 0 {
 		d = 0
@@ -36,5 +39,27 @@ func formatAge(now, mtime time.Time) string {
 		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	default:
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
+// formatInterval renders a task interval as a short human-readable string.
+// Returns "On demand" for 0, otherwise e.g. "15m", "1h", "24h".
+func formatInterval(ms int64) string {
+	if ms <= 0 {
+		return "On demand"
+	}
+	d := time.Duration(ms) * time.Millisecond
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		if m == 0 {
+			return fmt.Sprintf("%dh", h)
+		}
+		return fmt.Sprintf("%dh%dm", h, m)
 	}
 }

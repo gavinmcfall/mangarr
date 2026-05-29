@@ -41,6 +41,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
 	"github.com/gavinmcfall/mangarr/internal/scanner"
 	"github.com/gavinmcfall/mangarr/internal/store"
+	"github.com/gavinmcfall/mangarr/internal/tasks"
 	"github.com/gavinmcfall/mangarr/internal/web"
 )
 
@@ -145,12 +146,32 @@ func main() {
 		return dbbackup.Entry{Name: lastPathComponent(path), Path: path}, nil
 	}
 
+	// ---- task registry ----
+	reg := tasks.NewRegistry()
+	if err := reg.Register(tasks.Task{
+		ID:   "poll-scan",
+		Name: "Poll Scan",
+		// Interval is metadata for the UI; actual scheduling is the ticker below.
+		Interval: time.Duration(func() int {
+			pm := settings.PollMinutes
+			if pm <= 0 {
+				pm = 15
+			}
+			return pm
+		}()) * time.Minute,
+		RunFn: func(ctx context.Context) error {
+			return p.RunOnce()
+		},
+	}); err != nil {
+		log.Fatalf("tasks: register poll-scan: %v", err)
+	}
+
 	// ---- web handler ----
 	h := web.NewHandlerWithBackup(st, p, cfg.RecycleBinPath, cfg.RecycleBinRetentionDays, web.BackupConfig{
 		Dir:           cfg.BackupDir,
 		RetentionDays: cfg.BackupRetentionDays,
 		IntervalHours: cfg.BackupIntervalHours,
-	}, backupFn, cfg.DownloadRoots...)
+	}, backupFn, reg, cfg.DownloadRoots...)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           h,
@@ -170,14 +191,14 @@ func main() {
 	go func() {
 		// Run once immediately on startup so the UI has data straight away.
 		log.Printf("poller: initial scan starting")
-		if err := p.RunOnce(); err != nil {
+		if _, err := reg.RunNow(ctx, "poll-scan"); err != nil {
 			log.Printf("poller: initial run error: %v", err)
 		}
 		for {
 			select {
 			case <-ticker.C:
 				log.Printf("poller: scheduled tick — running scan")
-				if err := p.RunOnce(); err != nil {
+				if _, err := reg.RunNow(ctx, "poll-scan"); err != nil {
 					log.Printf("poller: run error: %v", err)
 				}
 			case <-ctx.Done():

@@ -1,0 +1,64 @@
+{{template "base" .}}
+{{define "title"}}Tasks{{end}}
+{{define "content"}}
+<header class="page-header">
+  <h1 class="page-title">Tasks</h1>
+</header>
+<div class="page-body">
+  <div class="content-container">
+{{if .Items}}
+<div class="data-table-wrap">
+<table>
+  <thead><tr>
+    <th>Name</th>
+    <th>Interval</th>
+    <th>Last Run</th>
+    <th>Last Result</th>
+    <th class="td-right">Action</th>
+  </tr></thead>
+  <tbody>
+  {{range .Items}}
+  <tr id="task-row-{{.ID}}">
+    <td>{{.Name}}</td>
+    <td class="td-dim">{{.IntervalLabel}}</td>
+    <td class="td-dim">{{.LastRunLabel}}</td>
+    <td>
+      {{if .Running}}
+        <span class="pill pill-pending">running</span>
+      {{else if eq .ResultClass "error"}}
+        <span class="pill pill-error" title="{{.LastErr}}">error</span>
+      {{else if eq .ResultClass "success"}}
+        <span class="pill pill-filed">success</span>
+      {{else}}
+        <span class="pill pill-unknown">pending</span>
+      {{end}}
+    </td>
+    <td class="td-right">
+      {{if .Running}}
+        <button class="btn-sm" disabled>Running&hellip;</button>
+      {{else}}
+        <button class="btn-sm"
+          hx-post="/api/tasks/{{.ID}}/run"
+          hx-swap="none"
+          hx-on::after-request="window.location.reload()">
+          Run now
+        </button>
+      {{end}}
+    </td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{else}}
+<div class="empty-state">
+  <!-- Lightning bolt / list-checks icon -->
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" />
+  </svg>
+  <p>No tasks registered.</p>
+</div>
+{{end}}
+  </div>
+</div>
+{{end}}

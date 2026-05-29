@@ -1,17 +1,21 @@
 package web
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/dbbackup"
 	"github.com/gavinmcfall/mangarr/internal/model"
+	"github.com/gavinmcfall/mangarr/internal/tasks"
 	_ "modernc.org/sqlite"
 )
 
@@ -66,6 +70,70 @@ type fakeRunner struct{ called int }
 
 func (r *fakeRunner) RunOnce() error { r.called++; return nil }
 
+// fakeTaskRegistry is a minimal in-process TaskRegistry for tests.
+type fakeTaskRegistry struct {
+	mu      sync.Mutex
+	entries map[string]*fakeTaskEntry
+}
+
+type fakeTaskEntry struct {
+	info  tasks.Info
+	runFn func(ctx context.Context) error
+}
+
+func newFakeTaskRegistry() *fakeTaskRegistry {
+	return &fakeTaskRegistry{entries: make(map[string]*fakeTaskEntry)}
+}
+
+func (f *fakeTaskRegistry) register(id, name string, fn func(ctx context.Context) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entries[id] = &fakeTaskEntry{
+		info:  tasks.Info{ID: id, Name: name},
+		runFn: fn,
+	}
+}
+
+func (f *fakeTaskRegistry) List() []tasks.Info {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]tasks.Info, 0, len(f.entries))
+	for _, e := range f.entries {
+		out = append(out, e.info)
+	}
+	return out
+}
+
+func (f *fakeTaskRegistry) Get(id string) (tasks.Info, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.entries[id]
+	if !ok {
+		return tasks.Info{}, false
+	}
+	return e.info, true
+}
+
+func (f *fakeTaskRegistry) RunNow(ctx context.Context, id string) (tasks.Info, error) {
+	f.mu.Lock()
+	e, ok := f.entries[id]
+	f.mu.Unlock()
+	if !ok {
+		return tasks.Info{}, errors.New("task not found: " + id)
+	}
+	runErr := e.runFn(ctx)
+	f.mu.Lock()
+	e.info.LastRun = time.Now()
+	if runErr != nil {
+		e.info.LastErr = runErr.Error()
+	} else {
+		e.info.LastErr = ""
+	}
+	snap := e.info
+	f.mu.Unlock()
+	return snap, runErr
+}
+
 // newEmptyHandler builds a Handler with a store that returns no series,
 // no unmatched, and no activity. Used to exercise the empty-state templates.
 func newEmptyHandler() *Handler {
@@ -77,7 +145,7 @@ func newEmptyHandler() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "/config/recycle-bin", 7)
+	return NewHandler(st, &fakeRunner{}, "/config/recycle-bin", 7, nil)
 }
 
 // newTestHandler builds a Handler with test fixtures.
@@ -100,7 +168,19 @@ func newTestHandler() (*Handler, *fakeStore, *fakeRunner) {
 		},
 	}
 	runner := &fakeRunner{}
-	return NewHandler(st, runner, "/config/recycle-bin", 7), st, runner
+	return NewHandler(st, runner, "/config/recycle-bin", 7, nil), st, runner
+}
+
+// newTestHandlerWithRegistry builds a Handler with a seeded task registry.
+func newTestHandlerWithRegistry() (*Handler, *fakeStore, *fakeRunner, *fakeTaskRegistry) {
+	_, st, runner := newTestHandler()
+	reg := newFakeTaskRegistry()
+	reg.register("poll-scan", "Poll Scan", func(ctx context.Context) error {
+		runner.called++
+		return nil
+	})
+	h := NewHandler(st, runner, "/config/recycle-bin", 7, reg)
+	return h, st, runner, reg
 }
 
 // ---- HTML page smoke tests ----
@@ -300,7 +380,7 @@ func TestAPIRescanWithoutRunnerReturns503(t *testing.T) {
 		series:   []model.Series{},
 		activity: []model.ActivityEntry{},
 		settings: model.Settings{LibraryRoots: map[model.ContentType]string{}, KavitaLibIDsByType: map[model.ContentType]int64{}},
-	}, nil, "/config/recycle-bin", 7)
+	}, nil, "/config/recycle-bin", 7, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/rescan", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -495,7 +575,7 @@ func newBackupHandler(t *testing.T) (*Handler, string) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandlerWithBackup(st, &fakeRunner{}, "", 0, cfg, backupFn)
+	h := NewHandlerWithBackup(st, &fakeRunner{}, "", 0, cfg, backupFn, nil)
 	return h, dir
 }
 
@@ -639,7 +719,7 @@ func newHandlerWithRoots() *Handler {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	return NewHandler(st, &fakeRunner{}, "", 0, "/tmp")
+	return NewHandler(st, &fakeRunner{}, "", 0, nil, "/tmp")
 }
 
 func TestAPIDiskSpaceReturnsJSONArray(t *testing.T) {
@@ -693,7 +773,7 @@ func TestAPIDiskSpaceEmptyWhenNoRoots(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "", 0) // no downloadRoots
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil) // no downloadRoots
 	req := httptest.NewRequest(http.MethodGet, "/api/diskspace", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -794,7 +874,7 @@ func TestSettingsPageRendersRecycleBin(t *testing.T) {
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
-	h := NewHandler(st, &fakeRunner{}, "/tmp/mg-bin", 14)
+	h := NewHandler(st, &fakeRunner{}, "/tmp/mg-bin", 14, nil)
 	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -828,5 +908,129 @@ func TestActivityPageEmptyStateRenders(t *testing.T) {
 	}
 	if strings.Contains(body, "<table") {
 		t.Fatalf("activity table should NOT render with no items")
+	}
+}
+
+// ---- Tasks page + API tests ----
+
+func TestTasksPageReturns200(t *testing.T) {
+	h, _, _, _ := newTestHandlerWithRegistry()
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	// Page header and at least the poll-scan row must appear.
+	if !strings.Contains(body, "Tasks") {
+		t.Fatalf("page title 'Tasks' not in body:\n%s", body)
+	}
+	if !strings.Contains(body, "Poll Scan") {
+		t.Fatalf("poll-scan task not in body:\n%s", body)
+	}
+}
+
+func TestAPIListTasksReturnsJSON(t *testing.T) {
+	h, _, _, _ := newTestHandlerWithRegistry()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	var list []tasks.Info
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("parse JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if len(list) < 1 {
+		t.Fatalf("want >=1 entry, got %d", len(list))
+	}
+}
+
+func TestAPIRunTaskTriggersRunFn(t *testing.T) {
+	st := &fakeStore{
+		series:   []model.Series{},
+		activity: []model.ActivityEntry{},
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+
+	var flagMu sync.Mutex
+	flagSet := false
+	reg := newFakeTaskRegistry()
+	reg.register("test-task", "Test Task", func(ctx context.Context) error {
+		flagMu.Lock()
+		flagSet = true
+		flagMu.Unlock()
+		return nil
+	})
+
+	h := NewHandler(st, &fakeRunner{}, "", 0, reg)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/test-task/run", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+
+	// Flag must have been flipped.
+	flagMu.Lock()
+	set := flagSet
+	flagMu.Unlock()
+	if !set {
+		t.Fatal("RunFn was not called")
+	}
+
+	// Response must be a valid Info with recent LastRun.
+	var info tasks.Info
+	if err := json.Unmarshal(rr.Body.Bytes(), &info); err != nil {
+		t.Fatalf("parse response JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if info.LastRun.IsZero() {
+		t.Error("LastRun should be non-zero after successful run")
+	}
+	if time.Since(info.LastRun) > 5*time.Second {
+		t.Errorf("LastRun %v is too old", info.LastRun)
+	}
+}
+
+func TestAPIRunTaskUnknownReturns404(t *testing.T) {
+	h, _, _, _ := newTestHandlerWithRegistry()
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/no-such-task/run", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAPIRescanRoutesThroughRegistry(t *testing.T) {
+	h, _, runner, reg := newTestHandlerWithRegistry()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rescan", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("want 204, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+
+	// runner.called was incremented via the registry's RunNow.
+	if runner.called < 1 {
+		t.Fatalf("expected RunFn to be called at least once via registry, called=%d", runner.called)
+	}
+
+	// The registry should reflect an updated LastRun for poll-scan.
+	info, ok := reg.Get("poll-scan")
+	if !ok {
+		t.Fatal("poll-scan not found in registry after rescan")
+	}
+	if info.LastRun.IsZero() {
+		t.Error("poll-scan LastRun should be non-zero after rescan")
+	}
+	if time.Since(info.LastRun) > 5*time.Second {
+		t.Errorf("poll-scan LastRun %v is too old", info.LastRun)
 	}
 }
