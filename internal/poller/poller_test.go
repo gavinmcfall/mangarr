@@ -2,6 +2,7 @@ package poller
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -532,6 +533,9 @@ func TestMetricsNilSafe(t *testing.T) {
 	}
 	if err := p.RunOnce(); err != nil {
 		t.Fatalf("runonce with nil metrics: %v", err)
+	}
+}
+
 // ---- Preview tests ----
 
 // multiClassifier maps series titles to different ContentTypes (or errors).
@@ -722,5 +726,209 @@ func TestPreviewDoesNotCallKavita(t *testing.T) {
 	}
 	if kav.calls != 0 {
 		t.Fatalf("Preview must not call ScanLibrary, got %d call(s)", kav.calls)
+	}
+}
+
+// ---- FileOne tests ----
+
+// fakeSeriesStore satisfies poller.SeriesStore for FileOne tests.
+type fakeSeriesStore struct {
+	series      map[int64]model.Series
+	setTypeCalls []struct {
+		id int64
+		ct model.ContentType
+	}
+	getErr error
+	setErr error
+}
+
+func (f *fakeSeriesStore) GetSeriesByID(id int64) (model.Series, error) {
+	if f.getErr != nil {
+		return model.Series{}, f.getErr
+	}
+	s, ok := f.series[id]
+	if !ok {
+		return model.Series{}, sql.ErrNoRows
+	}
+	return s, nil
+}
+
+func (f *fakeSeriesStore) SetSeriesType(id int64, ct model.ContentType) error {
+	if f.setErr != nil {
+		return f.setErr
+	}
+	f.setTypeCalls = append(f.setTypeCalls, struct {
+		id int64
+		ct model.ContentType
+	}{id, ct})
+	if s, ok := f.series[id]; ok {
+		s.Type = ct
+		s.Status = model.StatusPending
+		f.series[id] = s
+	}
+	return nil
+}
+
+// fakeCache satisfies poller.Cache for FileOne tests.
+type fakeCache struct {
+	writes []struct {
+		title string
+		ct    model.ContentType
+	}
+	err error
+}
+
+func (f *fakeCache) CacheClassification(title string, ct model.ContentType) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.writes = append(f.writes, struct {
+		title string
+		ct    model.ContentType
+	}{title, ct})
+	return nil
+}
+
+// newFileOnePoller builds a minimal Poller ready for FileOne tests.
+func newFileOnePoller(st *fakeSeriesStore, cache *fakeCache, rec *recorder, libRoots map[model.ContentType]string, libIDs map[model.ContentType]int64) *Poller {
+	return &Poller{
+		Scanner:      fakeScanner{},
+		Classifier:   fakeClassifier{t: model.TypeUnknown},
+		Filer:        rec,
+		Kavita:       rec,
+		Unmatched:    rec,
+		Activity:     rec,
+		Store:        st,
+		Cache:        cache,
+		LibraryRoots: libRoots,
+		LibraryIDs:   libIDs,
+	}
+}
+
+func TestFileOneFilesAndScans(t *testing.T) {
+	st := &fakeSeriesStore{
+		series: map[int64]model.Series{
+			1: {ID: 1, Title: "Dragon Ball Super (Color)", SourcePath: "/dl/dbs", Source: "suwayomi", Status: model.StatusUnmatched},
+		},
+	}
+	cache := &fakeCache{}
+	rec := &recorder{}
+	p := newFileOnePoller(st, cache, rec,
+		map[model.ContentType]string{model.TypeManga: filepath.FromSlash("/lib/Manga")},
+		map[model.ContentType]int64{model.TypeManga: 3},
+	)
+
+	if err := p.FileOne(context.Background(), 1, model.TypeManga); err != nil {
+		t.Fatalf("FileOne: %v", err)
+	}
+
+	// Cache must have been written.
+	if len(cache.writes) != 1 || cache.writes[0].title != "Dragon Ball Super (Color)" || cache.writes[0].ct != model.TypeManga {
+		t.Fatalf("expected cache write for Dragon Ball Super (Color)/Manga, got %+v", cache.writes)
+	}
+	// SetSeriesType must have been called.
+	if len(st.setTypeCalls) != 1 || st.setTypeCalls[0].id != 1 || st.setTypeCalls[0].ct != model.TypeManga {
+		t.Fatalf("expected SetSeriesType(1, Manga), got %+v", st.setTypeCalls)
+	}
+	// Filer must have been called.
+	if len(rec.filed) != 1 {
+		t.Fatalf("expected 1 filed, got %d", len(rec.filed))
+	}
+	// Kavita scan must have been triggered.
+	if len(rec.scanned) != 1 || rec.scanned[0] != 3 {
+		t.Fatalf("expected scan of lib 3, got %v", rec.scanned)
+	}
+	// ActionFiled and ActionScanTriggered must be recorded.
+	if got := rec.countActions(model.ActionFiled); got != 1 {
+		t.Fatalf("expected 1 ActionFiled, got %d", got)
+	}
+	if got := rec.countActions(model.ActionScanTriggered); got != 1 {
+		t.Fatalf("expected 1 ActionScanTriggered, got %d", got)
+	}
+}
+
+func TestFileOneRecordsErrorWhenNoLibraryRoot(t *testing.T) {
+	st := &fakeSeriesStore{
+		series: map[int64]model.Series{
+			1: {ID: 1, Title: "Berserk", SourcePath: "/dl/Berserk", Status: model.StatusUnmatched},
+		},
+	}
+	cache := &fakeCache{}
+	rec := &recorder{}
+	// No LibraryRoots entry for Manga.
+	p := newFileOnePoller(st, cache, rec,
+		map[model.ContentType]string{},
+		map[model.ContentType]int64{},
+	)
+
+	err := p.FileOne(context.Background(), 1, model.TypeManga)
+	if err == nil {
+		t.Fatal("expected error for missing library root, got nil")
+	}
+	// Must record ActionError, must NOT call filer or Kavita.
+	if got := rec.countActions(model.ActionError); got != 1 {
+		t.Fatalf("expected 1 ActionError, got %d (activity=%+v)", got, rec.activity)
+	}
+	if len(rec.filed) != 0 {
+		t.Fatalf("filer must not be called when library root missing, got %v", rec.filed)
+	}
+	if len(rec.scanned) != 0 {
+		t.Fatalf("kavita must not be called when library root missing, got %v", rec.scanned)
+	}
+}
+
+func TestFileOneRecordsErrorOnFilerFailure(t *testing.T) {
+	st := &fakeSeriesStore{
+		series: map[int64]model.Series{
+			1: {ID: 1, Title: "Solo Leveling", SourcePath: "/dl/SL", Status: model.StatusUnmatched},
+		},
+	}
+	cache := &fakeCache{}
+	rec := &recorder{errFile: errors.New("disk full")}
+	p := newFileOnePoller(st, cache, rec,
+		map[model.ContentType]string{model.TypeManhwa: filepath.FromSlash("/lib/Manhwa")},
+		map[model.ContentType]int64{model.TypeManhwa: 2},
+	)
+
+	err := p.FileOne(context.Background(), 1, model.TypeManhwa)
+	if err == nil {
+		t.Fatal("expected error from filer failure, got nil")
+	}
+	// ActionError must be recorded.
+	if got := rec.countActions(model.ActionError); got != 1 {
+		t.Fatalf("expected 1 ActionError, got %d (activity=%+v)", got, rec.activity)
+	}
+	// Kavita must NOT have been triggered.
+	if len(rec.scanned) != 0 {
+		t.Fatalf("Kavita must not be called on filer failure, got %v", rec.scanned)
+	}
+	if got := rec.countActions(model.ActionScanTriggered); got != 0 {
+		t.Fatalf("expected 0 ActionScanTriggered, got %d", got)
+	}
+}
+
+func TestFileOneStillWritesCacheOnSuccess(t *testing.T) {
+	st := &fakeSeriesStore{
+		series: map[int64]model.Series{
+			42: {ID: 42, Title: "Tower of God", SourcePath: "/dl/tog", Status: model.StatusUnmatched},
+		},
+	}
+	cache := &fakeCache{}
+	rec := &recorder{}
+	p := newFileOnePoller(st, cache, rec,
+		map[model.ContentType]string{model.TypeManhwa: filepath.FromSlash("/lib/Manhwa")},
+		map[model.ContentType]int64{},
+	)
+
+	if err := p.FileOne(context.Background(), 42, model.TypeManhwa); err != nil {
+		t.Fatalf("FileOne: %v", err)
+	}
+
+	// Cache write must have happened.
+	if len(cache.writes) != 1 {
+		t.Fatalf("expected 1 cache write, got %d: %+v", len(cache.writes), cache.writes)
+	}
+	if cache.writes[0].title != "Tower of God" || cache.writes[0].ct != model.TypeManhwa {
+		t.Fatalf("unexpected cache write: %+v", cache.writes[0])
 	}
 }

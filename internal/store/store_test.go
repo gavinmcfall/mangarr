@@ -1,6 +1,8 @@
 package store
 
 import (
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -113,6 +115,39 @@ func TestCacheClassification(t *testing.T) {
 	}
 	if ok2 {
 		t.Fatal("expected cache miss")
+	}
+}
+
+func TestGetSeriesByIDReturnsSeries(t *testing.T) {
+	s := newTestStore(t)
+	in := model.Series{Title: "Dragon Ball Super (Color)", SourcePath: "/dl/dbs", Source: "tranga", Status: model.StatusUnmatched}
+	id, err := s.UpsertSeries(in)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err := s.GetSeriesByID(id)
+	if err != nil {
+		t.Fatalf("GetSeriesByID: %v", err)
+	}
+	if got.ID != id {
+		t.Fatalf("want id=%d, got %d", id, got.ID)
+	}
+	if got.Title != in.Title {
+		t.Fatalf("want title=%q, got %q", in.Title, got.Title)
+	}
+	if got.Status != model.StatusUnmatched {
+		t.Fatalf("want status=unmatched, got %q", got.Status)
+	}
+}
+
+func TestGetSeriesByIDNotFoundReturnsErr(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.GetSeriesByID(9999)
+	if err == nil {
+		t.Fatal("expected error for missing series, got nil")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("want sql.ErrNoRows, got %v", err)
 	}
 }
 

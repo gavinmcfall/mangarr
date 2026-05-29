@@ -76,6 +76,19 @@ type MetricsSink interface {
 	SetPollerLastRun(t time.Time)
 }
 
+// Cache backs the per-title classification override used by FileOne.
+// store.Store satisfies this interface directly.
+type Cache interface {
+	CacheClassification(title string, ct model.ContentType) error
+}
+
+// SeriesStore is the subset of store.Store that FileOne needs for series lookup
+// and type update.
+type SeriesStore interface {
+	GetSeriesByID(id int64) (model.Series, error)
+	SetSeriesType(id int64, ct model.ContentType) error
+}
+
 // Planner returns a dry-run plan for a series without touching the filesystem.
 // filer.Filer satisfies this interface via its Plan method.
 type Planner interface {
@@ -105,6 +118,8 @@ type Poller struct {
 	Unmatched    UnmatchedSink
 	Activity     ActivityWriter
 	Metrics      MetricsSink                  // optional; nil disables all metric calls
+	Cache        Cache                        // optional; used by FileOne to persist manual type overrides
+	Store        SeriesStore                  // optional; used by FileOne to load and update series
 	LibraryRoots map[model.ContentType]string // content type → absolute library path
 	LibraryIDs   map[model.ContentType]int64  // content type → Kavita library ID
 	RecycleBin   *recyclebin.Bin              // optional; GC is called at end of each RunOnce tick
@@ -228,6 +243,83 @@ func (p *Poller) recordActivity(title string, action model.ActivityAction, detai
 		Action:      action,
 		Detail:      detail,
 	})
+}
+
+// FileOne applies the classify-and-file pipeline to a single series identified
+// by its primary key (seriesID) and an explicitly supplied ContentType (ct).
+//
+// Unlike RunOnce, FileOne does NOT call the classifier — the type is given
+// directly by the caller (user intent from the Unmatched page). It DOES write
+// the classification cache via p.Cache so that future chapters of the same
+// title auto-classify without going to AniList.
+//
+// Steps:
+//  1. Load the series from p.Store by seriesID.
+//  2. Write the override to p.Cache (if configured).
+//  3. Update the series row's Type + reset Status to pending via p.Store.SetSeriesType.
+//  4. Look up the library root for ct in p.LibraryRoots.
+//  5. Call p.Filer.File; on error write ActionError activity and return.
+//  6. On success, write ActionFiled activity, trigger a Kavita scan for the
+//     matching library (if p.LibraryIDs[ct] is set), and write ActionScanTriggered.
+//
+// All activity writes are best-effort. p.Cache and p.Kavita are optional:
+// a nil Cache skips the cache write; a missing LibraryIDs entry skips the scan.
+func (p *Poller) FileOne(ctx context.Context, seriesID int64, ct model.ContentType) error {
+	if p.Store == nil {
+		return fmt.Errorf("FileOne: Store not configured")
+	}
+
+	series, err := p.Store.GetSeriesByID(seriesID)
+	if err != nil {
+		return fmt.Errorf("FileOne: load series %d: %w", seriesID, err)
+	}
+
+	// Write the manual override to the cache so future auto-classify picks it up.
+	if p.Cache != nil {
+		if err := p.Cache.CacheClassification(series.Title, ct); err != nil {
+			log.Printf("poller: FileOne: cache write for %q failed (continuing): %v", series.Title, err)
+		}
+	}
+
+	// Update the series type in the store.
+	if err := p.Store.SetSeriesType(seriesID, ct); err != nil {
+		p.recordActivity(series.Title, model.ActionError,
+			fmt.Sprintf("FileOne: set series type: %v", err))
+		return fmt.Errorf("FileOne: set series type: %w", err)
+	}
+	series.Type = ct
+
+	// Resolve library root — misconfiguration should surface as an error, not silently pass.
+	root, ok := p.LibraryRoots[ct]
+	if !ok || root == "" {
+		msg := fmt.Sprintf("type %s has no configured library root — check Settings", ct)
+		p.recordActivity(series.Title, model.ActionError, msg)
+		return fmt.Errorf("FileOne: %s", msg)
+	}
+
+	// File the series.
+	if err := p.Filer.File(series, root); err != nil {
+		p.recordActivity(series.Title, model.ActionError,
+			fmt.Sprintf("file: %v", err))
+		return fmt.Errorf("FileOne: filer: %w", err)
+	}
+	p.recordActivity(series.Title, model.ActionFiled,
+		fmt.Sprintf("filed into %s", root))
+
+	// Trigger Kavita scan if library ID is configured for this type.
+	if id, ok := p.LibraryIDs[ct]; ok && id != 0 {
+		if p.Kavita != nil {
+			if err := p.Kavita.ScanLibrary(id); err != nil {
+				p.recordActivity(series.Title, model.ActionError,
+					fmt.Sprintf("kavita scan library %d: %v", id, err))
+			} else {
+				p.recordActivity(series.Title, model.ActionScanTriggered,
+					fmt.Sprintf("library %d", id))
+			}
+		}
+	}
+
+	return nil
 }
 
 // Preview runs scanner → classifier → filer.Plan for every series, WITHOUT

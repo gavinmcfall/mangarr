@@ -74,6 +74,22 @@ type fakeRunner struct{ called int }
 
 func (r *fakeRunner) RunOnce() error { r.called++; return nil }
 
+// fakeSeriesFiler records FileOne calls and optionally returns an error.
+type fakeSeriesFiler struct {
+	calls []fileOneCall
+	err   error
+}
+
+type fileOneCall struct {
+	seriesID int64
+	ct       model.ContentType
+}
+
+func (f *fakeSeriesFiler) FileOne(ctx context.Context, seriesID int64, ct model.ContentType) error {
+	f.calls = append(f.calls, fileOneCall{seriesID, ct})
+	return f.err
+}
+
 // fakeTaskRegistry is a minimal in-process TaskRegistry for tests.
 type fakeTaskRegistry struct {
 	mu      sync.Mutex
@@ -1355,5 +1371,105 @@ func TestPreviewPageWithoutPreviewerShowsPlaceholder(t *testing.T) {
 	body := rr.Body.String()
 	if !strings.Contains(body, "not available") && !strings.Contains(body, "not wired") {
 		t.Fatalf("placeholder text not found in body;\nbody:\n%s", snippet(body, "Preview", 400))
+	}
+}
+
+// ---- /api/series/{id}/assign tests ----
+
+// newHandlerWithFilerForTest builds a Handler with a fakeSeriesFiler and a seeded store.
+func newHandlerWithFilerForTest(sf *fakeSeriesFiler) (*Handler, *fakeStore) {
+	st := &fakeStore{
+		series: []model.Series{
+			{ID: 1, Title: "Dragon Ball Super (Color)", Type: model.TypeUnknown, Status: model.StatusUnmatched, Source: "suwayomi"},
+		},
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{model.TypeManga: "/lib/Manga"},
+			KavitaLibIDsByType: map[model.ContentType]int64{model.TypeManga: 3},
+		},
+	}
+	h := NewHandlerWithFiler(st, &fakeRunner{}, sf, "", 0, BackupConfig{}, nil, nil, nil, nil, nil)
+	return h, st
+}
+
+func TestAPIAssignTriggersFileOne(t *testing.T) {
+	sf := &fakeSeriesFiler{}
+	h, _ := newHandlerWithFilerForTest(sf)
+
+	form := url.Values{"type": {"Manga"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/1/assign",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if len(sf.calls) != 1 {
+		t.Fatalf("expected 1 FileOne call, got %d", len(sf.calls))
+	}
+	if sf.calls[0].seriesID != 1 || sf.calls[0].ct != model.TypeManga {
+		t.Fatalf("expected FileOne(1, Manga), got %+v", sf.calls[0])
+	}
+}
+
+func TestAPIAssignReturnsEmptyFragment(t *testing.T) {
+	sf := &fakeSeriesFiler{}
+	h, _ := newHandlerWithFilerForTest(sf)
+
+	form := url.Values{"type": {"Manhwa"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/1/assign",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	// Body must be empty so the HTMX outerHTML swap removes the row.
+	if body := strings.TrimSpace(rr.Body.String()); body != "" {
+		t.Fatalf("expected empty body for successful assign, got %q", body)
+	}
+}
+
+func TestAPIAssignRejectsBadType(t *testing.T) {
+	sf := &fakeSeriesFiler{}
+	h, _ := newHandlerWithFilerForTest(sf)
+
+	form := url.Values{"type": {"Whatever"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/1/assign",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if len(sf.calls) != 0 {
+		t.Fatalf("FileOne must not be called on invalid type, got %d calls", len(sf.calls))
+	}
+}
+
+func TestAPIAssignWithoutFilerReturns503(t *testing.T) {
+	// Handler with no SeriesFiler → 503.
+	st := &fakeStore{
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(st, &fakeRunner{}, "", 0, nil, nil, nil, nil)
+
+	form := url.Values{"type": {"Manga"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/1/assign",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503, got %d; body: %s", rr.Code, rr.Body.String())
 	}
 }

@@ -85,6 +85,17 @@ func (s *Store) GetSeriesByPath(path string) (model.Series, error) {
 	return m, err
 }
 
+// GetSeriesByID returns the series with the given primary key. Returns
+// sql.ErrNoRows (wrapped) if no such series exists.
+func (s *Store) GetSeriesByID(id int64) (model.Series, error) {
+	var m model.Series
+	var typ, status string
+	err := s.db.QueryRow(`SELECT id,title,source_path,source,type,status,chapter_count FROM series WHERE id=?`, id).
+		Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount)
+	m.Type, m.Status = model.ContentType(typ), model.Status(status)
+	return m, err
+}
+
 func (s *Store) ListSeries() ([]model.Series, error) {
 	rows, err := s.db.Query(`SELECT id,title,source_path,source,type,status,chapter_count FROM series ORDER BY title`)
 	if err != nil {

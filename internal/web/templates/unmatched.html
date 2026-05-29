@@ -26,9 +26,9 @@
     <td class="td-dim">{{.ChapterCount}}</td>
     <td class="td-right">
       <form class="reclassify-form"
-        hx-post="/api/series/{{.ID}}/reclassify"
+        hx-post="/api/series/{{.ID}}/assign"
         hx-target="#unmatched-{{.ID}}"
-        hx-swap="delete">
+        hx-swap="outerHTML">
         <select name="type" class="reclassify-select">
           <option value="Manga">Manga</option>
           <option value="Manhwa">Manhwa</option>

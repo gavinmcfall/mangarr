@@ -11,7 +11,8 @@
 //	GET  /tasks                      → Tasks page (HTMX)
 //	GET  /settings                   → Settings page (HTMX)
 //	POST /settings                   → Save settings (form POST, redirect back)
-//	POST /api/series/{id}/reclassify → Override a series' type (HTMX form target)
+//	POST /api/series/{id}/reclassify → Override a series' type (HTMX form target, Series page)
+//	POST /api/series/{id}/assign    → Classify, cache, file, and Kavita-scan one series (Unmatched page)
 //	POST /api/rescan                 → Trigger poll-scan via task registry
 //	GET  /api/preview                → JSON []PreviewEntry (dry-run pipeline)
 //	GET  /api/series                 → JSON list of all series
@@ -32,8 +33,10 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -100,6 +103,12 @@ type Previewer interface {
 	Preview(ctx context.Context) ([]poller.PreviewEntry, error)
 }
 
+// SeriesFiler can file a single series on demand.
+// poller.Poller satisfies this interface via its FileOne method.
+type SeriesFiler interface {
+	FileOne(ctx context.Context, seriesID int64, ct model.ContentType) error
+}
+
 // Handler is the HTTP handler for the web UI and JSON API.
 type Handler struct {
 	mux                     *http.ServeMux
@@ -107,6 +116,7 @@ type Handler struct {
 	store                   Store
 	runner                  Runner
 	previewer               Previewer                     // optional; /preview returns placeholder when nil
+	seriesFiler             SeriesFiler                   // optional; /api/series/{id}/assign returns 503 when nil
 	downloadRoots           []string // from config.DownloadRoots; used by disk-space endpoints
 	recycleBinPath          string
 	recycleBinRetentionDays int
@@ -129,15 +139,22 @@ type Handler struct {
 // metrics may be nil (GET /metrics returns 503).
 // Backup API is wired separately via NewHandlerWithBackup (returns 503 here).
 func NewHandler(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, healthReg, metrics, previewer, downloadRoots)
+	return newHandlerFull(store, runner, nil, recycleBinPath, recycleBinRetentionDays, BackupConfig{}, nil, taskReg, healthReg, metrics, previewer, downloadRoots)
 }
 
 // NewHandlerWithBackup is like NewHandler but also wires the backup API.
 func NewHandlerWithBackup(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
-	return newHandlerFull(store, runner, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, downloadRoots)
+	return newHandlerFull(store, runner, nil, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, downloadRoots)
 }
 
-func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots []string) *Handler {
+// NewHandlerWithFiler is like NewHandlerWithBackup but also wires the per-series filer
+// used by POST /api/series/{id}/assign. In production main.go passes the *poller.Poller
+// directly as it implements both Runner and SeriesFiler.
+func NewHandlerWithFiler(store Store, runner Runner, seriesFiler SeriesFiler, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots ...string) *Handler {
+	return newHandlerFull(store, runner, seriesFiler, recycleBinPath, recycleBinRetentionDays, cfg, backupFn, taskReg, healthReg, metrics, previewer, downloadRoots)
+}
+
+func newHandlerFull(store Store, runner Runner, seriesFiler SeriesFiler, recycleBinPath string, recycleBinRetentionDays int, cfg BackupConfig, backupFn func() (dbbackup.Entry, error), taskReg TaskRegistry, healthReg HealthRegistry, metrics MetricsSink, previewer Previewer, downloadRoots []string) *Handler {
 	var mh http.Handler
 	if metrics != nil {
 		mh = metrics.Handler()
@@ -148,6 +165,7 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 		store:                   store,
 		runner:                  runner,
 		previewer:               previewer,
+		seriesFiler:             seriesFiler,
 		downloadRoots:           downloadRoots,
 		recycleBinPath:          recycleBinPath,
 		recycleBinRetentionDays: recycleBinRetentionDays,
@@ -190,6 +208,9 @@ func newHandlerFull(store Store, runner Runner, recycleBinPath string, recycleBi
 
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
+
+	// HTMX action: manual classify-and-file from Unmatched page (POST /api/series/{id}/assign)
+	h.mux.HandleFunc("POST /api/series/{id}/assign", h.apiAssign)
 
 	// Backup API
 	h.mux.HandleFunc("GET /api/backups", h.apiListBackups)
@@ -1020,6 +1041,57 @@ func (h *Handler) apiReclassify(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, row)
+}
+
+// apiAssign handles POST /api/series/{id}/assign.
+//
+// It classifies the series to the given type, writes the override to the
+// classification cache, files the series immediately, and triggers a Kavita
+// scan — all in one click from the Unmatched page.
+//
+// On success it returns an empty 200 body: the HTMX target row is swapped out
+// (deleted) by the caller's hx-swap="outerHTML" pointing at an empty response,
+// which removes the row from the Unmatched table without a full page reload.
+//
+// Returns 503 when the SeriesFiler is not configured (minimal test setups).
+// Returns 400 on invalid id or unknown type.
+func (h *Handler) apiAssign(w http.ResponseWriter, r *http.Request) {
+	if h.seriesFiler == nil {
+		http.Error(w, "series filer not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	typeStr := r.FormValue("type")
+	ct := model.ContentType(typeStr)
+	if ct != model.TypeManga && ct != model.TypeManhwa && ct != model.TypeManhua {
+		http.Error(w, "invalid type", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.seriesFiler.FileOne(r.Context(), id, ct); err != nil {
+		// Surface as 404 if the series doesn't exist, else 500.
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "series not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return empty body — the HTMX hx-swap="outerHTML" replaces the row with
+	// nothing, removing it from the Unmatched table.
+	w.WriteHeader(http.StatusOK)
 }
 
 // ---- backup API handlers ----
