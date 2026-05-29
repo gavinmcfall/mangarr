@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -48,6 +50,17 @@ func libraryJSON(mangas []gqlMangaNode) string {
 	}
 	b, _ := json.Marshal(resp)
 	return string(b)
+}
+
+// handlerErr is the safe replacement for `t.Fatalf` inside an httptest
+// handler goroutine. Fatal-from-handler only kills the handler goroutine
+// (Goexit), leaves the HTTP client hanging, and gives misleading errors.
+// Instead: log via t.Errorf (which records the failure) and return a
+// 500 so the test goroutine sees a clean non-2xx and fails cleanly.
+func handlerErr(t *testing.T, w http.ResponseWriter, format string, args ...any) {
+	t.Helper()
+	t.Errorf(format, args...)
+	http.Error(w, "test handler error", http.StatusInternalServerError)
 }
 
 // ----- none auth -----
@@ -101,7 +114,8 @@ func TestSimpleLoginLogsInOnceThenSendsCookie(t *testing.T) {
 		case "/login.html":
 			atomic.AddInt32(&loginHits, 1)
 			if err := r.ParseForm(); err != nil {
-				t.Fatalf("parse form: %v", err)
+				handlerErr(t, w, "parse form: %v", err)
+				return
 			}
 			if r.PostForm.Get("user") != "u" || r.PostForm.Get("pass") != "p" {
 				t.Errorf("login form mismatch: %v", r.PostForm)
@@ -115,7 +129,7 @@ func TestSimpleLoginLogsInOnceThenSendsCookie(t *testing.T) {
 			}
 			io.WriteString(w, catJSON(nil))
 		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			handlerErr(t, w, "unexpected path %s", r.URL.Path)
 		}
 	}))
 	defer srv.Close()
@@ -161,7 +175,7 @@ func TestUILoginLogsInOnceThenSendsBearer(t *testing.T) {
 			sawAuth = r.Header.Get("Authorization")
 			io.WriteString(w, catJSON(nil))
 		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			handlerErr(t, w, "unexpected path %s", r.URL.Path)
 		}
 	}))
 	defer srv.Close()
@@ -191,8 +205,8 @@ func Test401TriggersReloginAndRetryThenSucceeds(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/graphql":
-			atomic.AddInt32(&loginHits, 1)
-			io.WriteString(w, `{"data":{"login":{"accessToken":"jwt-`+itoa(int(loginHits))+`","refreshToken":"r"}}}`)
+			n := atomic.AddInt32(&loginHits, 1)
+			io.WriteString(w, `{"data":{"login":{"accessToken":"jwt-`+strconv.Itoa(int(n))+`","refreshToken":"r"}}}`)
 		case "/api/v1/category":
 			listAttempts++
 			if listAttempts == 1 {
@@ -201,7 +215,7 @@ func Test401TriggersReloginAndRetryThenSucceeds(t *testing.T) {
 			}
 			io.WriteString(w, catJSON([]Category{{ID: 1, Name: "Manga", Order: 0}}))
 		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			handlerErr(t, w, "unexpected path %s", r.URL.Path)
 		}
 	}))
 	defer srv.Close()
@@ -238,8 +252,48 @@ func TestPersistent401SurfacesAuthError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected auth error after two consecutive 401s")
 	}
-	if !errIs(err, ErrAuth) {
+	if !errors.Is(err, ErrAuth) {
 		t.Fatalf("want ErrAuth, got %v", err)
+	}
+}
+
+// TestLoginUpstreamOutageDoesNotWrapErrAuth — a 5xx from the login
+// endpoint is an availability problem, not an auth failure. Callers
+// using errors.Is(err, ErrAuth) to distinguish "wrong password" from
+// "Suwayomi is down" must see false for outages.
+func TestUILoginUpstreamOutageDoesNotWrapErrAuth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, &UILoginAuth{Username: "u", Password: "p"})
+	_, err := c.ListCategories(context.Background())
+	if err == nil {
+		t.Fatal("expected error on 502 from login endpoint")
+	}
+	if errors.Is(err, ErrAuth) {
+		t.Fatalf("5xx from login must NOT wrap as ErrAuth, got %v", err)
+	}
+}
+
+func TestSimpleLoginUpstreamOutageDoesNotWrapErrAuth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login.html" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, &SimpleLoginAuth{Username: "u", Password: "p"})
+	_, err := c.ListCategories(context.Background())
+	if err == nil {
+		t.Fatal("expected error on 503 from login endpoint")
+	}
+	if errors.Is(err, ErrAuth) {
+		t.Fatalf("5xx from simple_login must NOT wrap as ErrAuth, got %v", err)
 	}
 }
 
@@ -270,7 +324,8 @@ func TestListCategoriesSortsByOrder(t *testing.T) {
 func TestListLibraryWithCategoriesPopulatesCategoryIDsOrdered(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/graphql" {
-			t.Fatalf("want /api/graphql, got %s", r.URL.Path)
+			handlerErr(t, w, "want /api/graphql, got %s", r.URL.Path)
+			return
 		}
 		io.WriteString(w, libraryJSON([]gqlMangaNode{
 			{
@@ -330,42 +385,32 @@ func TestListLibraryWithCategoriesSurfacesGraphQLErrors(t *testing.T) {
 	}
 }
 
-// ----- tiny stdlib-free helpers -----
+// ----- sanitiseSegment edge cases -----
 
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
+func TestSanitiseSegmentEmptyInputReturnsFallback(t *testing.T) {
+	got := sanitiseSegment("", "fallback")
+	if got != "fallback" {
+		t.Fatalf("empty input: want fallback, got %q", got)
 	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }
 
-// errIs avoids the import overhead in tiny helpers — but we use errors.Is.
-func errIs(err, target error) bool {
-	for err != nil {
-		if err == target {
-			return true
-		}
-		u, ok := err.(interface{ Unwrap() error })
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
+func TestSanitiseSegmentAllSpecialCharsReturnsFallback(t *testing.T) {
+	got := sanitiseSegment("...", "fallback")
+	if got != "fallback" {
+		t.Fatalf("dots-only input: want fallback, got %q", got)
 	}
-	return false
+}
+
+func TestSanitiseSegmentWhitespaceReturnsFallback(t *testing.T) {
+	got := sanitiseSegment("   ", "fallback")
+	if got != "fallback" {
+		t.Fatalf("whitespace input: want fallback, got %q", got)
+	}
+}
+
+func TestSanitiseSegmentPreservesValidNames(t *testing.T) {
+	got := sanitiseSegment("Solo Leveling", "fallback")
+	if got != "Solo Leveling" {
+		t.Fatalf("valid input: want %q, got %q", "Solo Leveling", got)
+	}
 }

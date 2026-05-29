@@ -50,6 +50,11 @@ import (
 // credentials after a re-authenticate + retry cycle.
 var ErrAuth = errors.New("suwayomi: authentication failed")
 
+// maxAuthAttempts caps the doJSON retry loop: one initial attempt plus
+// one re-auth-and-retry on a 401. Two consecutive 401s surface as
+// ErrAuth.
+const maxAuthAttempts = 2
+
 // Auth abstracts the four upstream auth modes. Apply mutates the outgoing
 // request to carry the right header/cookie. EnsureSession is a no-op for
 // stateless modes and performs the login round-trip for session-bearing
@@ -112,12 +117,15 @@ func (s *SimpleLoginAuth) Apply(_ context.Context, req *http.Request) error {
 }
 
 func (s *SimpleLoginAuth) EnsureSession(ctx context.Context, base string, httpClient *http.Client) error {
+	// Hold the mutex across the network call so two concurrent callers
+	// can't both fire a login round-trip. Login is rare (once per cold
+	// cache / once per poll tick) so contention is a non-issue and the
+	// simple correctness wins. See review thread on Plan A.
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if len(s.cookies) > 0 {
-		s.mu.Unlock()
 		return nil
 	}
-	s.mu.Unlock()
 
 	form := url.Values{}
 	form.Set("user", s.Username)
@@ -139,14 +147,27 @@ func (s *SimpleLoginAuth) EnsureSession(ctx context.Context, base string, httpCl
 	// Upstream returns 303 SEE_OTHER on success (redirect to /). On bad
 	// creds it re-renders the login page with 200 + error body, so we
 	// must distinguish "got a session cookie" from "200 with login form".
+	// Only 401/403 — or a 2xx without a session cookie — are auth
+	// failures; everything else (5xx, network glitches surfaced as 5xx)
+	// is an upstream availability problem and must not get wrapped as
+	// ErrAuth, or callers using errors.Is(err, ErrAuth) get false
+	// positives on outages.
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return fmt.Errorf("%w: simple_login status %d", ErrAuth, resp.StatusCode)
+	case resp.StatusCode >= 500:
+		return fmt.Errorf("suwayomi simple_login status %d", resp.StatusCode)
+	}
+
 	cookies := resp.Cookies()
 	if len(cookies) == 0 {
+		// 2xx with no cookie = login form re-rendered = bad creds.
+		// Non-2xx with no cookie also lands here on, e.g., 400 — still
+		// most plausibly an auth-shape problem, not an outage.
 		return fmt.Errorf("%w: simple_login returned no session cookie (status %d)", ErrAuth, resp.StatusCode)
 	}
 
-	s.mu.Lock()
 	s.cookies = cookies
-	s.mu.Unlock()
 	return nil
 }
 
@@ -187,12 +208,13 @@ func (u *UILoginAuth) Apply(_ context.Context, req *http.Request) error {
 }
 
 func (u *UILoginAuth) EnsureSession(ctx context.Context, base string, httpClient *http.Client) error {
+	// Hold the mutex across the network call — see SimpleLoginAuth for
+	// rationale. Concurrent callers must not both fire a login.
 	u.mu.Lock()
+	defer u.mu.Unlock()
 	if u.accessToken != "" {
-		u.mu.Unlock()
 		return nil
 	}
-	u.mu.Unlock()
 
 	payload := map[string]any{
 		"query": `mutation Login($u: String!, $p: String!) {
@@ -218,9 +240,15 @@ func (u *UILoginAuth) EnsureSession(ctx context.Context, base string, httpClient
 		return fmt.Errorf("suwayomi ui_login: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	// Only 401/403 are auth failures; 5xx and other non-2xx codes are
+	// upstream availability problems and must not wrap as ErrAuth.
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		io.Copy(io.Discard, resp.Body)
 		return fmt.Errorf("%w: ui_login status %d", ErrAuth, resp.StatusCode)
+	case resp.StatusCode < 200 || resp.StatusCode >= 300:
+		io.Copy(io.Discard, resp.Body)
+		return fmt.Errorf("suwayomi ui_login status %d", resp.StatusCode)
 	}
 
 	var out struct {
@@ -237,6 +265,8 @@ func (u *UILoginAuth) EnsureSession(ctx context.Context, base string, httpClient
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return fmt.Errorf("suwayomi ui_login decode: %w", err)
 	}
+	// GraphQL surfaces auth failures as a 2xx + errors[] payload, so
+	// these stay wrapped as ErrAuth.
 	if len(out.Errors) > 0 {
 		return fmt.Errorf("%w: %s", ErrAuth, out.Errors[0].Message)
 	}
@@ -244,10 +274,8 @@ func (u *UILoginAuth) EnsureSession(ctx context.Context, base string, httpClient
 		return fmt.Errorf("%w: empty accessToken in login response", ErrAuth)
 	}
 
-	u.mu.Lock()
 	u.accessToken = out.Data.Login.AccessToken
 	u.refreshToken = out.Data.Login.RefreshToken
-	u.mu.Unlock()
 	return nil
 }
 
@@ -426,23 +454,30 @@ func (c *Client) ListLibraryWithCategories(ctx context.Context) ([]Manga, error)
 
 // deriveDownloadDir matches Suwayomi's default downloads layout:
 // `<source>/<sanitisedTitle>`. Source falls back to the numeric source ID
-// when the GraphQL surface did not include a displayName. The same
-// sanitisation rules Suwayomi applies on disk (strip filesystem-hostile
-// chars) are reproduced here so the path keys line up with what landed
-// in /media/Downloads/...
+// when the GraphQL surface did not include a displayName.
+//
+// Best-effort: mangarr's sanitiser is NOT a byte-for-byte port of the
+// upstream Kotlin sanitiser (it lives in Suwayomi-Server's downloader
+// code path and may evolve). Any manga whose on-disk folder name diverges
+// from what we derive here will cache-miss and fall through to the
+// AniList classifier — which is the documented failure-mode in the spec
+// ("cache miss → fall through to AniList"). A future Plan B/C
+// improvement is to verify against the live Suwayomi tree at refresh
+// time and surface mismatches in the activity log.
 func deriveDownloadDir(source, sourceID, title string) string {
 	s := source
 	if s == "" {
 		s = sourceID
 	}
-	return sanitiseSegment(s) + "/" + sanitiseSegment(title)
+	return sanitiseSegment(s, sourceID) + "/" + sanitiseSegment(title, fmt.Sprintf("manga-%s", sourceID))
 }
 
-// sanitiseSegment strips path separators and the small set of characters
-// Suwayomi rejects in download folder names. Conservative — we'd rather
-// miss a match (cache miss → AniList fallback) than route by a wrong
-// path.
-func sanitiseSegment(in string) string {
+// sanitiseSegment strips path separators and a conservative set of
+// filesystem-hostile characters. fallback is returned when sanitisation
+// collapses the input to an empty string (e.g. title was only `?*<>` or
+// whitespace) so the cache key remains unique rather than degenerating
+// to "MangaDex/" for every such manga.
+func sanitiseSegment(in, fallback string) string {
 	in = strings.TrimSpace(in)
 	r := strings.NewReplacer(
 		"/", "_",
@@ -455,7 +490,15 @@ func sanitiseSegment(in string) string {
 		">", "_",
 		"|", "_",
 	)
-	return r.Replace(in)
+	out := strings.TrimSpace(r.Replace(in))
+	// Strip leading/trailing dots — Windows hates them and Suwayomi
+	// avoids them on disk; cross-platform parity keeps the cache key
+	// derivable from either side.
+	out = strings.Trim(out, ".")
+	if out == "" {
+		return fallback
+	}
+	return out
 }
 
 // doJSON is the single request entry point used by every public method.
@@ -483,7 +526,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, reqBody []byte
 		return req, nil
 	}
 
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < maxAuthAttempts; attempt++ {
 		if err := c.auth.EnsureSession(ctx, c.base, c.http); err != nil {
 			return err
 		}
@@ -496,33 +539,42 @@ func (c *Client) doJSON(ctx context.Context, method, path string, reqBody []byte
 			c.auth.Invalidate()
 			continue
 		}
-		resp, err := c.http.Do(req)
-		if err != nil {
-			return fmt.Errorf("suwayomi %s %s: %w", method, path, err)
+		done, err := c.tryOnce(req, method, path, out)
+		if err != nil || done {
+			return err
 		}
-		if resp.StatusCode == http.StatusUnauthorized {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			c.auth.Invalidate()
-			if attempt == 1 {
-				return fmt.Errorf("%w: %s %s", ErrAuth, method, path)
-			}
-			continue
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			return fmt.Errorf("suwayomi %s %s status %d", method, path, resp.StatusCode)
-		}
-		defer resp.Body.Close()
-		if out != nil {
-			if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-				return fmt.Errorf("suwayomi %s %s decode: %w", method, path, err)
-			}
-		} else {
-			io.Copy(io.Discard, resp.Body)
-		}
-		return nil
+		// !done → got a 401, session invalidated, loop will re-auth + retry.
 	}
 	return fmt.Errorf("%w: %s %s", ErrAuth, method, path)
+}
+
+// tryOnce runs a single attempt. It returns (done=true, err=nil) on
+// success, (done=true, err=<wrapped>) on a terminal non-401 error, or
+// (done=false, err=nil) when the caller should re-auth + retry. The
+// response body is always closed before return — no defer-in-loop
+// footgun.
+func (c *Client) tryOnce(req *http.Request, method, path string, out any) (bool, error) {
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return true, fmt.Errorf("suwayomi %s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		io.Copy(io.Discard, resp.Body)
+		c.auth.Invalidate()
+		return false, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		io.Copy(io.Discard, resp.Body)
+		return true, fmt.Errorf("suwayomi %s %s status %d", method, path, resp.StatusCode)
+	}
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			return true, fmt.Errorf("suwayomi %s %s decode: %w", method, path, err)
+		}
+	} else {
+		io.Copy(io.Discard, resp.Body)
+	}
+	return true, nil
 }

@@ -45,6 +45,12 @@ func NewPathCache() *PathCache {
 // On error the previous map is left in place — callers can keep serving
 // the last good snapshot until Suwayomi recovers. Returns the error from
 // the underlying client call.
+//
+// Concurrent Refresh calls are safe: each builds its own snapshot off
+// the network response and the final atomic swap is mutex-protected.
+// Last writer wins on the snapshot, which is fine — every snapshot
+// represents the library at a moment in time and the classifier hot
+// path always reads the current one.
 func (c *PathCache) Refresh(ctx context.Context, client *Client, downloadRoots []string) error {
 	mangas, err := client.ListLibraryWithCategories(ctx)
 	if err != nil {
@@ -56,6 +62,9 @@ func (c *PathCache) Refresh(ctx context.Context, client *Client, downloadRoots [
 	if roots < 1 {
 		roots = 1
 	}
+	// *2 because every (root, manga) cross-product stores both the
+	// joined and filepath.Clean'd form (Refresh only walks each pair
+	// once but writes two keys per pair).
 	next := make(map[string]CacheEntry, len(mangas)*roots*2)
 
 	for _, m := range mangas {
