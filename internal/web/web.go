@@ -967,6 +967,82 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// renderSettingsWithError re-renders the Settings page with an error banner
+// and the user's in-progress edits preserved. Used by validation paths
+// (rename-scheme validator, no-delete-while-referenced guard, etc.) so a
+// rejected POST surfaces the failure inline without losing form values.
+//
+// The "preserved edits" argument list mirrors what saveSettings has already
+// parsed at the point of failure: the to-be-saved Settings (incl Suwayomi
+// overrides + DefaultBindingID), the submitted bindings, and the submitted
+// rules. Stored chrome (disk rows, backup list, recycle bin config) is
+// re-loaded fresh because it's not user-edited in the form. Kavita
+// libraries are NOT re-fetched on the error path — placeholder selects are
+// acceptable here and we don't want a slow remote call gating the error
+// render.
+func (h *Handler) renderSettingsWithError(
+	w http.ResponseWriter,
+	r *http.Request,
+	settings model.Settings,
+	bindings []model.Binding,
+	rules []model.ClassificationRule,
+	msg string,
+) {
+	if settings.LibraryRoots == nil {
+		settings.LibraryRoots = map[model.ContentType]string{}
+	}
+	if settings.KavitaLibIDsByType == nil {
+		settings.KavitaLibIDsByType = map[model.ContentType]int64{}
+	}
+	diskRows := h.buildDiskRows(settings)
+	now := time.Now()
+	entries, _ := dbbackup.List(h.backupDir)
+	views := make([]backupEntryView, 0, len(entries))
+	for _, e := range entries {
+		views = append(views, backupEntryView{
+			Entry:     e,
+			SizeHuman: formatBytes(e.SizeBytes),
+			AgeHuman:  formatAge(now, e.ModTime),
+		})
+	}
+	// Library map: best-effort, same as pageSettings. Pass the submitted
+	// bindings so the override-row dropdown reflects user edits.
+	lmCtx, lmCancel := context.WithTimeout(r.Context(), 3*time.Second)
+	libraryMap := buildLibraryMapData(lmCtx, settings, bindings)
+	lmCancel()
+
+	w.WriteHeader(http.StatusBadRequest)
+	h.render(w, "settings.html", settingsPageData{
+		Page:                    "settings",
+		Settings:                settings,
+		KavitaAPIKey:            settings.KavitaAPIKey,
+		Error:                   msg,
+		DownloadRoots:           settings.DownloadRoots,
+		RootManga:               settings.LibraryRoots[model.TypeManga],
+		RootManhwa:              settings.LibraryRoots[model.TypeManhwa],
+		RootManhua:              settings.LibraryRoots[model.TypeManhua],
+		KavitaLibManga:          settings.KavitaLibIDsByType[model.TypeManga],
+		KavitaLibManhwa:         settings.KavitaLibIDsByType[model.TypeManhwa],
+		KavitaLibManhua:         settings.KavitaLibIDsByType[model.TypeManhua],
+		Bindings:                bindings,
+		Rules:                   rules,
+		SuwayomiBaseURL:         settings.SuwayomiBaseURL,
+		SuwayomiAuthType:        settings.SuwayomiAuthType,
+		SuwayomiUsername:        settings.SuwayomiUsername,
+		SuwayomiPassword:        settings.SuwayomiPassword,
+		LibraryMap:              libraryMap,
+		RenameExample:           renameExample(settings.RenameScheme),
+		DiskRows:                diskRows,
+		RecycleBinPath:          h.recycleBinPath,
+		RecycleBinRetentionDays: h.recycleBinRetentionDays,
+		BackupDir:               h.backupCfg.Dir,
+		BackupRetentionDays:     h.backupCfg.RetentionDays,
+		BackupIntervalHours:     h.backupCfg.IntervalHours,
+		Backups:                 views,
+		BackupNow:               now,
+	})
+}
+
 // buildDiskRows gathers disk-space rows for the Settings page.
 // Download roots come from settings.DownloadRoots (UI-managed).
 // Library roots come from settings.LibraryRoots.
@@ -1211,23 +1287,21 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 	// Settings page with the error shown inline and all form values preserved
 	// so the user does not lose in-progress edits.
 	if err := filer.ValidateScheme(settings.RenameScheme); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		h.render(w, "settings.html", settingsPageData{
-			Page:            "settings",
-			Settings:        settings,
-			KavitaAPIKey:    settings.KavitaAPIKey,
-			Error:           "Invalid rename scheme: " + err.Error(),
-			DownloadRoots:   settings.DownloadRoots,
-			RootManga:       settings.LibraryRoots[model.TypeManga],
-			RootManhwa:      settings.LibraryRoots[model.TypeManhwa],
-			RootManhua:      settings.LibraryRoots[model.TypeManhua],
-			KavitaLibManga:  settings.KavitaLibIDsByType[model.TypeManga],
-			KavitaLibManhwa: settings.KavitaLibIDsByType[model.TypeManhwa],
-			KavitaLibManhua: settings.KavitaLibIDsByType[model.TypeManhua],
-			RenameExample:   renameExample(settings.RenameScheme),
-			// Kavita libraries not re-fetched on validation error — user will see
-			// placeholder selects, which is acceptable since this is an error path.
-		})
+		h.renderSettingsWithError(w, r, settings, bindings, rules, "Invalid rename scheme: "+err.Error())
+		return
+	}
+
+	// Validate that no submitted binding deletion would orphan a rule,
+	// Suwayomi override, or the Default Binding picker. Runs BEFORE
+	// SaveBindings so partial state never lands — if any reference would
+	// dangle, the whole POST is rejected and the form re-renders with an
+	// error banner naming each conflict. The user's in-progress edits are
+	// preserved (we pass the submitted bindings/rules/settings back to the
+	// renderer, not the stored values) so they can fix the conflict
+	// without losing work.
+	existing, _ := h.store.ListBindings()
+	if err := validateBindingsNotReferenced(bindings, rules, settings.SuwayomiCategoryBindings, settings.DefaultBindingID, existing); err != nil {
+		h.renderSettingsWithError(w, r, settings, bindings, rules, err.Error())
 		return
 	}
 

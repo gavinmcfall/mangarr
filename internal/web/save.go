@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
 	"sort"
@@ -120,6 +121,80 @@ func parseDefaultBindingIDFromForm(r *http.Request) *int64 {
 		return nil
 	}
 	return &id
+}
+
+// validateBindingsNotReferenced returns an error if the submitted bindings
+// drop any rows that the submitted rules / overrides / default-binding
+// still reference. Called before SaveBindings so partial state never lands —
+// if any referenced binding is missing from the submitted set, the whole
+// POST is rejected and the user re-renders the form with an error banner.
+//
+// keepSet is built from submitted binding IDs (ID > 0 only — new rows with
+// ID==0 are inherently safe since nothing can reference them yet). The
+// existing list is used purely for friendlier error wording: looking up the
+// binding's display name so the banner reads "\"Doomed\" (ID: 2)" instead
+// of "Unknown binding (ID: 2)" — although the fallback is still emitted if
+// the existing list happens not to contain that ID (e.g. concurrent edit).
+func validateBindingsNotReferenced(
+	submitted []model.Binding,
+	rules []model.ClassificationRule,
+	overrides map[int64]int64,
+	defaultBindingID *int64,
+	existing []model.Binding,
+) error {
+	keepSet := make(map[int64]bool, len(submitted))
+	for _, b := range submitted {
+		if b.ID > 0 {
+			keepSet[b.ID] = true
+		}
+	}
+
+	existingByID := make(map[int64]model.Binding, len(existing))
+	for _, b := range existing {
+		existingByID[b.ID] = b
+	}
+
+	type ref struct {
+		bindingID int64
+		reason    string
+	}
+	var refs []ref
+	for _, r := range rules {
+		if r.BindingID > 0 && !keepSet[r.BindingID] {
+			refs = append(refs, ref{r.BindingID, fmt.Sprintf("rule %q", r.Name)})
+		}
+	}
+	// Iterate override map deterministically (ascending catID) so the error
+	// message is stable across runs — Go map iteration order is randomised.
+	if len(overrides) > 0 {
+		catIDs := make([]int64, 0, len(overrides))
+		for catID := range overrides {
+			catIDs = append(catIDs, catID)
+		}
+		sort.Slice(catIDs, func(i, j int) bool { return catIDs[i] < catIDs[j] })
+		for _, catID := range catIDs {
+			bid := overrides[catID]
+			if bid > 0 && !keepSet[bid] {
+				refs = append(refs, ref{bid, fmt.Sprintf("Suwayomi override (category %d)", catID)})
+			}
+		}
+	}
+	if defaultBindingID != nil && *defaultBindingID > 0 && !keepSet[*defaultBindingID] {
+		refs = append(refs, ref{*defaultBindingID, "the Default Binding picker"})
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+
+	parts := make([]string, 0, len(refs))
+	for _, r := range refs {
+		name := fmt.Sprintf("Unknown binding (ID: %d)", r.bindingID)
+		if b, ok := existingByID[r.bindingID]; ok {
+			name = fmt.Sprintf("%q (ID: %d)", b.Name, r.bindingID)
+		}
+		parts = append(parts, fmt.Sprintf("%s — referenced by %s", name, r.reason))
+	}
+	return fmt.Errorf("cannot delete bindings still in use:\n  %s", strings.Join(parts, "\n  "))
 }
 
 // collectSuffixes finds every form-key suffix matched by re. Result is

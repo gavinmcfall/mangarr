@@ -105,13 +105,10 @@ func sanitiseSuwayomiError(err error, s model.Settings) string {
 // zero/empty category OR binding ID is dropped (the "Add" → "Delete"
 // lifecycle saves clean state without JS having to scrub hidden inputs).
 //
-// Plan B v2 field-name rename: the right-hand select moved from
-// override_library_<idx> (v1, Kavita library IDs) to override_binding_<idx>
-// (v2, Library Binding IDs). The semantic stays "category → routing target";
-// Task 5 owns the migration of the persisted map from
-// SuwayomiCategoryOverrides (v1) to SuwayomiCategoryBindings (v2). Until
-// then this parser keeps writing to the v1 map, just keyed off the new
-// field name.
+// Plan B Task 5 changed the write target in saveSettings to
+// SuwayomiCategoryBindings (v2 — values are Library Binding IDs); this
+// parser is field-name-keyed (override_binding_<idx>) and routing-target-
+// agnostic. Caller chooses which Settings map to assign the result into.
 //
 // Returns nil when no valid overrides are found, so the round-trip JSON
 // stays compact when the feature is unused.
@@ -126,7 +123,7 @@ func parseSuwayomiOverrides(form map[string][]string) map[int64]int64 {
 	// Index field names by suffix so we can pair them up regardless of
 	// which JS-counter idx was used.
 	cats := map[string]string{}
-	libs := map[string]string{}
+	bindings := map[string]string{}
 	for k, vs := range form {
 		if len(vs) == 0 {
 			continue
@@ -135,7 +132,7 @@ func parseSuwayomiOverrides(form map[string][]string) map[int64]int64 {
 		case strings.HasPrefix(k, "override_category_"):
 			cats[strings.TrimPrefix(k, "override_category_")] = vs[0]
 		case strings.HasPrefix(k, "override_binding_"):
-			libs[strings.TrimPrefix(k, "override_binding_")] = vs[0]
+			bindings[strings.TrimPrefix(k, "override_binding_")] = vs[0]
 		}
 	}
 	// Collect the suffix keys and sort them with a numeric-aware comparator
@@ -163,7 +160,7 @@ func parseSuwayomiOverrides(form map[string][]string) map[int64]int64 {
 
 	out := map[int64]int64{}
 	for _, idx := range keys {
-		libRaw, ok := libs[idx]
+		bindingRaw, ok := bindings[idx]
 		if !ok {
 			continue
 		}
@@ -171,14 +168,14 @@ func parseSuwayomiOverrides(form map[string][]string) map[int64]int64 {
 		if err != nil || catID <= 0 {
 			continue
 		}
-		libID, err := strconv.ParseInt(strings.TrimSpace(libRaw), 10, 64)
-		if err != nil || libID <= 0 {
+		bindingID, err := strconv.ParseInt(strings.TrimSpace(bindingRaw), 10, 64)
+		if err != nil || bindingID <= 0 {
 			continue
 		}
 		// LAST-INDEX-WINS: later-index rows overwrite earlier rows that
 		// reference the same Suwayomi category. Plain map assignment
 		// achieves this because we walk indices in ascending order.
-		out[catID] = libID
+		out[catID] = bindingID
 	}
 	if len(out) == 0 {
 		return nil

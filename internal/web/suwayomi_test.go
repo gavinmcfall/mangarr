@@ -256,6 +256,14 @@ func TestSaveSettingsPersistsOverrideRows(t *testing.T) {
 			LibraryRoots:       map[model.ContentType]string{},
 			KavitaLibIDsByType: map[model.ContentType]int64{model.TypeManga: 1, model.TypeManhwa: 2},
 		},
+		// Seed bindings that the override rows below reference. Task 6's
+		// validateBindingsNotReferenced rejects POSTs that drop bindings
+		// still referenced by overrides, so we must also submit these
+		// rows back in the form below.
+		bindings: []model.Binding{
+			{ID: 1, Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1},
+			{ID: 2, Name: "Manhwa", LibraryRoot: "/m/w", KavitaLibID: 2},
+		},
 	}
 	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
 
@@ -267,6 +275,16 @@ func TestSaveSettingsPersistsOverrideRows(t *testing.T) {
 		"suwayomi_auth_type":     {"basic"},
 		"suwayomi_username":      {"admin"},
 		"suwayomi_password":      {"test-placeholder-pw"},
+		// Submit the seeded bindings so Task 6's validateBindingsNotReferenced
+		// doesn't reject (overrides below reference IDs 1 and 2).
+		"binding_id_keep1":           {"1"},
+		"binding_name_keep1":         {"Manga"},
+		"binding_library_root_keep1": {"/m/a"},
+		"binding_kavita_lib_keep1":   {"1"},
+		"binding_id_keep2":           {"2"},
+		"binding_name_keep2":         {"Manhwa"},
+		"binding_library_root_keep2": {"/m/w"},
+		"binding_kavita_lib_keep2":   {"2"},
 		// Plan B v2 renamed override_library_<idx> → override_binding_<idx>.
 		"override_category_0":    {"5"},
 		"override_binding_0":     {"2"},

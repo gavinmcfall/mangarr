@@ -545,6 +545,12 @@ func TestPOSTSettingsPersistsRules(t *testing.T) {
 	form := url.Values{}
 	form.Set("file_mode", "hardlink")
 	form.Set("rename_scheme", "{series}/{series} - Ch.{chapter}.cbz")
+	// Submit the seeded binding back so validateBindingsNotReferenced
+	// (Task 6) doesn't reject the POST — the rule below references it.
+	form.Set("binding_id_keep1", "1")
+	form.Set("binding_name_keep1", "Manga")
+	form.Set("binding_library_root_keep1", "/m/a")
+	form.Set("binding_kavita_lib_keep1", "1")
 	form.Set("rule_id_new1", "0")
 	form.Set("rule_priority_new1", "100")
 	form.Set("rule_name_new1", "Japanese")
@@ -578,6 +584,12 @@ func TestPOSTSettingsPersistsDefaultBindingID(t *testing.T) {
 	form := url.Values{}
 	form.Set("file_mode", "hardlink")
 	form.Set("rename_scheme", "{series}/{series} - Ch.{chapter}.cbz")
+	// Submit the seeded binding back so the default-binding picker reference
+	// to ID 5 stays valid (validateBindingsNotReferenced).
+	form.Set("binding_id_keep1", "5")
+	form.Set("binding_name_keep1", "Catch-all")
+	form.Set("binding_library_root_keep1", "/m/c")
+	form.Set("binding_kavita_lib_keep1", "1")
 	form.Set("default_binding_id", "5")
 
 	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
@@ -600,6 +612,12 @@ func TestPOSTSettingsPersistsSuwayomiOverridesToV2Field(t *testing.T) {
 	form := url.Values{}
 	form.Set("file_mode", "hardlink")
 	form.Set("rename_scheme", "{series}/{series} - Ch.{chapter}.cbz")
+	// Submit the seeded binding back so the override below stays valid
+	// against validateBindingsNotReferenced.
+	form.Set("binding_id_keep1", "7")
+	form.Set("binding_name_keep1", "Light Novels")
+	form.Set("binding_library_root_keep1", "/m/l")
+	form.Set("binding_kavita_lib_keep1", "1")
 	// v2 renamed the right-hand to override_binding_<idx>; verify Plan B
 	// writes to SuwayomiCategoryBindings, NOT the v1 SuwayomiCategoryOverrides.
 	form.Set("override_category_new1", "42")
@@ -655,4 +673,132 @@ func excerpt(s, needle string, width int) string {
 		end = len(s)
 	}
 	return "..." + s[start:end] + "..."
+}
+
+// --- Task 6: validation guards ---
+
+// TestPOSTSettingsRejectsDeletingReferencedBinding verifies the
+// validateBindingsNotReferenced guard. Submitting a form that omits a binding
+// still referenced by a rule must NOT delete that binding; the form should
+// re-render with an error banner naming the conflict.
+func TestPOSTSettingsRejectsDeletingReferencedBinding(t *testing.T) {
+	jp := "JP"
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 1, Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1},
+			{ID: 2, Name: "Doomed", LibraryRoot: "/m/x", KavitaLibID: 9},
+		},
+		rules: []model.ClassificationRule{
+			{ID: 1, Priority: 100, Name: "Japanese", Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: 2},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	form := url.Values{}
+	form.Set("file_mode", "hardlink")
+	form.Set("rename_scheme", "{series}/{series} - Ch.{chapter}.cbz")
+	// Submit ONLY binding ID 1; binding 2 is omitted (would be deleted by
+	// SaveBindings' replace-all). Rule still references binding 2 →
+	// validation should reject.
+	form.Set("binding_id_1", "1")
+	form.Set("binding_name_1", "Manga")
+	form.Set("binding_library_root_1", "/m/a")
+	form.Set("binding_kavita_lib_1", "1")
+	// Submit rule referencing the about-to-be-deleted binding 2.
+	form.Set("rule_id_1", "1")
+	form.Set("rule_priority_1", "100")
+	form.Set("rule_name_1", "Japanese")
+	form.Set("rule_country_1", "JP")
+	form.Set("rule_binding_1", "2")
+
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Binding 2 must NOT have been deleted — partial state never lands.
+	bindings, _ := st.ListBindings()
+	if len(bindings) != 2 {
+		t.Errorf("expected binding 2 to NOT be deleted (rule references it); got bindings: %+v", bindings)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "Doomed") && !strings.Contains(body, "referenced") {
+		t.Errorf("expected error banner naming the referenced binding; body: %s", body)
+	}
+}
+
+// TestPOSTSettingsRejectsDeletingBindingReferencedByOverride covers the
+// Suwayomi-override branch of validateBindingsNotReferenced.
+func TestPOSTSettingsRejectsDeletingBindingReferencedByOverride(t *testing.T) {
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 1, Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1},
+			{ID: 4, Name: "Korean Webtoons", LibraryRoot: "/m/w", KavitaLibID: 2},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	form := url.Values{}
+	form.Set("file_mode", "hardlink")
+	form.Set("rename_scheme", "{series}/{series} - Ch.{chapter}.cbz")
+	// Submit ONLY binding 1; binding 4 omitted.
+	form.Set("binding_id_1", "1")
+	form.Set("binding_name_1", "Manga")
+	form.Set("binding_library_root_1", "/m/a")
+	form.Set("binding_kavita_lib_1", "1")
+	// Suwayomi override still routes category 7 → binding 4 (about to vanish).
+	form.Set("override_category_1", "7")
+	form.Set("override_binding_1", "4")
+
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	bindings, _ := st.ListBindings()
+	if len(bindings) != 2 {
+		t.Errorf("expected binding 4 to survive (override references it); got bindings: %+v", bindings)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Korean Webtoons") && !strings.Contains(body, "referenced") {
+		t.Errorf("expected error banner naming the referenced binding; body: %s", body)
+	}
+}
+
+// TestPOSTSettingsRejectsDeletingBindingReferencedByDefaultBindingPicker
+// covers the DefaultBindingID branch of validateBindingsNotReferenced.
+func TestPOSTSettingsRejectsDeletingBindingReferencedByDefaultBindingPicker(t *testing.T) {
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 1, Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1},
+			{ID: 9, Name: "Catch-all", LibraryRoot: "/m/c", KavitaLibID: 3},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	form := url.Values{}
+	form.Set("file_mode", "hardlink")
+	form.Set("rename_scheme", "{series}/{series} - Ch.{chapter}.cbz")
+	// Submit ONLY binding 1; binding 9 omitted.
+	form.Set("binding_id_1", "1")
+	form.Set("binding_name_1", "Manga")
+	form.Set("binding_library_root_1", "/m/a")
+	form.Set("binding_kavita_lib_1", "1")
+	// Default Binding picker still points at binding 9.
+	form.Set("default_binding_id", "9")
+
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	bindings, _ := st.ListBindings()
+	if len(bindings) != 2 {
+		t.Errorf("expected binding 9 to survive (default-binding picker references it); got bindings: %+v", bindings)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Catch-all") && !strings.Contains(body, "referenced") {
+		t.Errorf("expected error banner naming the referenced binding; body: %s", body)
+	}
 }
