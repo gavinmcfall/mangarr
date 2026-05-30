@@ -510,9 +510,117 @@ func TestFormatVia(t *testing.T) {
 		{"suwayomi-override:category=bad", "suwayomi-override:category=bad"},
 	}
 	for _, tc := range tests {
-		got := formatVia(tc.in, cats)
+		got := formatVia(tc.in, nil, nil, cats)
 		if got != tc.want {
 			t.Errorf("formatVia(%q): want %q, got %q", tc.in, tc.want, got)
+		}
+	}
+}
+
+// TestFormatViaResolvesRuleIDToName covers Plan A's rule:<id> Via shape:
+// the renderer looks up the ClassificationRule by ID and returns its Name.
+func TestFormatViaResolvesRuleIDToName(t *testing.T) {
+	rules := []model.ClassificationRule{
+		{ID: 5, Name: "Japanese 18+"},
+	}
+	got := formatVia("rule:5", rules, nil, nil)
+	if got != "Japanese 18+" {
+		t.Errorf("formatVia rule:5: want %q, got %q", "Japanese 18+", got)
+	}
+}
+
+// TestFormatViaFallsBackToUnknownForMissingRule confirms a rule:<id> referring
+// to a deleted/missing rule renders as "Unknown rule (ID: N)" rather than the
+// raw prefix — the activity log stays readable after a rule is removed.
+func TestFormatViaFallsBackToUnknownForMissingRule(t *testing.T) {
+	got := formatVia("rule:999", nil, nil, nil)
+	if got != "Unknown rule (ID: 999)" {
+		t.Errorf("formatVia missing rule: want %q, got %q", "Unknown rule (ID: 999)", got)
+	}
+}
+
+// TestFormatViaPathRuleSameAsRule confirms path-rule:<id> (the short-circuit
+// rule path used by the classifier's step 1 for path-only conditions)
+// resolves through the same rules list as rule:<id>.
+func TestFormatViaPathRuleSameAsRule(t *testing.T) {
+	rules := []model.ClassificationRule{
+		{ID: 7, Name: "Comics by path"},
+	}
+	got := formatVia("path-rule:7", rules, nil, nil)
+	if got != "Comics by path" {
+		t.Errorf("formatVia path-rule:7: want %q, got %q", "Comics by path", got)
+	}
+}
+
+// TestFormatViaPathRuleFallsBackToUnknownForMissingRule mirrors the rule:
+// fallback for path-rule:.
+func TestFormatViaPathRuleFallsBackToUnknownForMissingRule(t *testing.T) {
+	got := formatVia("path-rule:42", nil, nil, nil)
+	if got != "Unknown rule (ID: 42)" {
+		t.Errorf("formatVia path-rule missing: want %q, got %q", "Unknown rule (ID: 42)", got)
+	}
+}
+
+// TestFormatViaDefaultBindingShowsBindingName covers Plan A's default-binding
+// Via — the catch-all routing target. The renderer resolves Settings.
+// DefaultBindingID against the bindings list and surfaces the name.
+func TestFormatViaDefaultBindingShowsBindingName(t *testing.T) {
+	id := int64(3)
+	settings := model.Settings{DefaultBindingID: &id}
+	bindings := []model.Binding{{ID: 3, Name: "Catch-all"}}
+	got := formatViaWithSettings("default-binding", nil, bindings, nil, settings)
+	if !strings.Contains(got, "Catch-all") {
+		t.Errorf("formatViaWithSettings default-binding: want label containing %q, got %q", "Catch-all", got)
+	}
+}
+
+// TestFormatViaDefaultBindingFallbackWhenBindingDeleted covers the case where
+// a series was routed via default-binding but the configured binding has
+// since been deleted. The renderer must surface a fallback ("deleted" / "ID")
+// rather than silently dropping the label.
+func TestFormatViaDefaultBindingFallbackWhenBindingDeleted(t *testing.T) {
+	id := int64(99)
+	settings := model.Settings{DefaultBindingID: &id}
+	got := formatViaWithSettings("default-binding", nil, nil, nil, settings)
+	if !strings.Contains(got, "deleted") && !strings.Contains(got, "Unknown") {
+		t.Errorf("formatViaWithSettings default-binding deleted: want fallback containing 'deleted' or 'Unknown', got %q", got)
+	}
+}
+
+// TestFormatViaDefaultBindingFallbackWhenNoneSet covers the case where the
+// catch-all is disabled (DefaultBindingID == nil) but a legacy log row still
+// carries via=default-binding (e.g. config edited mid-run). The renderer
+// must produce a recognisable label rather than the raw sentinel.
+func TestFormatViaDefaultBindingFallbackWhenNoneSet(t *testing.T) {
+	settings := model.Settings{DefaultBindingID: nil}
+	got := formatViaWithSettings("default-binding", nil, nil, nil, settings)
+	if !strings.Contains(got, "none") && !strings.Contains(got, "Default binding") {
+		t.Errorf("formatViaWithSettings default-binding nil: want recognisable label, got %q", got)
+	}
+}
+
+// TestFormatViaWithSettingsDelegatesNonDefaultBindingShapes confirms the
+// sister function delegates to formatVia for every Via shape except
+// default-binding — so callers can use formatViaWithSettings uniformly.
+func TestFormatViaWithSettingsDelegatesNonDefaultBindingShapes(t *testing.T) {
+	cats := map[int64]string{5: "Korean Webtoons"}
+	rules := []model.ClassificationRule{{ID: 7, Name: "Comics by path"}}
+	settings := model.Settings{}
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", "—"},
+		{"unmatched", "Unmatched"},
+		{"anilist:JP", "AniList (JP)"},
+		{"suwayomi-override:category=5", "Korean Webtoons"},
+		{"rule:7", "Comics by path"},
+		{"path-rule:7", "Comics by path"},
+	}
+	for _, tc := range tests {
+		got := formatViaWithSettings(tc.in, rules, nil, cats, settings)
+		if got != tc.want {
+			t.Errorf("formatViaWithSettings(%q): want %q, got %q", tc.in, tc.want, got)
 		}
 	}
 }

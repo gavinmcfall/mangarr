@@ -725,10 +725,13 @@ type activityPageData struct {
 // buildActivityRows resolves the Via field of every entry to a display label.
 // suwayomi-override:category=N is joined against the current Suwayomi
 // category list; missing IDs render as "Unknown (ID: N)". anilist:JP/KR/CN/TW
-// render as "AniList (XX)". unmatched/empty are handled in a switch.
+// render as "AniList (XX)". rule:N / path-rule:N resolve against the user's
+// ClassificationRule list. default-binding resolves against Settings +
+// Bindings. unmatched/empty are handled in a switch.
 //
 // The Suwayomi category list is fetched at most once per page render — when
-// at least one row carries a suwayomi-override Via.
+// at least one row carries a suwayomi-override Via. Rules + bindings + settings
+// are read once per page render regardless of row count.
 func buildActivityRows(ctx context.Context, st Store, list []model.ActivityEntry) []activityRow {
 	rows := make([]activityRow, 0, len(list))
 	var catNamesByID map[int64]string
@@ -739,26 +742,31 @@ func buildActivityRows(ctx context.Context, st Store, list []model.ActivityEntry
 			break
 		}
 	}
+	// Settings is needed unconditionally — both for the Suwayomi client and
+	// the default-binding Via renderer. Treat lookup failure as empty.
+	settings, _ := st.GetSettings()
 	if needSuwayomi {
-		settings, err := st.GetSettings()
-		if err == nil {
-			if client, ok := newSuwayomiClient(settings); ok {
-				fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				cats, err := client.ListCategories(fetchCtx)
-				cancel()
-				if err == nil {
-					catNamesByID = make(map[int64]string, len(cats))
-					for _, c := range cats {
-						catNamesByID[c.ID] = c.Name
-					}
+		if client, ok := newSuwayomiClient(settings); ok {
+			fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			cats, err := client.ListCategories(fetchCtx)
+			cancel()
+			if err == nil {
+				catNamesByID = make(map[int64]string, len(cats))
+				for _, c := range cats {
+					catNamesByID[c.ID] = c.Name
 				}
 			}
 		}
 	}
+	// Rules + bindings are cheap (in-memory list) and needed by rule:/path-rule:
+	// and default-binding Via renderers respectively. Treat lookup failure as
+	// nil — formatVia falls back to "Unknown rule (ID: N)" / "deleted" labels.
+	rules, _ := st.ListRules()
+	bindings, _ := st.ListBindings()
 	for _, e := range list {
 		rows = append(rows, activityRow{
 			ActivityEntry: e,
-			ViaLabel:      formatVia(e.Via, catNamesByID),
+			ViaLabel:      formatViaWithSettings(e.Via, rules, bindings, catNamesByID, settings),
 		})
 	}
 	return rows
@@ -766,16 +774,30 @@ func buildActivityRows(ctx context.Context, st Store, list []model.ActivityEntry
 
 // formatVia renders a raw Via value into a human-readable label.
 //
-//	"anilist:JP"                  → "AniList (JP)"
+//	"anilist:JP"                   → "AniList (JP)"
 //	"suwayomi-override:category=5" → "<categoryName>" or "Unknown (ID: 5)"
-//	"unmatched"                   → "Unmatched"
-//	""                            → "—" (pre-Plan-B legacy rows)
-func formatVia(via string, catNamesByID map[int64]string) string {
+//	"rule:7"                       → "<ClassificationRule.Name>" or "Unknown rule (ID: 7)"
+//	"path-rule:7"                  → same as rule:
+//	"default-binding"              → "Default binding" (use formatViaWithSettings to
+//	                                  resolve the configured binding name)
+//	"unmatched"                    → "Unmatched"
+//	""                             → "—" (pre-Plan-B legacy rows)
+func formatVia(via string, rules []model.ClassificationRule, bindings []model.Binding, catNamesByID map[int64]string) string {
+	_ = bindings // accepted for signature symmetry with formatViaWithSettings; default-binding requires Settings
 	switch {
 	case via == "":
 		return "—"
 	case via == classifier.ViaUnmatched:
 		return "Unmatched"
+	case via == classifier.ViaDefaultBinding:
+		// Stateless fallback — callers wanting the binding name should use
+		// formatViaWithSettings. Returning a useful sentinel keeps activity
+		// logs readable even from contexts that don't have Settings handy.
+		return "Default binding"
+	case strings.HasPrefix(via, classifier.ViaRulePrefix):
+		return resolveRuleVia(via, classifier.ViaRulePrefix, rules)
+	case strings.HasPrefix(via, classifier.ViaPathRulePrefix):
+		return resolveRuleVia(via, classifier.ViaPathRulePrefix, rules)
 	case strings.HasPrefix(via, classifier.ViaAniListPrefix):
 		code := strings.TrimPrefix(via, classifier.ViaAniListPrefix)
 		if code == "" {
@@ -795,6 +817,46 @@ func formatVia(via string, catNamesByID map[int64]string) string {
 	default:
 		return via
 	}
+}
+
+// formatViaWithSettings is formatVia plus the resolution context needed to
+// render the Via == classifier.ViaDefaultBinding case to the configured
+// binding name. All other Via shapes delegate to formatVia.
+//
+//	default-binding (DefaultBindingID set, binding exists)  → "Default binding (<name>)"
+//	default-binding (DefaultBindingID set, binding deleted) → "Default binding (deleted, ID: N)"
+//	default-binding (DefaultBindingID == nil)               → "Default binding (none)"
+func formatViaWithSettings(via string, rules []model.ClassificationRule, bindings []model.Binding, catNamesByID map[int64]string, settings model.Settings) string {
+	if via == classifier.ViaDefaultBinding {
+		if settings.DefaultBindingID == nil {
+			return "Default binding (none)"
+		}
+		id := *settings.DefaultBindingID
+		for _, b := range bindings {
+			if b.ID == id {
+				return fmt.Sprintf("Default binding (%s)", b.Name)
+			}
+		}
+		return fmt.Sprintf("Default binding (deleted, ID: %d)", id)
+	}
+	return formatVia(via, rules, bindings, catNamesByID)
+}
+
+// resolveRuleVia looks up a rule:/path-rule:<id> Via against the supplied
+// rules list, returning the rule's Name or a "Unknown rule (ID: N)" fallback.
+// Unparseable IDs return the raw Via string.
+func resolveRuleVia(via, prefix string, rules []model.ClassificationRule) string {
+	rawID := strings.TrimPrefix(via, prefix)
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil {
+		return via
+	}
+	for _, r := range rules {
+		if r.ID == id {
+			return r.Name
+		}
+	}
+	return fmt.Sprintf("Unknown rule (ID: %d)", id)
 }
 
 func (h *Handler) pageTasks(w http.ResponseWriter, r *http.Request) {
