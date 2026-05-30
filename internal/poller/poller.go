@@ -344,14 +344,9 @@ func (p *Poller) refreshSuwayomiCache(ctx context.Context) {
 	}
 }
 
-// recordActivity writes an activity entry best-effort. A failure to write
-// activity must never abort the tick.
-func (p *Poller) recordActivity(title string, action model.ActivityAction, detail string) {
-	p.recordActivityVia(title, action, "", detail)
-}
-
-// recordActivityVia is recordActivity plus the Via reason from the
-// classifier's Decision.
+// recordActivityVia writes an activity entry best-effort with the Via
+// reason from the classifier's Decision. A failure to write activity
+// must never abort the tick.
 func (p *Poller) recordActivityVia(title string, action model.ActivityAction, via, detail string) {
 	if p.Activity == nil {
 		return
