@@ -299,7 +299,14 @@ func (s *Store) SaveBindings(in []model.Binding) error {
 	if err != nil {
 		return fmt.Errorf("begin save bindings: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				log.Printf("store: rollback save bindings: %v", rbErr)
+			}
+		}
+	}()
 
 	// Collect input IDs (non-zero) to know which existing rows to keep.
 	keep := make(map[int64]bool)
@@ -343,7 +350,10 @@ func (s *Store) SaveBindings(in []model.Binding) error {
 			if err != nil {
 				return fmt.Errorf("insert binding %q: %w", b.Name, err)
 			}
-			id, _ := res.LastInsertId()
+			id, err := res.LastInsertId()
+			if err != nil {
+				return fmt.Errorf("get insert id for binding %q: %w", b.Name, err)
+			}
 			b.ID = id
 		} else {
 			_, err := tx.Exec(
@@ -359,5 +369,116 @@ func (s *Store) SaveBindings(in []model.Binding) error {
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit save bindings: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// ListRules returns all classification rules sorted ascending by Priority
+// so the classifier can walk them first-match-wins.
+func (s *Store) ListRules() ([]model.ClassificationRule, error) {
+	rows, err := s.db.Query(`SELECT id, priority, name, condition_json, binding_id FROM classification_rules ORDER BY priority`)
+	if err != nil {
+		return nil, fmt.Errorf("list rules: %w", err)
+	}
+	defer rows.Close()
+
+	var out []model.ClassificationRule
+	for rows.Next() {
+		var r model.ClassificationRule
+		var condJSON string
+		if err := rows.Scan(&r.ID, &r.Priority, &r.Name, &condJSON, &r.BindingID); err != nil {
+			return nil, fmt.Errorf("scan rule: %w", err)
+		}
+		if err := json.Unmarshal([]byte(condJSON), &r.Condition); err != nil {
+			return nil, fmt.Errorf("unmarshal rule %d condition: %w", r.ID, err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// SaveRules atomically replaces the classification_rules table contents.
+// Same shape as SaveBindings: ID==0 rows are inserted (and the input slice
+// gets its IDs populated in place), ID>0 rows are upserted by ID, existing
+// rows not in the input are deleted. Single transaction so partial
+// failures don't leave the table in a torn state.
+func (s *Store) SaveRules(in []model.ClassificationRule) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin save rules: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				log.Printf("store: rollback save rules: %v", rbErr)
+			}
+		}
+	}()
+
+	keep := make(map[int64]bool)
+	for _, r := range in {
+		if r.ID > 0 {
+			keep[r.ID] = true
+		}
+	}
+
+	if len(keep) == 0 {
+		if _, err := tx.Exec(`DELETE FROM classification_rules`); err != nil {
+			return fmt.Errorf("delete all rules: %w", err)
+		}
+	} else {
+		ids := make([]any, 0, len(keep))
+		placeholders := make([]string, 0, len(keep))
+		for id := range keep {
+			ids = append(ids, id)
+			placeholders = append(placeholders, "?")
+		}
+		q := fmt.Sprintf(`DELETE FROM classification_rules WHERE id NOT IN (%s)`, strings.Join(placeholders, ","))
+		if _, err := tx.Exec(q, ids...); err != nil {
+			return fmt.Errorf("prune rules: %w", err)
+		}
+	}
+
+	for i := range in {
+		r := &in[i]
+		condJSON, err := json.Marshal(r.Condition)
+		if err != nil {
+			return fmt.Errorf("marshal rule %q condition: %w", r.Name, err)
+		}
+		if r.ID == 0 {
+			res, err := tx.Exec(
+				`INSERT INTO classification_rules (priority, name, condition_json, binding_id) VALUES (?, ?, ?, ?)`,
+				r.Priority, r.Name, string(condJSON), r.BindingID,
+			)
+			if err != nil {
+				return fmt.Errorf("insert rule %q: %w", r.Name, err)
+			}
+			id, err := res.LastInsertId()
+			if err != nil {
+				return fmt.Errorf("get insert id for rule %q: %w", r.Name, err)
+			}
+			r.ID = id
+		} else {
+			_, err := tx.Exec(
+				`INSERT INTO classification_rules (id, priority, name, condition_json, binding_id)
+				 VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT(id) DO UPDATE SET priority=excluded.priority, name=excluded.name,
+				   condition_json=excluded.condition_json, binding_id=excluded.binding_id`,
+				r.ID, r.Priority, r.Name, string(condJSON), r.BindingID,
+			)
+			if err != nil {
+				return fmt.Errorf("upsert rule id=%d: %w", r.ID, err)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit save rules: %w", err)
+	}
+	committed = true
+	return nil
 }
