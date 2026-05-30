@@ -1,10 +1,13 @@
 package classifier
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gavinmcfall/mangarr/internal/anilist"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
@@ -26,10 +29,16 @@ func (s *stubPathLookup) Lookup(parentDir string) (suwayomi.CacheEntry, bool) {
 	return e, ok
 }
 
-// stubSettings returns a fixed Settings on every call.
+// stubSettings returns a fixed Settings on every call. ListBindings /
+// ListRules return empty slices — the v1 ClassifySeries path doesn't
+// consult them, they exist on the interface only because the v2
+// Classify path needs them and we keep one SettingsReader interface
+// across both flows.
 type stubSettings struct{ s model.Settings }
 
-func (s *stubSettings) GetSettings() (model.Settings, error) { return s.s, nil }
+func (s *stubSettings) GetSettings() (model.Settings, error)            { return s.s, nil }
+func (s *stubSettings) ListBindings() ([]model.Binding, error)          { return nil, nil }
+func (s *stubSettings) ListRules() ([]model.ClassificationRule, error)  { return nil, nil }
 
 // fakeClassifierMetrics records IncAniListLookup calls.
 type fakeClassifierMetrics struct {
@@ -69,7 +78,7 @@ func TestClassifyMapsCountry(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL)
-	got, err := c.Classify("Solo Leveling")
+	got, err := c.ClassifyTitle("Solo Leveling")
 	if err != nil {
 		t.Fatalf("classify: %v", err)
 	}
@@ -83,7 +92,7 @@ func TestClassifyNoMatchReturnsUnknown(t *testing.T) {
 		w.Write([]byte(`{"data":{"Media":null}}`))
 	}))
 	defer srv.Close()
-	got, err := New(srv.URL).Classify("zzzznotreal")
+	got, err := New(srv.URL).ClassifyTitle("zzzznotreal")
 	if err != nil {
 		t.Fatalf("classify: %v", err)
 	}
@@ -104,7 +113,7 @@ func TestClassifyCacheHitSkipsNetwork(t *testing.T) {
 	cache.entries["Solo Leveling"] = model.TypeManhwa // pre-populated (e.g. a manual choice)
 
 	c := NewWithCache(srv.URL, cache)
-	got, err := c.Classify("Solo Leveling")
+	got, err := c.ClassifyTitle("Solo Leveling")
 	if err != nil {
 		t.Fatalf("classify: %v", err)
 	}
@@ -128,7 +137,7 @@ func TestClassifyWritesThroughCache(t *testing.T) {
 	c := NewWithCache(srv.URL, cache)
 
 	// First call: cache miss -> network hit -> writes through.
-	got, err := c.Classify("Omniscient Reader")
+	got, err := c.ClassifyTitle("Omniscient Reader")
 	if err != nil {
 		t.Fatalf("classify (first): %v", err)
 	}
@@ -143,7 +152,7 @@ func TestClassifyWritesThroughCache(t *testing.T) {
 	}
 
 	// Second call: cache hit -> no additional network.
-	got, err = c.Classify("Omniscient Reader")
+	got, err = c.ClassifyTitle("Omniscient Reader")
 	if err != nil {
 		t.Fatalf("classify (second): %v", err)
 	}
@@ -169,7 +178,7 @@ func TestClassifyMetricsSuccess(t *testing.T) {
 	c := New(srv.URL)
 	c.Metrics = fm
 
-	if _, err := c.Classify("Berserk"); err != nil {
+	if _, err := c.ClassifyTitle("Berserk"); err != nil {
 		t.Fatalf("classify: %v", err)
 	}
 	if fm.counts["success"] != 1 {
@@ -188,7 +197,7 @@ func TestClassifyMetricsMiss(t *testing.T) {
 	c := New(srv.URL)
 	c.Metrics = fm
 
-	if _, err := c.Classify("no such title"); err != nil {
+	if _, err := c.ClassifyTitle("no such title"); err != nil {
 		t.Fatalf("classify: %v", err)
 	}
 	if fm.counts["miss"] != 1 {
@@ -211,7 +220,7 @@ func TestClassifyMetricsCached(t *testing.T) {
 	c := NewWithCache(srv.URL, cache)
 	c.Metrics = fm
 
-	if _, err := c.Classify("Solo Leveling"); err != nil {
+	if _, err := c.ClassifyTitle("Solo Leveling"); err != nil {
 		t.Fatalf("classify: %v", err)
 	}
 	if fm.counts["cached"] != 1 {
@@ -233,7 +242,7 @@ func TestClassifyMetricsError(t *testing.T) {
 	c := New(srv.URL)
 	c.Metrics = fm
 
-	_, _ = c.Classify("something")
+	_, _ = c.ClassifyTitle("something")
 	if fm.counts["error"] != 1 {
 		t.Errorf("want error=1 on HTTP 429, got %d (counts=%v)", fm.counts["error"], fm.counts)
 	}
@@ -503,7 +512,274 @@ func TestClassifyMetricsNilSafe(t *testing.T) {
 	c := New(srv.URL)
 	c.Metrics = nil // explicitly nil — must not panic
 
-	if _, err := c.Classify("Naruto"); err != nil {
+	if _, err := c.ClassifyTitle("Naruto"); err != nil {
 		t.Fatalf("classify with nil metrics: %v", err)
+	}
+}
+
+// ---------- v2 six-step Classify(ctx, ScanItem) → Decision ----------
+
+// fakeBindingsRulesStore implements SettingsReader for v2 Classify tests.
+// The settings field is the source of truth for DefaultBindingID and
+// SuwayomiCategoryBindings; tests populate it directly.
+type fakeBindingsRulesStore struct {
+	bindings []model.Binding
+	rules    []model.ClassificationRule
+	settings model.Settings
+}
+
+func (s *fakeBindingsRulesStore) ListBindings() ([]model.Binding, error) {
+	return s.bindings, nil
+}
+
+func (s *fakeBindingsRulesStore) ListRules() ([]model.ClassificationRule, error) {
+	return s.rules, nil
+}
+
+func (s *fakeBindingsRulesStore) GetSettings() (model.Settings, error) {
+	return s.settings, nil
+}
+
+// fakeAniListV2 satisfies AniListClient. onLookup fires each call so
+// tests can assert AniList was (or was not) consulted.
+type fakeAniListV2 struct {
+	result    anilist.Result
+	err       error
+	callCount int
+	onLookup  func(title string)
+}
+
+func (f *fakeAniListV2) Lookup(ctx context.Context, title string) (anilist.Result, error) {
+	f.callCount++
+	if f.onLookup != nil {
+		f.onLookup(title)
+	}
+	return f.result, f.err
+}
+
+func TestClassifyPathOnlyRuleShortCircuits(t *testing.T) {
+	prefix := "/media/Downloads/comics/"
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 7, Name: "Comics", LibraryRoot: "/m/c", KavitaLibID: 9}},
+		rules: []model.ClassificationRule{
+			{ID: 1, Priority: 10, Name: "comics-by-path",
+				Condition: model.RuleCondition{SourcePathPrefix: &prefix}, BindingID: 7},
+		},
+	}
+	al := &fakeAniListV2{}
+	c := NewV2(al, nil, st)
+
+	d, err := c.Classify(context.Background(), ScanItem{Title: "Anything", ParentDir: "/media/Downloads/comics/Foo"})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if d.BindingID != 7 {
+		t.Errorf("expected BindingID 7, got %d", d.BindingID)
+	}
+	if d.Via != "path-rule:1" {
+		t.Errorf("expected Via path-rule:1, got %q", d.Via)
+	}
+	if al.callCount != 0 {
+		t.Errorf("expected AniList NOT called when path-rule short-circuits, got %d calls", al.callCount)
+	}
+}
+
+func TestClassifySuwayomiOverrideRoutes(t *testing.T) {
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 5, Name: "Manhwa"}},
+		settings: model.Settings{SuwayomiCategoryBindings: map[int64]int64{42: 5}},
+	}
+	pl := &stubPathLookup{entries: map[string]suwayomi.CacheEntry{
+		"/dl/suwayomi/x": {MangaID: 1, CategoryIDs: []int64{42}},
+	}}
+	al := &fakeAniListV2{}
+	c := NewV2(al, pl, st)
+
+	d, err := c.Classify(context.Background(), ScanItem{Title: "X", ParentDir: "/dl/suwayomi/x"})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if d.BindingID != 5 || d.Via != "suwayomi-override:cat=42" {
+		t.Errorf("expected BindingID 5 + Via suwayomi-override:cat=42, got %+v", d)
+	}
+	if al.callCount != 0 {
+		t.Errorf("expected AniList NOT called when Suwayomi override hits, got %d calls", al.callCount)
+	}
+}
+
+// TestClassifySuwayomiOverrideFirstMatchWins pins the contract that the
+// PathCache returns CategoryIDs sorted ascending by Suwayomi category.order
+// and the classifier walks them in that order — first ID present in
+// SuwayomiCategoryBindings wins, even when later IDs also map.
+func TestClassifySuwayomiOverrideFirstMatchWins(t *testing.T) {
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 5, Name: "Manhwa"}, {ID: 6, Name: "Manhua"}},
+		settings: model.Settings{SuwayomiCategoryBindings: map[int64]int64{42: 5, 99: 6}},
+	}
+	pl := &stubPathLookup{entries: map[string]suwayomi.CacheEntry{
+		"/dl/multi": {MangaID: 1, CategoryIDs: []int64{42, 99}},
+	}}
+	c := NewV2(&fakeAniListV2{}, pl, st)
+
+	d, _ := c.Classify(context.Background(), ScanItem{Title: "X", ParentDir: "/dl/multi"})
+	if d.BindingID != 5 {
+		t.Errorf("first-match-wins: want BindingID 5 (cat 42), got %d", d.BindingID)
+	}
+	if d.Via != "suwayomi-override:cat=42" {
+		t.Errorf("want Via suwayomi-override:cat=42, got %q", d.Via)
+	}
+}
+
+func TestClassifyAniListRuleMatches(t *testing.T) {
+	jp := "JP"
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga"}},
+		rules: []model.ClassificationRule{
+			{ID: 5, Priority: 100, Name: "Japanese",
+				Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: 1},
+		},
+	}
+	al := &fakeAniListV2{result: anilist.Result{CountryOfOrigin: "JP"}}
+	c := NewV2(al, nil, st)
+
+	d, _ := c.Classify(context.Background(), ScanItem{Title: "Bleach", ParentDir: "/dl/suwayomi/bleach"})
+	if d.BindingID != 1 || d.Via != "rule:5" {
+		t.Errorf("expected {BindingID:1, Via:rule:5}, got %+v", d)
+	}
+}
+
+func TestClassifyFirstMatchWinsByPriority(t *testing.T) {
+	jp := "JP"
+	yes := true
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga"}, {ID: 2, Name: "Manga 18+"}},
+		rules: []model.ClassificationRule{
+			// Lower priority number = walked first. "Japanese 18+" at 50 wins
+			// over the looser "Japanese" at 100.
+			{ID: 10, Priority: 50, Name: "Japanese 18+",
+				Condition: model.RuleCondition{CountryOfOrigin: &jp, IsAdult: &yes}, BindingID: 2},
+			{ID: 11, Priority: 100, Name: "Japanese",
+				Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: 1},
+		},
+	}
+	al := &fakeAniListV2{result: anilist.Result{CountryOfOrigin: "JP", IsAdult: true}}
+	c := NewV2(al, nil, st)
+
+	d, _ := c.Classify(context.Background(), ScanItem{Title: "X"})
+	if d.BindingID != 2 {
+		t.Errorf("expected 18+ binding (ID 2) to win, got BindingID %d", d.BindingID)
+	}
+	if d.Via != "rule:10" {
+		t.Errorf("expected Via rule:10, got %q", d.Via)
+	}
+}
+
+func TestClassifyMixedConditionEvaluatedInStepFourNotStepOne(t *testing.T) {
+	prefix := "/media/Downloads/x/"
+	jp := "JP"
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga"}},
+		rules: []model.ClassificationRule{
+			// Path + country: NOT path-only (CountryOfOrigin is also set),
+			// must wait for AniList result in step 4.
+			{ID: 1, Priority: 50, Name: "mixed",
+				Condition: model.RuleCondition{SourcePathPrefix: &prefix, CountryOfOrigin: &jp}, BindingID: 1},
+		},
+	}
+	al := &fakeAniListV2{result: anilist.Result{CountryOfOrigin: "JP"}}
+	c := NewV2(al, nil, st)
+
+	d, _ := c.Classify(context.Background(), ScanItem{Title: "X", ParentDir: "/media/Downloads/x/foo"})
+	if d.BindingID != 1 || d.Via != "rule:1" {
+		t.Errorf("expected mixed rule to match in step 4, got %+v", d)
+	}
+	if al.callCount == 0 {
+		t.Errorf("expected AniList to be called for mixed condition, but it was not")
+	}
+}
+
+func TestClassifyDefaultBindingFallback(t *testing.T) {
+	defaultID := int64(42)
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 42, Name: "Default"}},
+		settings: model.Settings{DefaultBindingID: &defaultID},
+	}
+	al := &fakeAniListV2{result: anilist.Result{CountryOfOrigin: "JP"}}
+	c := NewV2(al, nil, st)
+
+	d, _ := c.Classify(context.Background(), ScanItem{Title: "Unmatched"})
+	if d.BindingID != 42 || d.Via != "default-binding" {
+		t.Errorf("expected default-binding fallback, got %+v", d)
+	}
+}
+
+func TestClassifyUnmatchedWhenNoDefault(t *testing.T) {
+	st := &fakeBindingsRulesStore{}
+	al := &fakeAniListV2{result: anilist.Result{CountryOfOrigin: "JP"}}
+	c := NewV2(al, nil, st)
+
+	d, _ := c.Classify(context.Background(), ScanItem{Title: "Nothing"})
+	if d.BindingID != 0 || d.Via != "unmatched" {
+		t.Errorf("expected unmatched, got %+v", d)
+	}
+}
+
+// TestClassifyAniListErrorFallsThroughToDefaultOrUnmatched pins that an
+// AniList error (network, ErrNotFound, anything) is swallowed — the
+// classifier falls through to step 5 (default-binding) and finally step 6
+// (unmatched). The error is intentionally not propagated to the poller
+// because a transient AniList outage should still let the poller route
+// to the configured default or queue for Unmatched, not crash the tick.
+func TestClassifyAniListErrorFallsThroughToDefaultOrUnmatched(t *testing.T) {
+	st := &fakeBindingsRulesStore{}
+	al := &fakeAniListV2{err: fmt.Errorf("simulated network failure")}
+	c := NewV2(al, nil, st)
+
+	d, err := c.Classify(context.Background(), ScanItem{Title: "X"})
+	if err != nil {
+		t.Errorf("expected Classify to swallow AniList error and fall through, got %v", err)
+	}
+	if d.Via != "unmatched" {
+		t.Errorf("expected fallback to unmatched on AniList error, got Via=%q", d.Via)
+	}
+}
+
+// TestClassifyAniListErrorWithDefaultRoutesToDefault complements the above
+// — when AniList errors AND a default binding is configured, the default
+// should win (step 5 runs whether or not step 4 produced a hit).
+func TestClassifyAniListErrorWithDefaultRoutesToDefault(t *testing.T) {
+	defaultID := int64(99)
+	st := &fakeBindingsRulesStore{
+		settings: model.Settings{DefaultBindingID: &defaultID},
+	}
+	al := &fakeAniListV2{err: fmt.Errorf("network down")}
+	c := NewV2(al, nil, st)
+
+	d, _ := c.Classify(context.Background(), ScanItem{Title: "Whatever"})
+	if d.BindingID != 99 || d.Via != "default-binding" {
+		t.Errorf("expected default fallback on AniList error, got %+v", d)
+	}
+}
+
+// TestClassifyNilSuwayomiSkipsOverrideStep ensures a nil PathLookup is
+// safe — Suwayomi was never wired. The classifier must skip step 2/3
+// without panicking and proceed to step 4 (AniList rules) then fallback.
+func TestClassifyNilSuwayomiSkipsOverrideStep(t *testing.T) {
+	jp := "JP"
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga"}},
+		rules: []model.ClassificationRule{
+			{ID: 5, Priority: 100, Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: 1},
+		},
+	}
+	al := &fakeAniListV2{result: anilist.Result{CountryOfOrigin: "JP"}}
+	c := NewV2(al, nil, st)
+
+	d, err := c.Classify(context.Background(), ScanItem{Title: "X", ParentDir: "/dl/x"})
+	if err != nil {
+		t.Fatalf("Classify with nil suwayomi: %v", err)
+	}
+	if d.BindingID != 1 || d.Via != "rule:5" {
+		t.Errorf("expected rule:5 match with nil suwayomi, got %+v", d)
 	}
 }

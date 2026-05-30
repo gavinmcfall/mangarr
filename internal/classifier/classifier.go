@@ -2,11 +2,14 @@ package classifier
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/gavinmcfall/mangarr/internal/anilist"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
@@ -36,13 +39,39 @@ type PathLookup interface {
 	Lookup(parentDir string) (suwayomi.CacheEntry, bool)
 }
 
-// SettingsReader is the subset of store.Store the classifier needs to
-// read the user's current SuwayomiCategoryOverrides map. Kept tiny so the
-// classifier doesn't take a dependency on the whole store.
+// SettingsReader is the subset of store.Store the classifier reads.
+// In the v1 path (ClassifySeries) only GetSettings is consulted — the
+// classifier reads SuwayomiCategoryOverrides + KavitaLibIDsByType off
+// the Settings row.
 //
-// A nil SettingsReader disables override resolution.
+// In the v2 path (Classify) we also need ListRules to drive the rule
+// walk and (transitively, via Decision.BindingID) ListBindings so the
+// poller can resolve the destination. ListBindings stays on the
+// interface so callers can pass a single fake to either flow without
+// adapter shims; the v2 Classify method itself does not call it (the
+// poller does).
+//
+// A nil SettingsReader disables BOTH flows — there's no useful default.
 type SettingsReader interface {
 	GetSettings() (model.Settings, error)
+	ListBindings() ([]model.Binding, error)
+	ListRules() ([]model.ClassificationRule, error)
+}
+
+// AniListClient is the subset of *anilist.Client the v2 Classify method
+// consumes. Tests pass a fake; production wires the real client.
+type AniListClient interface {
+	Lookup(ctx context.Context, title string) (anilist.Result, error)
+}
+
+// ScanItem is the input to v2 Classify. It carries the metadata the
+// six-step flow needs to make a routing decision: the title to look up
+// on AniList and the parent directory the file was downloaded into
+// (so path-only rules and Suwayomi PathCache lookups can short-circuit
+// before any network call).
+type ScanItem struct {
+	Title     string
+	ParentDir string
 }
 
 type Classifier struct {
@@ -55,6 +84,14 @@ type Classifier struct {
 	// to engage; either being nil short-circuits to the AniList path.
 	pathCache PathLookup
 	settings  SettingsReader
+
+	// v2 dependencies. anilist is the widened lookup client (returns
+	// CountryOfOrigin + IsAdult + Format in one call); store is the
+	// bindings/rules/settings reader. Both are populated by NewV2; the
+	// v1 constructors leave them nil. Classify (v2) requires both to
+	// be non-nil; ClassifySeries (v1) ignores them.
+	anilist AniListClient
+	store   SettingsReader
 }
 
 // New creates a Classifier that queries the given endpoint (use "" for the
@@ -154,7 +191,7 @@ func (c *Classifier) ClassifySeries(s model.Series) (model.ContentType, string, 
 		}
 	}
 
-	ct, err := c.Classify(s.Title)
+	ct, err := c.ClassifyTitle(s.Title)
 	if err != nil {
 		return model.TypeUnknown, ViaUnmatched, err
 	}
@@ -203,10 +240,17 @@ func countryCodeForType(ct model.ContentType) string {
 	}
 }
 
-// Classify returns the content type for a title, or TypeUnknown if AniList
-// has no match or the country is unmapped. Results are read from and written
-// to the cache (when a Cache is configured) to respect AniList's rate limit.
-func (c *Classifier) Classify(title string) (model.ContentType, error) {
+// ClassifyTitle returns the content type for a title, or TypeUnknown if
+// AniList has no match or the country is unmapped. Results are read
+// from and written to the cache (when a Cache is configured) to respect
+// AniList's rate limit.
+//
+// This is the v1 (pre-Library-Bindings-v2) entry point used by
+// ClassifySeries. The v2 Classify method (different signature, takes
+// ctx + ScanItem, returns Decision) is the replacement; this method
+// is preserved for one commit boundary so Task 10's poller swap can
+// be reviewed independently and Task 11 can remove it cleanly.
+func (c *Classifier) ClassifyTitle(title string) (model.ContentType, error) {
 	// Cache read — skip network if we already know the answer.
 	if c.cache != nil {
 		if ct, ok, err := c.cache.GetCachedClassification(title); err == nil && ok {
@@ -273,4 +317,135 @@ func (c *Classifier) Classify(title string) (model.ContentType, error) {
 		c.Metrics.IncAniListLookup("success")
 	}
 	return ct, nil
+}
+
+// NewV2 constructs a Classifier wired for the v2 six-step Classify flow:
+// the widened AniList client (returns countryOfOrigin + isAdult + format
+// in one call), an optional Suwayomi PathLookup (nil disables steps 2-3),
+// and a SettingsReader that exposes bindings, rules, and settings.
+//
+// The returned Classifier does NOT have the v1 endpoint/http/cache
+// fields set — calling ClassifyTitle on it will panic on the nil
+// http client. Tests and the poller must use the matching method for
+// the constructor they chose. Task 11 deletes ClassifyTitle and the
+// v1 constructors entirely; this split is a one-commit boundary.
+func NewV2(a AniListClient, p PathLookup, s SettingsReader) *Classifier {
+	return &Classifier{anilist: a, pathCache: p, store: s}
+}
+
+// Classify is the v2 six-step routing flow:
+//
+//  1. Path-only rules — if any rule's Condition has only SourcePathPrefix
+//     set and item.ParentDir starts with that prefix, route to the rule's
+//     binding with Via = "path-rule:<ruleID>". Skip the AniList call.
+//  2. Suwayomi PathCache lookup — if a *suwayomi.PathCache is wired and
+//     it has an entry for item.ParentDir, walk the entry's CategoryIDs
+//     (pre-sorted ascending by Suwayomi category.order); first ID present
+//     in Settings.SuwayomiCategoryBindings (the v2 routing map) wins.
+//     Route with Via = "suwayomi-override:cat=<categoryID>".
+//  3. AniList lookup — call c.anilist.Lookup(ctx, item.Title). If it
+//     errors (network failure, ErrNotFound, anything), skip step 4 and
+//     fall through to step 5. The error is intentionally swallowed so
+//     a transient AniList outage doesn't crash the poller tick.
+//  4. AniList rules — walk all non-path-only rules in priority order;
+//     first to match (AND-semantics across set Condition fields) wins.
+//     Route with Via = "rule:<ruleID>".
+//  5. Default binding fallback — if Settings.DefaultBindingID is set,
+//     route there with Via = "default-binding".
+//  6. Unmatched — return Decision{BindingID: 0, Via: "unmatched"}.
+//
+// The store is consulted at the top of every call so UI edits to the
+// rules or default-binding take effect on the next file without
+// requiring a restart. Rules come back from the store ORDER BY priority,
+// so step 1 and step 4 inherit the priority walk without an extra sort.
+//
+// Reads Settings.SuwayomiCategoryBindings (the v2 routing map, populated
+// by Migration 2) — NOT the v1 SuwayomiCategoryOverrides field. The v1
+// field stays untouched on the settings row so a rollback to the v1
+// classifier still finds its data.
+func (c *Classifier) Classify(ctx context.Context, item ScanItem) (model.Decision, error) {
+	settings, err := c.store.GetSettings()
+	if err != nil {
+		return model.Decision{}, fmt.Errorf("load settings: %w", err)
+	}
+	rules, err := c.store.ListRules()
+	if err != nil {
+		return model.Decision{}, fmt.Errorf("load rules: %w", err)
+	}
+	// rules already sorted by priority in the store.
+
+	// Step 1: path-only rules short-circuit before any AniList call.
+	for _, r := range rules {
+		if !r.Condition.IsPathOnly() {
+			continue
+		}
+		if strings.HasPrefix(item.ParentDir, *r.Condition.SourcePathPrefix) {
+			return model.Decision{
+				BindingID: r.BindingID,
+				Via:       fmt.Sprintf("path-rule:%d", r.ID),
+			}, nil
+		}
+	}
+
+	// Step 2-3: Suwayomi PathCache lookup, then category overrides.
+	if c.pathCache != nil {
+		if entry, ok := c.pathCache.Lookup(item.ParentDir); ok {
+			for _, catID := range entry.CategoryIDs {
+				if bindingID, mapped := settings.SuwayomiCategoryBindings[catID]; mapped {
+					return model.Decision{
+						BindingID: bindingID,
+						Via:       fmt.Sprintf("suwayomi-override:cat=%d", catID),
+					}, nil
+				}
+			}
+		}
+	}
+
+	// Step 4: AniList rules. Errors are swallowed so a transient outage
+	// degrades gracefully to step 5/6 rather than failing the poll tick.
+	result, anilistErr := c.anilist.Lookup(ctx, item.Title)
+	if anilistErr == nil {
+		for _, r := range rules {
+			if r.Condition.IsPathOnly() {
+				continue // already evaluated in step 1
+			}
+			if matchesRule(r.Condition, result, item.ParentDir) {
+				return model.Decision{
+					BindingID: r.BindingID,
+					Via:       fmt.Sprintf("rule:%d", r.ID),
+				}, nil
+			}
+		}
+	}
+
+	// Step 5: Default binding fallback.
+	if settings.DefaultBindingID != nil {
+		return model.Decision{
+			BindingID: *settings.DefaultBindingID,
+			Via:       "default-binding",
+		}, nil
+	}
+
+	// Step 6: Unmatched.
+	return model.Decision{BindingID: 0, Via: "unmatched"}, nil
+}
+
+// matchesRule applies AND-semantics across set Condition fields. Unset
+// pointer = wildcard (don't constrain on that axis). All four axes are
+// independent so a rule can mix any subset (e.g. country+isAdult, or
+// path+format) and the rule matches only when every set axis matches.
+func matchesRule(cond model.RuleCondition, result anilist.Result, parentDir string) bool {
+	if cond.CountryOfOrigin != nil && result.CountryOfOrigin != *cond.CountryOfOrigin {
+		return false
+	}
+	if cond.IsAdult != nil && result.IsAdult != *cond.IsAdult {
+		return false
+	}
+	if cond.Format != nil && result.Format != *cond.Format {
+		return false
+	}
+	if cond.SourcePathPrefix != nil && !strings.HasPrefix(parentDir, *cond.SourcePathPrefix) {
+		return false
+	}
+	return true
 }
