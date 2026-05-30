@@ -118,6 +118,14 @@ type Settings struct {
 	// default and the pre-v2 behaviour). Set to a Binding.ID to auto-
 	// route everything else.
 	DefaultBindingID *int64 `json:"default_binding_id,omitempty"`
+
+	// SuwayomiCategoryBindings is the v2 routing map: Suwayomi category ID
+	// → Binding.ID. Populated by Migration 2 from the v1-era
+	// SuwayomiCategoryOverrides (which held Kavita library IDs) via
+	// reverse-lookup against the user's bindings. v1 SuwayomiCategoryOverrides
+	// is left untouched on the settings row so a pre-v2 rollback can still
+	// read it.
+	SuwayomiCategoryBindings map[int64]int64 `json:"suwayomi_category_bindings,omitempty"`
 }
 
 // Binding is one library destination the user has defined. Replaces the

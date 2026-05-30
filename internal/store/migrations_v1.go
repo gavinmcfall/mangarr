@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
@@ -139,16 +140,29 @@ func migrateV1SettingsIntoBindings(tx *sql.Tx) error {
 		}
 	}
 
-	// Translate Suwayomi category overrides: Kavita library ID → Binding ID.
-	// Orphans (Kavita lib not in KavitaLibIDsByType, the Plan B reverse-lookup
-	// case) are logged and dropped — keeping them would silently route to
-	// nothing under v2 too.
+	// Translate Suwayomi category overrides into the v2 bindings map.
+	// Leave the original SuwayomiCategoryOverrides untouched for rollback
+	// safety (v1 reads it expecting Kavita library IDs; if we overwrote it
+	// with Binding IDs, a pre-v2 rollback would silently misroute).
+	//
+	// Iteration is fully deterministic:
+	//   - input map keys sorted ascending (sortedInt64Keys);
+	//   - content-type lookup walks a fixed [Manga, Manhwa, Manhua] slice
+	//     so a user-typo'd KavitaLibIDsByType{Manga:1, Manhwa:1} collision
+	//     always resolves to the same binding across boots.
+	//
+	// Orphans (Kavita lib not in KavitaLibIDsByType, the Plan B
+	// reverse-lookup case) are logged and dropped from the v2 map —
+	// keeping them would silently route to nothing under v2 too. The
+	// orphan entry is NOT removed from v1 SuwayomiCategoryOverrides
+	// (rollback safety, see above).
 	if len(settings.SuwayomiCategoryOverrides) > 0 {
-		newOverrides := make(map[int64]int64, len(settings.SuwayomiCategoryOverrides))
-		for catID, oldKavitaLibID := range settings.SuwayomiCategoryOverrides {
+		newBindings := make(map[int64]int64, len(settings.SuwayomiCategoryOverrides))
+		for _, catID := range sortedInt64Keys(settings.SuwayomiCategoryOverrides) {
+			oldKavitaLibID := settings.SuwayomiCategoryOverrides[catID]
 			var translated int64
-			for ct, bid := range typeToBindingID {
-				if settings.KavitaLibIDsByType[ct] == oldKavitaLibID {
+			for _, ct := range []model.ContentType{model.TypeManga, model.TypeManhwa, model.TypeManhua} {
+				if bid, ok := typeToBindingID[ct]; ok && settings.KavitaLibIDsByType[ct] == oldKavitaLibID {
 					translated = bid
 					break
 				}
@@ -157,13 +171,14 @@ func migrateV1SettingsIntoBindings(tx *sql.Tx) error {
 				log.Printf("store: migration 2: dropping orphan Suwayomi override (cat=%d → Kavita lib %d not in KavitaLibIDsByType)", catID, oldKavitaLibID)
 				continue
 			}
-			newOverrides[catID] = translated
+			newBindings[catID] = translated
 		}
-		settings.SuwayomiCategoryOverrides = newOverrides
+		settings.SuwayomiCategoryBindings = newBindings
 	}
 
 	// Write the updated settings row. v1 fields (LibraryRoots,
-	// KavitaLibIDsByType) stay populated for rollback safety.
+	// KavitaLibIDsByType, SuwayomiCategoryOverrides) stay populated for
+	// rollback safety.
 	updatedJSON, err := json.Marshal(settings)
 	if err != nil {
 		return fmt.Errorf("marshal updated settings: %w", err)
@@ -183,4 +198,17 @@ func isNoSuchTable(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "no such table")
+}
+
+// sortedInt64Keys returns the keys of m in ascending order so callers
+// that walk a map can do so deterministically (Go map iteration is
+// randomised). Used by Migration 2 to translate
+// SuwayomiCategoryOverrides → SuwayomiCategoryBindings.
+func sortedInt64Keys(m map[int64]int64) []int64 {
+	keys := make([]int64, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	return keys
 }

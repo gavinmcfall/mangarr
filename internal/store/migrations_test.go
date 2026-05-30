@@ -310,11 +310,20 @@ func TestMigration2TranslatesSuwayomiCategoryOverrides(t *testing.T) {
 	for _, b := range bindings {
 		bidByName[b.Name] = b.ID
 	}
-	if settings.SuwayomiCategoryOverrides[10] != bidByName["Manga"] {
-		t.Errorf("category 10 should map to Manga binding ID %d, got %d", bidByName["Manga"], settings.SuwayomiCategoryOverrides[10])
+	// v2 reads SuwayomiCategoryBindings (translated to Binding IDs).
+	if settings.SuwayomiCategoryBindings[10] != bidByName["Manga"] {
+		t.Errorf("category 10 should map to Manga binding ID %d, got %d", bidByName["Manga"], settings.SuwayomiCategoryBindings[10])
 	}
-	if settings.SuwayomiCategoryOverrides[11] != bidByName["Manhwa"] {
-		t.Errorf("category 11 should map to Manhwa binding ID %d, got %d", bidByName["Manhwa"], settings.SuwayomiCategoryOverrides[11])
+	if settings.SuwayomiCategoryBindings[11] != bidByName["Manhwa"] {
+		t.Errorf("category 11 should map to Manhwa binding ID %d, got %d", bidByName["Manhwa"], settings.SuwayomiCategoryBindings[11])
+	}
+	// v1 SuwayomiCategoryOverrides MUST be untouched so a pre-v2
+	// rollback still sees the original Kavita library IDs.
+	if settings.SuwayomiCategoryOverrides[10] != 1 {
+		t.Errorf("v1 SuwayomiCategoryOverrides[10] mutated: want Kavita lib 1, got %d", settings.SuwayomiCategoryOverrides[10])
+	}
+	if settings.SuwayomiCategoryOverrides[11] != 2 {
+		t.Errorf("v1 SuwayomiCategoryOverrides[11] mutated: want Kavita lib 2, got %d", settings.SuwayomiCategoryOverrides[11])
 	}
 }
 
@@ -334,11 +343,22 @@ func TestMigration2DropsOrphanSuwayomiOverrides(t *testing.T) {
 	}
 
 	_, _, settings := readV2State(t, db)
-	if _, present := settings.SuwayomiCategoryOverrides[99]; present {
-		t.Errorf("expected orphan override (cat=99) to be dropped, but it survived")
+	// Orphan MUST NOT appear in the v2 bindings map.
+	if _, present := settings.SuwayomiCategoryBindings[99]; present {
+		t.Errorf("expected orphan override (cat=99) to be absent from SuwayomiCategoryBindings, but it survived")
 	}
-	if _, present := settings.SuwayomiCategoryOverrides[10]; !present {
-		t.Errorf("expected valid override (cat=10) to be preserved")
+	// Valid translation present in v2 map.
+	if _, present := settings.SuwayomiCategoryBindings[10]; !present {
+		t.Errorf("expected valid override (cat=10) to be present in SuwayomiCategoryBindings")
+	}
+	// Orphan IS still present in v1 SuwayomiCategoryOverrides because
+	// migration 2 does not mutate v1 fields (rollback safety). The drop
+	// only applies to the v2 translation.
+	if got := settings.SuwayomiCategoryOverrides[99]; got != 42 {
+		t.Errorf("v1 SuwayomiCategoryOverrides[99] should still hold the original Kavita lib 42, got %d", got)
+	}
+	if got := settings.SuwayomiCategoryOverrides[10]; got != 1 {
+		t.Errorf("v1 SuwayomiCategoryOverrides[10] should still hold Kavita lib 1, got %d", got)
 	}
 }
 
@@ -347,6 +367,9 @@ func TestMigration2PreservesV1FieldsForRollbackSafety(t *testing.T) {
 	original := model.Settings{
 		LibraryRoots:       map[model.ContentType]string{model.TypeManga: "/media/Library/Manga"},
 		KavitaLibIDsByType: map[model.ContentType]int64{model.TypeManga: 1},
+		SuwayomiCategoryOverrides: map[int64]int64{
+			10: 1, // category 10 -> Kavita lib 1 (Manga)
+		},
 	}
 	seedV1Settings(t, db, original)
 
@@ -360,6 +383,12 @@ func TestMigration2PreservesV1FieldsForRollbackSafety(t *testing.T) {
 	}
 	if settings.KavitaLibIDsByType[model.TypeManga] != 1 {
 		t.Errorf("v1 KavitaLibIDsByType[Manga] not preserved: %v", settings.KavitaLibIDsByType)
+	}
+	// SuwayomiCategoryOverrides MUST retain its original Kavita-library-ID
+	// values so a pre-v2 rollback can read them. The v2 translation lives
+	// in SuwayomiCategoryBindings (separate field).
+	if got := settings.SuwayomiCategoryOverrides[10]; got != 1 {
+		t.Errorf("v1 SuwayomiCategoryOverrides[10] mutated: want Kavita lib 1, got %d", got)
 	}
 }
 
@@ -380,5 +409,82 @@ func TestMigration2IdempotentOnRerun(t *testing.T) {
 	bindings, _, _ := readV2State(t, db)
 	if len(bindings) != 1 {
 		t.Errorf("rerunning migrations duplicated bindings: got %d, want 1", len(bindings))
+	}
+}
+
+func TestMigration2NoSettingsTableIsNoOp(t *testing.T) {
+	// Fresh install: bindings + classification_rules tables exist (migration 1),
+	// settings table does not. Migration 2 must record version 2 and create
+	// zero bindings, zero rules.
+	db := freshDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations on fresh DB: %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_versions WHERE version=2`).Scan(&count); err != nil {
+		t.Fatalf("query schema_versions: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected version 2 recorded on fresh install, got %d rows", count)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bindings`).Scan(&count); err != nil {
+		t.Fatalf("query bindings count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 bindings on fresh install, got %d", count)
+	}
+}
+
+func TestMigration2EmptySettingsRowIsNoOp(t *testing.T) {
+	// Settings table exists but has no singleton row. Migration 2 hits
+	// sql.ErrNoRows path → no-op → version 2 recorded cleanly.
+	db := freshDB(t)
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)`); err != nil {
+		t.Fatalf("create settings table: %v", err)
+	}
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_versions WHERE version=2`).Scan(&count); err != nil {
+		t.Fatalf("query schema_versions: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected version 2 recorded with empty settings, got %d", count)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bindings`).Scan(&count); err != nil {
+		t.Fatalf("query bindings count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 bindings with empty settings, got %d", count)
+	}
+}
+
+func TestMigration2CorruptSettingsJSONReturnsErrorWithoutRecording(t *testing.T) {
+	// Corrupt JSON in the settings row → migration fails → schema_versions
+	// does NOT record version 2 → next boot retries (idempotent recovery).
+	db := freshDB(t)
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)`); err != nil {
+		t.Fatalf("create settings table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO settings (id, json) VALUES (1, '{not valid json')`); err != nil {
+		t.Fatalf("seed corrupt json: %v", err)
+	}
+	err := runMigrations(db)
+	if err == nil {
+		t.Fatal("expected runMigrations to fail on corrupt JSON, got nil")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_versions WHERE version=2`).Scan(&count); err != nil {
+		t.Fatalf("query schema_versions: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected version 2 NOT recorded after JSON parse failure, got %d rows", count)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bindings`).Scan(&count); err != nil {
+		t.Fatalf("query bindings count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 bindings after JSON parse failure, got %d", count)
 	}
 }

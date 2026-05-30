@@ -1875,10 +1875,14 @@ func (c *Classifier) Classify(ctx context.Context, item ScanItem) (model.Decisio
 	}
 
 	// Step 2-3: Suwayomi PathCache lookup, then category overrides.
+	// Use the v2 SuwayomiCategoryBindings map (populated by Migration 2
+	// from the v1-era SuwayomiCategoryOverrides via reverse-lookup).
+	// The v1 field is left untouched on the settings row for rollback
+	// safety; v2 code paths must read the new field.
 	if c.suwayomi != nil {
 		if entry, ok := c.suwayomi.Lookup(item.ParentDir); ok {
 			for _, catID := range entry.CategoryIDs {
-				if bindingID, mapped := settings.SuwayomiCategoryOverrides[catID]; mapped {
+				if bindingID, mapped := settings.SuwayomiCategoryBindings[catID]; mapped {
 					return model.Decision{
 						BindingID: bindingID,
 						Via:       fmt.Sprintf("suwayomi-override:cat=%d", catID),
