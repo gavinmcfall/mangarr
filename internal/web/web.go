@@ -396,6 +396,16 @@ func templateFuncs() template.FuncMap {
 			}
 			return false
 		},
+		// int64Or nil-safely dereferences a *int64, returning the fallback
+		// for nil. Used by the Default Binding picker so the template can
+		// compare {{.Settings.DefaultBindingID}} against literal option
+		// values without an html/template type-mismatch on the nil case.
+		"int64Or": func(p *int64, fallback int64) int64 {
+			if p == nil {
+				return fallback
+			}
+			return *p
+		},
 	}
 }
 
@@ -894,14 +904,6 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// --- Library Map: Suwayomi + Override rows ---
-	// Both /settings and the override-fragment HTMX endpoint route
-	// through buildLibraryMapData → identical rendering on initial GET
-	// and after the user clicks Refresh.
-	lmCtx, lmCancel := context.WithTimeout(r.Context(), 3*time.Second)
-	libraryMap := buildLibraryMapData(lmCtx, settings)
-	lmCancel()
-
 	// --- Library Bindings v2 (Plan B) ---
 	// Best-effort: a store error renders the card with an empty list and
 	// the same "+ Add Binding" affordance so the user can still create
@@ -917,6 +919,15 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		rules = nil
 	}
+
+	// --- Library Map: Suwayomi + Override rows ---
+	// Both /settings and the override-fragment HTMX endpoint route
+	// through buildLibraryMapData → identical rendering on initial GET
+	// and after the user clicks Refresh. The v2 override-row dropdown
+	// lists every binding, so we pass them through here.
+	lmCtx, lmCancel := context.WithTimeout(r.Context(), 3*time.Second)
+	libraryMap := buildLibraryMapData(lmCtx, settings, bindings)
+	lmCancel()
 
 	// Pre-extract values typed-keyed by model.ContentType into plain fields,
 	// so the template can use {{.RootManga}} etc. with no reflection-time
@@ -1169,8 +1180,10 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 	settings.SuwayomiPassword = r.FormValue("suwayomi_password")
 
 	// Parse override rows. Form fields come as override_category_<idx> +
-	// override_library_<idx> pairs (idx is the JS counter, not stable).
-	// Walk r.Form and pick out matching pairs.
+	// override_binding_<idx> pairs (idx is the JS counter, not stable).
+	// Walk r.Form and pick out matching pairs. Plan B v2 renamed the
+	// right-hand field; Task 5 will migrate the persisted target from
+	// SuwayomiCategoryOverrides to SuwayomiCategoryBindings.
 	settings.SuwayomiCategoryOverrides = parseSuwayomiOverrides(r.Form)
 
 	// Validate the rename scheme before persisting. On failure, re-render the

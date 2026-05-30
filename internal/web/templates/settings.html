@@ -223,6 +223,29 @@
     </div>
   </template>
 
+  <!-- Default Binding (Plan B v2) -->
+  <div class="settings-card">
+    <div class="settings-card-header">
+      <p class="settings-card-title">Default Binding</p>
+      <p class="settings-card-desc">When no Suwayomi override and no Classification Rule matches a series, route it here. Leave as <em>Send to Unmatched</em> to hold series for manual classification (safer; matches pre-v2 behaviour).</p>
+    </div>
+    <div class="settings-card-body">
+      <div class="settings-row">
+        <label class="settings-label">Fallback target</label>
+        <div class="settings-input-wrap">
+          {{$defBinding := int64Or .Settings.DefaultBindingID 0}}
+          <select name="default_binding_id">
+            <option value="0"{{if eq $defBinding 0}} selected{{end}}>&mdash; Send to Unmatched &mdash;</option>
+            {{range .Bindings}}<option value="{{.ID}}"{{if eq .ID $defBinding}} selected{{end}}>{{.Name}}</option>{{end}}
+            {{if and (gt $defBinding 0) (not (bindingExists .Bindings $defBinding))}}
+              <option value="{{$defBinding}}" selected>Unknown binding (ID: {{$defBinding}})</option>
+            {{end}}
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Library Roots -->
   <div class="settings-card">
     <div class="settings-card-header">

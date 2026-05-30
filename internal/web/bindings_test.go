@@ -302,6 +302,190 @@ func TestSettingsPageRulesUnknownBindingRendersAsUnknown(t *testing.T) {
 	}
 }
 
+// TestSettingsPageRendersDefaultBindingPicker pins the Default Binding
+// dropdown: lists every binding plus a "— Send to Unmatched —" nil-sentinel,
+// and pre-selects the saved DefaultBindingID.
+func TestSettingsPageRendersDefaultBindingPicker(t *testing.T) {
+	id := int64(2)
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 1, Name: "Manga"},
+			{ID: 2, Name: "Catch-all"},
+		},
+		settings: model.Settings{
+			DefaultBindingID:   &id,
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "Default Binding") {
+		t.Errorf("expected 'Default Binding' label in rendered HTML")
+	}
+	// The Catch-all binding (ID 2) must be the selected option for the
+	// default_binding_id select.
+	if !strings.Contains(body, `value="2" selected`) {
+		t.Errorf("expected DefaultBindingID 2 to be selected; body excerpt:\n%s",
+			excerpt(body, "default_binding_id", 240))
+	}
+	// The nil-sentinel "Send to Unmatched" option must be present.
+	if !strings.Contains(body, "Send to Unmatched") {
+		t.Errorf("expected 'Send to Unmatched' option in Default Binding dropdown")
+	}
+	// Field name pinned for Task 5's POST parser.
+	if !strings.Contains(body, `name="default_binding_id"`) {
+		t.Errorf("expected default_binding_id select field in rendered HTML")
+	}
+}
+
+// TestSettingsPageDefaultBindingDefaultsToUnmatched pins that when no
+// DefaultBindingID is saved the "Send to Unmatched" sentinel is selected.
+func TestSettingsPageDefaultBindingDefaultsToUnmatched(t *testing.T) {
+	st := &fakeStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga"}},
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	// The 0 (Unmatched) sentinel must be selected. Match the option attribute
+	// shape that html/template emits.
+	if !strings.Contains(body, `value="0" selected`) {
+		t.Errorf("expected Unmatched sentinel selected when DefaultBindingID is nil; body excerpt:\n%s",
+			excerpt(body, "default_binding_id", 240))
+	}
+}
+
+// TestSuwayomiOverridesDropdownIncludesAllBindings pins that the right-hand
+// dropdown in the Suwayomi Category Overrides card lists EVERY binding, not
+// just the three primary content-type Kavita libraries (Library Map Plan C
+// reverse-lookup constraint, dissolved by Plan A).
+func TestSuwayomiOverridesDropdownIncludesAllBindings(t *testing.T) {
+	cats := []map[string]any{
+		{"id": 10, "name": "Korean Webtoons", "order": 1},
+	}
+	srv := suwayomiStubServer(t, cats, 0)
+	defer srv.Close()
+
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 1, Name: "Manga"},
+			{ID: 2, Name: "Manga 18+"},
+			// Light Novels is explicitly NON-primary — v1 dropdown would
+			// have filtered this out via overrideLibraryChoices().
+			{ID: 3, Name: "Light Novels"},
+		},
+		settings: model.Settings{
+			SuwayomiBaseURL:  srv.URL,
+			SuwayomiAuthType: model.SuwayomiAuthNone,
+			// Use v1 override map so a row renders (Task 5 migrates the
+			// read-source to SuwayomiCategoryBindings). The widening Task 4
+			// owns is the dropdown's option list, regardless of row source.
+			SuwayomiCategoryOverrides: map[int64]int64{10: 3},
+			// KavitaLibIDsByType non-empty so the override card is NOT
+			// blocked by the "configure AniList first" prompt.
+			KavitaLibIDsByType: map[model.ContentType]int64{model.TypeManga: 1},
+			LibraryRoots:       map[model.ContentType]string{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/suwayomi/categories/fragment", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// Locate the override row's binding-select block — match between the
+	// override_binding_0 select open and the </select> close.
+	start := strings.Index(body, `name="override_binding_0"`)
+	if start < 0 {
+		t.Fatalf("override_binding_0 select missing from fragment; body:\n%s", body)
+	}
+	end := strings.Index(body[start:], "</select>")
+	if end < 0 {
+		t.Fatalf("</select> not found after override_binding_0; body:\n%s", body)
+	}
+	selectBlock := body[start : start+end]
+
+	// All three bindings must appear as <option> labels INSIDE the binding
+	// select — not just elsewhere on the fragment.
+	for _, want := range []string{
+		`>Manga<`,
+		`>Manga 18&#43;<`, // html/template HTML-escapes '+'
+		`>Light Novels<`,  // CRUCIAL: was filtered out in v1
+	} {
+		if !strings.Contains(selectBlock, want) {
+			t.Errorf("expected %q in widened override-row binding dropdown; selectBlock:\n%s",
+				want, selectBlock)
+		}
+	}
+	// And the saved binding (ID 3 = Light Novels) is selected.
+	if !strings.Contains(selectBlock, `value="3" selected`) {
+		t.Errorf("expected binding ID 3 selected in override row; selectBlock:\n%s", selectBlock)
+	}
+}
+
+// TestSuwayomiOverridesFragmentUsesBindingFormFieldName pins the rename from
+// override_library_<idx> to override_binding_<idx>. Task 5 wires the POST
+// parser; this task just renames the template field.
+func TestSuwayomiOverridesFragmentUsesBindingFormFieldName(t *testing.T) {
+	cats := []map[string]any{
+		{"id": 5, "name": "Korean Webtoons", "order": 1},
+	}
+	srv := suwayomiStubServer(t, cats, 0)
+	defer srv.Close()
+
+	st := &fakeStore{
+		bindings: []model.Binding{{ID: 2, Name: "Manhwa"}},
+		settings: model.Settings{
+			SuwayomiBaseURL:  srv.URL,
+			SuwayomiAuthType: model.SuwayomiAuthNone,
+			// v1 override map so a row renders. Task 5 migrates the read
+			// source; Task 4 only renames the right-hand form field.
+			SuwayomiCategoryOverrides: map[int64]int64{5: 2},
+			KavitaLibIDsByType:        map[model.ContentType]int64{model.TypeManga: 1},
+			LibraryRoots:              map[model.ContentType]string{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/suwayomi/categories/fragment", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// New v2 field name MUST be present.
+	if !strings.Contains(body, `name="override_binding_0"`) {
+		t.Errorf("expected override_binding_0 (v2 form-field rename) in fragment; body:\n%s", body)
+	}
+	// Old v1 field name MUST be gone.
+	if strings.Contains(body, `name="override_library_0"`) {
+		t.Errorf("v1 form-field name override_library_0 still present after rename; body:\n%s", body)
+	}
+}
+
 // excerpt returns the substring of s around the first occurrence of needle.
 // Used to make test failures readable when the assertion is "body contains X".
 func excerpt(s, needle string, width int) string {
