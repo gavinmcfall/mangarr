@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gavinmcfall/mangarr/internal/kavita"
 	"github.com/gavinmcfall/mangarr/internal/model"
 )
 
@@ -896,5 +897,163 @@ func TestSettingsPageEmptyBindingsHidesDefaultBindingSelect(t *testing.T) {
 	if strings.Contains(body, `name="default_binding_id"`) {
 		t.Errorf("default_binding_id select should not render when no bindings exist; body excerpt:\n%s",
 			excerpt(body, "Default Binding", 400))
+	}
+}
+
+// TestSettingsPageBindingRowHasColumnLabels pins that each binding row now
+// renders an explicit label above each input ("Library Name", "Library Path",
+// "Kavita Library", "18+") so the form is self-describing — Gavin's feedback
+// after Plan B shipped was that the unlabelled stack of inputs left him
+// guessing which field was which.
+func TestSettingsPageBindingRowHasColumnLabels(t *testing.T) {
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 7, Name: "Manga", LibraryRoot: "/media/Library/Manga", KavitaLibID: 1},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	for _, want := range []string{"Library Name", "Library Path", "Kavita Library"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected column label %q in binding row; body excerpt:\n%s",
+				want, excerpt(body, "binding_name_7", 600))
+		}
+	}
+	if !strings.Contains(body, "binding-field-label") {
+		t.Errorf("expected '.binding-field-label' class on per-field labels (CSS hook)")
+	}
+}
+
+// TestSettingsPageBindingRowHasBrowseButton pins the Browse-from-path
+// button on the Library Path input — same affordance as Download Roots —
+// so users don't have to type filesystem paths blind. Removed from the
+// v1 sections by Task 8; restored here for the Bindings card.
+func TestSettingsPageBindingRowHasBrowseButton(t *testing.T) {
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 9, Name: "Manga", LibraryRoot: "/media/Library/Manga"},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, `id="binding_library_root_9"`) {
+		t.Errorf("expected id=\"binding_library_root_9\" on the path input so Browse can find it; body excerpt:\n%s",
+			excerpt(body, "binding_library_root_9", 600))
+	}
+	if !strings.Contains(body, `target: "binding_library_root_9"`) {
+		t.Errorf("expected Browse hx-vals to target binding_library_root_9; body excerpt:\n%s",
+			excerpt(body, "binding_library_root_9", 800))
+	}
+	if !strings.Contains(body, `hx-get="/api/browse/fragment"`) {
+		t.Errorf("expected /api/browse/fragment hx-get in the binding row")
+	}
+}
+
+// TestSettingsPageBindingRowDeleteIsInRowHeader pins that the delete X has
+// moved out of the same flex container as the 18+ checkbox — Gavin reported
+// they read as related at a glance. The card-style row now puts delete in
+// its own header band, visually separated from the input grid that holds
+// the 18+ checkbox.
+func TestSettingsPageBindingRowDeleteIsInRowHeader(t *testing.T) {
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 11, Name: "Manga", LibraryRoot: "/x"},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "binding-row-header") {
+		t.Fatalf("expected .binding-row-header band in the rendered card")
+	}
+	// Find the binding-row-card for ID 11 and check the X button sits
+	// inside the .binding-row-header, NOT inside the input grid where the
+	// 18+ checkbox lives.
+	cardStart := strings.Index(body, `data-binding-id="11"`)
+	if cardStart < 0 {
+		t.Fatalf("binding card for ID 11 not found")
+	}
+	cardEnd := strings.Index(body[cardStart:], `</div></div>`)
+	if cardEnd < 0 {
+		cardEnd = len(body) - cardStart
+	}
+	cardHTML := body[cardStart : cardStart+cardEnd]
+	headerIdx := strings.Index(cardHTML, "binding-row-header")
+	gridIdx := strings.Index(cardHTML, "binding-row-grid")
+	deleteIdx := strings.Index(cardHTML, "binding-delete")
+	if headerIdx < 0 || gridIdx < 0 || deleteIdx < 0 {
+		t.Fatalf("expected header, grid, delete in card; got header=%d grid=%d delete=%d", headerIdx, gridIdx, deleteIdx)
+	}
+	if !(deleteIdx > headerIdx && deleteIdx < gridIdx) {
+		t.Errorf("expected binding-delete inside .binding-row-header (between header and grid); got positions header=%d delete=%d grid=%d",
+			headerIdx, deleteIdx, gridIdx)
+	}
+}
+
+// TestSettingsPageBindingKavitaDropdownShowsFolders pins that when the
+// Kavita /api/Library/Libraries response carried `folders` for a library,
+// the binding-row dropdown both DISPLAYS the path next to the name and
+// carries it on a data-folder attribute the auto-fill JS reads.
+func TestSettingsPageBindingKavitaDropdownShowsFolders(t *testing.T) {
+	libs := []kavita.Library{
+		{ID: 1, Name: "Manga", Type: 0, Folders: []string{"/media/Library/Books/Manga"}},
+		{ID: 4, Name: "Manga 18+", Type: 0, Folders: []string{"/media/Library/Books/Adult/Manga"}},
+		{ID: 7, Name: "No-Folder", Type: 0},
+	}
+	srv := kavitaStubServer(t, libs, 0, 0)
+	defer srv.Close()
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 1, Name: "Manga", LibraryRoot: "/media/Library/Books/Manga", KavitaLibID: 1},
+		},
+		settings: model.Settings{KavitaBaseURL: srv.URL, KavitaAPIKey: "stubkey"},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	// Display text includes the folder path after an em-dash.
+	if !strings.Contains(body, "Manga &mdash; /media/Library/Books/Manga") {
+		t.Errorf("expected Kavita dropdown to show 'Manga &mdash; /media/Library/Books/Manga'; body excerpt:\n%s",
+			excerpt(body, "binding_kavita_lib_1", 1200))
+	}
+	if !strings.Contains(body, `data-folder="/media/Library/Books/Manga"`) {
+		t.Errorf("expected data-folder='/media/Library/Books/Manga' on the dropdown option")
+	}
+	if !strings.Contains(body, `data-folder="/media/Library/Books/Adult/Manga"`) {
+		t.Errorf("expected data-folder on the Manga 18+ option")
+	}
+	// Libraries without folders carry an empty data-folder so the JS
+	// auto-fill no-ops instead of writing the literal string "undefined".
+	if !strings.Contains(body, `data-folder=""`) {
+		t.Errorf("expected data-folder=\"\" on options with no folder")
+	}
+}
+
+// TestSettingsPageHasKavitaAutoFillJS pins the JS auto-fill hook on the
+// page. Without this, the dropdown's onchange handler is a no-op and the
+// user has to copy-paste the path manually.
+func TestSettingsPageHasKavitaAutoFillJS(t *testing.T) {
+	h, _, _ := newTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "fillBindingRootFromKavita") {
+		t.Errorf("expected window.fillBindingRootFromKavita JS handler in /settings response")
 	}
 }

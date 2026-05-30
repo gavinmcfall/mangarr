@@ -840,3 +840,78 @@ input[type="number"].input-narrow {
 .override-delete {
   margin-left: auto;
 }
+
+/* ── Library Bindings card (Plan B v2) ────────────────────────── */
+.binding-row-card {
+  background: #25262a;
+  border: 1px solid #3a3c40;
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.binding-row-card:last-child {
+  margin-bottom: 0;
+}
+.binding-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #3a3c40;
+}
+.binding-row-title {
+  font-weight: 600;
+  color: #e7e8eb;
+  font-size: 13px;
+}
+.binding-row-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
+}
+.binding-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: default;
+}
+.binding-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #9ba1aa;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.binding-adult {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: end;
+  padding-bottom: 8px;
+  font-size: 13px;
+  color: #cfd2d6;
+  cursor: pointer;
+  user-select: none;
+}
+.binding-adult input[type="checkbox"] {
+  width: auto;
+  display: inline-block;
+  margin: 0;
+}
+.binding-delete {
+  background: transparent;
+  border: 1px solid #4a3236;
+  color: #e57373;
+  padding: 4px 8px;
+}
+.binding-delete:hover {
+  background: #3a2226;
+  color: #ef9a9a;
+}
+@media (max-width: 640px) {
+  .binding-row-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -363,6 +363,17 @@ func templateFuncs() template.FuncMap {
 			}
 			return true
 		},
+		// kavitaLibFirstFolder returns the first on-disk folder Kavita
+		// reports for the library, or "" when the API returned none. The
+		// Library Bindings card shows it next to the library name in the
+		// dropdown and passes it through data-folder for the JS auto-fill
+		// of LibraryRoot.
+		"kavitaLibFirstFolder": func(lib kavita.Library) string {
+			if len(lib.Folders) == 0 {
+				return ""
+			}
+			return lib.Folders[0]
+		},
 		// deref nil-safely dereferences a *bool, returning false for nil.
 		// Used by rule-rows.html to compare a rule's IsAdult condition
 		// pointer against a yes/no <option> value without exploding on nil.
