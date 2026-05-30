@@ -847,3 +847,54 @@ func TestSettingsPageNoLongerRendersV1KavitaLibrariesSection(t *testing.T) {
 		t.Errorf("v1 'Default: AniList Classification' subcard title still present")
 	}
 }
+
+// Plan B Task 9: when no bindings are configured the Settings page must
+// surface a directive empty-state prompt pointing the user at the
+// + Add Binding affordance. The user has nothing to classify into, so
+// configuring a binding is the obvious first step.
+func TestSettingsPageEmptyBindingsShowsConfigurePrompt(t *testing.T) {
+	h, _, _ := newTestHandler() // fixture has zero bindings
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "configure at least one binding") &&
+		!strings.Contains(body, "first library destination") {
+		t.Errorf("expected empty-bindings configure prompt; body excerpt:\n%s",
+			excerpt(body, "Library Bindings", 400))
+	}
+}
+
+// Plan B Task 9: when no bindings are configured the Classification Rules
+// card's + Add Rule affordance must not render. Rules need a target
+// binding to route to, so offering the affordance is a dead-end UX.
+func TestSettingsPageEmptyBindingsHidesAddRuleAffordance(t *testing.T) {
+	h, _, _ := newTestHandler() // fixture has zero bindings
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if strings.Contains(body, "+ Add Rule") {
+		t.Errorf("'+ Add Rule' should not render when no bindings are configured; body excerpt:\n%s",
+			excerpt(body, "Classification Rules", 400))
+	}
+}
+
+// Plan B Task 9: when no bindings are configured the Default Binding
+// picker's <select name="default_binding_id"> must not render. With
+// nothing to choose from, the picker is a dead-end UX; an empty-state
+// directive replaces it.
+func TestSettingsPageEmptyBindingsHidesDefaultBindingSelect(t *testing.T) {
+	h, _, _ := newTestHandler() // fixture has zero bindings
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if strings.Contains(body, `name="default_binding_id"`) {
+		t.Errorf("default_binding_id select should not render when no bindings exist; body excerpt:\n%s",
+			excerpt(body, "Default Binding", 400))
+	}
+}

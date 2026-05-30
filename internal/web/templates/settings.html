@@ -128,7 +128,10 @@
         {{template "binding-rows" .}}
       </div>
       {{if not .Bindings}}
-      <p class="empty-state" style="margin:8px 0 0 0;">No bindings configured. Click <b>+ Add Binding</b> above to create your first library destination.</p>
+      <div class="empty-state" style="margin:8px 0 0 0;">
+        <p><b>No bindings configured.</b></p>
+        <p>To start using mangarr, configure at least one binding to define your first library destination. Click <b>+ Add Binding</b> above.</p>
+      </div>
       {{end}}
     </div>
   </div>
@@ -162,14 +165,18 @@
         <p class="settings-card-title">Classification Rules</p>
         <p class="settings-card-desc">Rules are evaluated ascending by <em>Priority</em> (lower number = higher precedence). The first matching rule routes the series to its target binding. Conditions are AND-semantics; leave any field as <em>Any</em> to skip that constraint.</p>
       </div>
-      <button type="button" class="btn-sm" onclick="addRuleRow()">+ Add Rule</button>
+      {{if .Bindings}}<button type="button" class="btn-sm" onclick="addRuleRow()">+ Add Rule</button>{{end}}
     </div>
     <div class="settings-card-body">
-      <div id="rule-rows-body">
-        {{template "rule-rows" .}}
-      </div>
-      {{if not .Rules}}
-      <p class="empty-state" style="margin:8px 0 0 0;">No rules configured. Click <b>+ Add Rule</b> above to define how series get classified.</p>
+      {{if .Bindings}}
+        <div id="rule-rows-body">
+          {{template "rule-rows" .}}
+        </div>
+        {{if not .Rules}}
+        <p class="empty-state" style="margin:8px 0 0 0;">No rules configured. Click <b>+ Add Rule</b> above to define how series get classified.</p>
+        {{end}}
+      {{else}}
+        <p class="empty-state" style="margin:8px 0 0 0;">Configure at least one binding above before adding classification rules — rules need a target binding to route to.</p>
       {{end}}
     </div>
   </div>
@@ -230,6 +237,7 @@
       <p class="settings-card-desc">When no Suwayomi override and no Classification Rule matches a series, route it here. Leave as <em>Send to Unmatched</em> to hold series for manual classification (safer; matches pre-v2 behaviour).</p>
     </div>
     <div class="settings-card-body">
+      {{if .Bindings}}
       <div class="settings-row">
         <label class="settings-label">Fallback target</label>
         <div class="settings-input-wrap">
@@ -243,6 +251,9 @@
           </select>
         </div>
       </div>
+      {{else}}
+      <p class="empty-state" style="margin:8px 0 0 0;">Configure at least one binding above to enable a default-binding fallback.</p>
+      {{end}}
     </div>
   </div>
 
