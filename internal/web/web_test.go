@@ -35,6 +35,9 @@ type fakeStore struct {
 	saveErr   error
 	// track SetSeriesType calls
 	setTypeCalls []setTypeCall
+	// Plan B: v2 data model
+	bindings []model.Binding
+	rules    []model.ClassificationRule
 }
 
 type setTypeCall struct {
@@ -71,6 +74,8 @@ func (f *fakeStore) SetSeriesType(id int64, ct model.ContentType) error {
 	}
 	return nil
 }
+func (f *fakeStore) ListBindings() ([]model.Binding, error)            { return f.bindings, nil }
+func (f *fakeStore) ListRules() ([]model.ClassificationRule, error)    { return f.rules, nil }
 
 // fakeRunner records RunOnce calls.
 type fakeRunner struct{ called int }

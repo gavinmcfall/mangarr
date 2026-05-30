@@ -31,6 +31,8 @@
 //	GET  /api/backups/{name}         → Download a backup file
 //	GET  /api/kavita/libraries       → JSON list of Kavita libraries
 //	GET  /api/kavita/libraries/fragment → HTMX HTML fragment: three library <select> elements
+//	GET  /api/bindings                → JSON list of Library Bindings (Plan B v2)
+//	GET  /api/rules                   → JSON list of Classification Rules ordered ascending by priority (Plan B v2)
 //	GET  /metrics                    → Prometheus metrics (text/plain; version=0.0.4)
 //	GET  /static/*                   → Embedded static assets (htmx.min.js)
 package web
@@ -87,6 +89,8 @@ type Store interface {
 	GetSettings() (model.Settings, error)
 	SaveSettings(model.Settings) error
 	SetSeriesType(id int64, ct model.ContentType) error
+	ListBindings() ([]model.Binding, error)
+	ListRules() ([]model.ClassificationRule, error)
 }
 
 // Runner can execute one poll pass on demand.
@@ -250,6 +254,10 @@ func NewHandler(opts HandlerOpts) *Handler {
 	h.mux.HandleFunc("GET /api/suwayomi/test", h.apiSuwayomiTest)
 	h.mux.HandleFunc("GET /api/suwayomi/categories", h.apiSuwayomiCategories)
 	h.mux.HandleFunc("GET /api/suwayomi/categories/fragment", h.apiSuwayomiCategoriesFragment)
+
+	// Library Bindings v2 read-only JSON endpoints (Plan B)
+	h.mux.HandleFunc("GET /api/bindings", h.apiBindings)
+	h.mux.HandleFunc("GET /api/rules", h.apiRules)
 
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
