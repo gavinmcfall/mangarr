@@ -19,6 +19,10 @@ type Library struct {
 	Name string `json:"name"`
 	Type int    `json:"type"` // Kavita's LibraryType enum
 	// (0=Manga, 1=Comic, 2=Book, 3=Image, 4=LightNovel, 5=ComicVine)
+	// Folders is the on-disk locations Kavita scans for this library.
+	// Used by the Library Bindings UI to populate the LibraryRoot field
+	// when the operator picks a Kavita library from the dropdown.
+	Folders []string `json:"folders"`
 }
 
 // Client authenticates against Kavita's plugin API and triggers library scans.

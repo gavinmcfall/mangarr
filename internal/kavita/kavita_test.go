@@ -79,7 +79,7 @@ func TestListLibrariesReturnsSorted(t *testing.T) {
 				t.Errorf("missing bearer token on /api/Library")
 			}
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`[{"id":3,"name":"Zebra","type":0},{"id":1,"name":"Apple","type":0},{"id":2,"name":"Mango","type":0}]`))
+			w.Write([]byte(`[{"id":3,"name":"Zebra","type":0,"folders":["/media/Library/Zebra"]},{"id":1,"name":"Apple","type":0,"folders":["/media/Library/Apple"]},{"id":2,"name":"Mango","type":0,"folders":[]}]`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -100,6 +100,17 @@ func TestListLibrariesReturnsSorted(t *testing.T) {
 	}
 	if libs[0].ID != 1 || libs[1].ID != 2 || libs[2].ID != 3 {
 		t.Fatalf("IDs not preserved after sort: want [1,2,3], got [%d,%d,%d]", libs[0].ID, libs[1].ID, libs[2].ID)
+	}
+	// Folders are parsed and preserved through sort. Apple has one folder,
+	// Mango has an explicit empty slice from the API.
+	if len(libs[0].Folders) != 1 || libs[0].Folders[0] != "/media/Library/Apple" {
+		t.Errorf("Apple folders: want [/media/Library/Apple], got %v", libs[0].Folders)
+	}
+	if len(libs[1].Folders) != 0 {
+		t.Errorf("Mango folders: want empty, got %v", libs[1].Folders)
+	}
+	if len(libs[2].Folders) != 1 || libs[2].Folders[0] != "/media/Library/Zebra" {
+		t.Errorf("Zebra folders: want [/media/Library/Zebra], got %v", libs[2].Folders)
 	}
 }
 

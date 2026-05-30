@@ -137,23 +137,49 @@
   </div>
 
   <template id="binding-row-template">
-    <div class="settings-row binding-row" data-binding-id="0">
+    <div class="binding-row-card" data-binding-id="0">
       <input type="hidden" name="binding_id___NEW_IDX__" value="0">
-      <div class="settings-input-wrap binding-row-fields">
-        <input type="text" name="binding_name___NEW_IDX__" value=""
-          placeholder="Name (e.g. Manga, Manhwa 18+)" class="binding-name">
-        <input type="text" name="binding_library_root___NEW_IDX__" value=""
-          placeholder="/media/Library/..." class="binding-root">
-        <select name="binding_kavita_lib___NEW_IDX__" class="binding-kavita">
-          <option value="0">(none)</option>
-          {{range .KavitaLibraries}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
-        </select>
+      <div class="binding-row-header">
+        <span class="binding-row-title">New binding</span>
+        <button type="button" class="btn-sm binding-delete"
+          onclick="this.closest('.binding-row-card').remove()"
+          title="Delete binding">&#x2715;</button>
+      </div>
+      <div class="binding-row-grid">
+        <label class="binding-field">
+          <span class="binding-field-label">Library Name</span>
+          <input type="text" name="binding_name___NEW_IDX__" value=""
+            placeholder="Manga, Manhwa 18+, …" class="binding-name">
+        </label>
+        <label class="binding-field">
+          <span class="binding-field-label">Library Path</span>
+          <div class="settings-input-with-browse">
+            <input type="text" name="binding_library_root___NEW_IDX__"
+              id="binding_library_root___NEW_IDX__" value=""
+              placeholder="/media/Library/…" class="binding-root">
+            <button type="button" class="btn-browse" title="Browse filesystem"
+              hx-get="/api/browse/fragment"
+              hx-vals='js:{path: document.getElementById("binding_library_root___NEW_IDX__").value || "/media", target: "binding_library_root___NEW_IDX__"}'
+              hx-target="#browse-modal-body"
+              hx-swap="innerHTML"
+              onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>
+              Browse
+            </button>
+          </div>
+        </label>
+        <label class="binding-field">
+          <span class="binding-field-label">Kavita Library</span>
+          <select name="binding_kavita_lib___NEW_IDX__" class="binding-kavita"
+            onchange="window.fillBindingRootFromKavita && window.fillBindingRootFromKavita(this)">
+            <option value="0" data-folder="">(none)</option>
+            {{range .KavitaLibraries}}<option value="{{.ID}}" data-folder="{{kavitaLibFirstFolder .}}">{{.Name}}{{with kavitaLibFirstFolder .}} &mdash; {{.}}{{end}}</option>{{end}}
+          </select>
+        </label>
         <label class="binding-adult">
           <input type="checkbox" name="binding_default_is_adult___NEW_IDX__">
-          18+
+          <span>18+</span>
         </label>
-        <button type="button" class="btn-sm binding-delete"
-          onclick="this.closest('.binding-row').remove()" title="Delete binding">&#x2715;</button>
       </div>
     </div>
   </template>
@@ -531,6 +557,30 @@
     wrapper.innerHTML = wrapper.innerHTML.replaceAll('__NEW_IDX__', idx);
     while (wrapper.firstChild) {
       body.appendChild(wrapper.firstChild);
+    }
+    if (window.htmx) { htmx.process(body); }
+  };
+
+  // When the user picks a Kavita library, auto-fill the row's Library Path
+  // from the option's data-folder (Kavita's first folder). Only overwrites
+  // an empty path so a user-typed value isn't clobbered. Also updates the
+  // row title visually for new (unnamed) rows.
+  window.fillBindingRootFromKavita = function(selectEl) {
+    if (!selectEl) { return; }
+    var card = selectEl.closest('.binding-row-card');
+    if (!card) { return; }
+    var opt = selectEl.options[selectEl.selectedIndex];
+    var folder = opt ? (opt.getAttribute('data-folder') || '') : '';
+    if (folder) {
+      var pathInput = card.querySelector('.binding-root');
+      if (pathInput && !pathInput.value) {
+        pathInput.value = folder;
+      }
+      var nameInput = card.querySelector('.binding-name');
+      var title = card.querySelector('.binding-row-title');
+      if (title && nameInput && !nameInput.value) {
+        title.textContent = opt.textContent.split(' — ')[0] || opt.textContent;
+      }
     }
   };
 })();
