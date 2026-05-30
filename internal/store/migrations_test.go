@@ -103,3 +103,54 @@ func TestRunMigrationsRollsBackOnFailure(t *testing.T) {
 		t.Fatalf("expected version 2 NOT to be recorded after rollback, found %d rows", count)
 	}
 }
+
+func TestMigration1CreatesBindingsAndRulesTables(t *testing.T) {
+	db := freshDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	for _, table := range []string{"bindings", "classification_rules"} {
+		var name string
+		err := db.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table,
+		).Scan(&name)
+		if err != nil {
+			t.Fatalf("table %q not created: %v", table, err)
+		}
+	}
+}
+
+func TestMigration1BindingsTableShape(t *testing.T) {
+	db := freshDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	rows, err := db.Query(`PRAGMA table_info(bindings)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(bindings): %v", err)
+	}
+	defer rows.Close()
+	got := make(map[string]string)
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan column info: %v", err)
+		}
+		got[name] = ctype
+	}
+	want := map[string]string{
+		"id":               "INTEGER",
+		"name":             "TEXT",
+		"library_root":     "TEXT",
+		"kavita_lib_id":    "INTEGER",
+		"default_is_adult": "INTEGER",
+	}
+	for col, ctype := range want {
+		if got[col] != ctype {
+			t.Errorf("bindings column %s: want type %q, got %q", col, ctype, got[col])
+		}
+	}
+}

@@ -18,7 +18,9 @@ type migration struct {
 // migrations is the authoritative ordered list. Append new migrations to
 // the end; never renumber. Tests may stub this list via the package-private
 // variable.
-var migrations = []migration{}
+var migrations = []migration{
+	{1, "init-bindings-and-rules", migrateInitBindingsAndRules},
+}
 
 // runMigrations creates the schema_versions table if missing, then applies
 // every migration whose version is not yet recorded, in ascending order.
@@ -47,11 +49,15 @@ func runMigrations(db *sql.DB) error {
 			return fmt.Errorf("begin tx for migration %d %q: %w", m.version, m.name, err)
 		}
 		if err := m.apply(tx); err != nil {
-			tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil {
+				log.Printf("store: rollback migration %d %q: %v", m.version, m.name, rbErr)
+			}
 			return fmt.Errorf("apply migration %d %q: %w", m.version, m.name, err)
 		}
 		if _, err := tx.Exec(`INSERT INTO schema_versions (version, name) VALUES (?, ?)`, m.version, m.name); err != nil {
-			tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil {
+				log.Printf("store: rollback migration %d %q: %v", m.version, m.name, rbErr)
+			}
 			return fmt.Errorf("record migration %d %q: %w", m.version, m.name, err)
 		}
 		if err := tx.Commit(); err != nil {
