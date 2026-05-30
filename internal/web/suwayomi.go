@@ -100,10 +100,15 @@ func sanitiseSuwayomiError(err error, s model.Settings) string {
 }
 
 // parseSuwayomiOverrides walks a parsed form and assembles the override map
-// from override_category_<idx> + override_library_<idx> pairs. Indices need
+// from override_category_<idx> + override_binding_<idx> pairs. Indices need
 // not be contiguous — JS may have removed rows mid-edit. Any pair with a
-// zero/empty category OR library ID is dropped (the "Add" → "Delete"
+// zero/empty category OR binding ID is dropped (the "Add" → "Delete"
 // lifecycle saves clean state without JS having to scrub hidden inputs).
+//
+// Plan B Task 5 changed the write target in saveSettings to
+// SuwayomiCategoryBindings (v2 — values are Library Binding IDs); this
+// parser is field-name-keyed (override_binding_<idx>) and routing-target-
+// agnostic. Caller chooses which Settings map to assign the result into.
 //
 // Returns nil when no valid overrides are found, so the round-trip JSON
 // stays compact when the feature is unused.
@@ -118,7 +123,7 @@ func parseSuwayomiOverrides(form map[string][]string) map[int64]int64 {
 	// Index field names by suffix so we can pair them up regardless of
 	// which JS-counter idx was used.
 	cats := map[string]string{}
-	libs := map[string]string{}
+	bindings := map[string]string{}
 	for k, vs := range form {
 		if len(vs) == 0 {
 			continue
@@ -126,8 +131,8 @@ func parseSuwayomiOverrides(form map[string][]string) map[int64]int64 {
 		switch {
 		case strings.HasPrefix(k, "override_category_"):
 			cats[strings.TrimPrefix(k, "override_category_")] = vs[0]
-		case strings.HasPrefix(k, "override_library_"):
-			libs[strings.TrimPrefix(k, "override_library_")] = vs[0]
+		case strings.HasPrefix(k, "override_binding_"):
+			bindings[strings.TrimPrefix(k, "override_binding_")] = vs[0]
 		}
 	}
 	// Collect the suffix keys and sort them with a numeric-aware comparator
@@ -155,7 +160,7 @@ func parseSuwayomiOverrides(form map[string][]string) map[int64]int64 {
 
 	out := map[int64]int64{}
 	for _, idx := range keys {
-		libRaw, ok := libs[idx]
+		bindingRaw, ok := bindings[idx]
 		if !ok {
 			continue
 		}
@@ -163,14 +168,14 @@ func parseSuwayomiOverrides(form map[string][]string) map[int64]int64 {
 		if err != nil || catID <= 0 {
 			continue
 		}
-		libID, err := strconv.ParseInt(strings.TrimSpace(libRaw), 10, 64)
-		if err != nil || libID <= 0 {
+		bindingID, err := strconv.ParseInt(strings.TrimSpace(bindingRaw), 10, 64)
+		if err != nil || bindingID <= 0 {
 			continue
 		}
 		// LAST-INDEX-WINS: later-index rows overwrite earlier rows that
 		// reference the same Suwayomi category. Plain map assignment
 		// achieves this because we walk indices in ascending order.
-		out[catID] = libID
+		out[catID] = bindingID
 	}
 	if len(out) == 0 {
 		return nil
@@ -241,6 +246,12 @@ type libraryMapData struct {
 	SuwayomiCategories []suwayomi.Category
 	OverrideLibChoices []overrideLibraryChoice
 	OverrideRows       []overrideRowView
+	// Bindings carries every v2 Library Binding for the override row's
+	// right-hand dropdown. Plan B widens the dropdown from "3 primary
+	// content-type Kavita libraries" (the Library Map Plan C constraint
+	// dissolved by Plan A) to every persisted binding. The fragment
+	// endpoint and /settings both populate this from store.ListBindings.
+	Bindings []model.Binding
 	// OverrideUnconfigured is true when KavitaLibIDsByType is empty →
 	// override card renders the "configure AniList first" prompt and no
 	// rows.
@@ -263,8 +274,8 @@ type libraryMapData struct {
 // bounded by the supplied context. Errors are surfaced via OverrideError /
 // OverrideSuwayomiUnconfigured rather than returned, so the caller can
 // always render the card even when the upstreams are down.
-func buildLibraryMapData(ctx context.Context, settings model.Settings) libraryMapData {
-	out := libraryMapData{}
+func buildLibraryMapData(ctx context.Context, settings model.Settings, bindings []model.Binding) libraryMapData {
+	out := libraryMapData{Bindings: bindings}
 	libChoices := overrideLibraryChoices(settings)
 
 	// Empty KavitaLibIDsByType = nothing to route to. Render the
@@ -321,7 +332,12 @@ func (h *Handler) apiSuwayomiCategoriesFragment(w http.ResponseWriter, r *http.R
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	data := buildLibraryMapData(ctx, settings)
+	// Best-effort: a binding-load error here renders the override card with
+	// an empty Bindings slice (dropdown gets only "(select binding)"). The
+	// fragment must never fail-hard on a store glitch — the card still has
+	// useful diagnostic output even with an empty dropdown.
+	bindings, _ := h.store.ListBindings()
+	data := buildLibraryMapData(ctx, settings, bindings)
 	if err := h.renderTemplate(w, "override-fragment", "override-fragment", data); err != nil {
 		fmt.Fprintf(w, `<div class="form-error">render error: %s</div>`, html(err.Error()))
 	}

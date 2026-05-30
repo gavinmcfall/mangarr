@@ -1,6 +1,6 @@
 {{define "override-rows"}}
 {{$cats := .SuwayomiCategories}}
-{{$libs := .OverrideLibChoices}}
+{{$bindings := .Bindings}}
 <div class="override-rows" id="override-rows-body">
 {{range .OverrideRows}}
   <div class="settings-row override-row" data-idx="{{.Index}}">
@@ -14,10 +14,13 @@
     </div>
     <span class="override-arrow">&rarr;</span>
     <div class="settings-input-wrap">
-      <select name="override_library_{{.Index}}">
-        <option value="0">(select library)</option>
-        {{$savedLib := .LibID}}
-        {{range $libs}}<option value="{{.ID}}"{{if eq .ID $savedLib}} selected{{end}}>{{.Label}}</option>{{end}}
+      <select name="override_binding_{{.Index}}">
+        <option value="0">(select binding)</option>
+        {{$savedBinding := .LibID}}
+        {{range $bindings}}<option value="{{.ID}}"{{if eq .ID $savedBinding}} selected{{end}}>{{.Name}}</option>{{end}}
+        {{if and (gt $savedBinding 0) (not (bindingExists $bindings $savedBinding))}}
+          <option value="{{$savedBinding}}" selected>Unknown binding (ID: {{$savedBinding}})</option>
+        {{end}}
       </select>
     </div>
     {{if .ContentType}}<span class="override-badge pill pill-{{.ContentType | lower}}">{{.ContentType}}</span>{{else if gt .LibID 0}}<span class="override-badge pill pill-error">unmapped</span>{{end}}
@@ -39,9 +42,9 @@
     </div>
     <span class="override-arrow">&rarr;</span>
     <div class="settings-input-wrap">
-      <select name="override_library___IDX__">
-        <option value="0">(select library)</option>
-        {{range $libs}}<option value="{{.ID}}">{{.Label}}</option>{{end}}
+      <select name="override_binding___IDX__">
+        <option value="0">(select binding)</option>
+        {{range $bindings}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
       </select>
     </div>
     <button type="button" class="btn-sm override-delete" onclick="this.closest('.override-row').remove()">&#x2715;</button>

@@ -184,32 +184,11 @@ func TestSettingsPageHasLibraryMapHeading(t *testing.T) {
 	if !strings.Contains(body, "Library Map") {
 		t.Errorf("'Library Map' section heading missing")
 	}
-	// And the AniList sub-card MUST appear inside it.
-	if !strings.Contains(body, "Default: AniList Classification") {
-		t.Errorf("'Default: AniList Classification' sub-card heading missing")
-	}
+	// Plan B Task 8: the v1 "Default: AniList Classification" sub-card is gone
+	// — Bindings + Classification Rules + Default Binding cover that surface
+	// now. The Suwayomi Category Overrides sub-card remains inside Library Map.
 	if !strings.Contains(body, "Suwayomi Category Overrides") {
 		t.Errorf("'Suwayomi Category Overrides' sub-card heading missing")
-	}
-}
-
-// ---- Truth statement: Library Map contains two sub-cards in the right order.
-
-func TestLibraryMapSubcardOrdering(t *testing.T) {
-	h := newSuwayomiHandler("", nil, map[model.ContentType]int64{
-		model.TypeManga: 1, model.TypeManhwa: 2, model.TypeManhua: 3,
-	})
-	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	body := rr.Body.String()
-	idxAniList := strings.Index(body, "Default: AniList Classification")
-	idxOverrides := strings.Index(body, "Suwayomi Category Overrides")
-	if idxAniList < 0 || idxOverrides < 0 {
-		t.Fatalf("both sub-cards must be present (anilist=%d override=%d)", idxAniList, idxOverrides)
-	}
-	if idxOverrides < idxAniList {
-		t.Fatalf("Suwayomi Category Overrides sub-card appears BEFORE Default AniList — want AniList first (Plan B carry-forward)")
 	}
 }
 
@@ -235,8 +214,9 @@ func TestOverrideRowsHaveDropdownsAndDelete(t *testing.T) {
 	if !strings.Contains(body, `name="override_category_0"`) {
 		t.Errorf("override_category select missing from fragment; body:\n%s", body)
 	}
-	if !strings.Contains(body, `name="override_library_0"`) {
-		t.Errorf("override_library select missing from fragment; body:\n%s", body)
+	// Plan B v2 renamed override_library_<idx> → override_binding_<idx>.
+	if !strings.Contains(body, `name="override_binding_0"`) {
+		t.Errorf("override_binding select missing from fragment; body:\n%s", body)
 	}
 	if !strings.Contains(body, "override-delete") {
 		t.Errorf("delete affordance missing from override row; body:\n%s", body)
@@ -255,6 +235,14 @@ func TestSaveSettingsPersistsOverrideRows(t *testing.T) {
 			LibraryRoots:       map[model.ContentType]string{},
 			KavitaLibIDsByType: map[model.ContentType]int64{model.TypeManga: 1, model.TypeManhwa: 2},
 		},
+		// Seed bindings that the override rows below reference. Task 6's
+		// validateBindingsNotReferenced rejects POSTs that drop bindings
+		// still referenced by overrides, so we must also submit these
+		// rows back in the form below.
+		bindings: []model.Binding{
+			{ID: 1, Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1},
+			{ID: 2, Name: "Manhwa", LibraryRoot: "/m/w", KavitaLibID: 2},
+		},
 	}
 	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
 
@@ -266,14 +254,25 @@ func TestSaveSettingsPersistsOverrideRows(t *testing.T) {
 		"suwayomi_auth_type":     {"basic"},
 		"suwayomi_username":      {"admin"},
 		"suwayomi_password":      {"test-placeholder-pw"},
+		// Submit the seeded bindings so Task 6's validateBindingsNotReferenced
+		// doesn't reject (overrides below reference IDs 1 and 2).
+		"binding_id_keep1":           {"1"},
+		"binding_name_keep1":         {"Manga"},
+		"binding_library_root_keep1": {"/m/a"},
+		"binding_kavita_lib_keep1":   {"1"},
+		"binding_id_keep2":           {"2"},
+		"binding_name_keep2":         {"Manhwa"},
+		"binding_library_root_keep2": {"/m/w"},
+		"binding_kavita_lib_keep2":   {"2"},
+		// Plan B v2 renamed override_library_<idx> → override_binding_<idx>.
 		"override_category_0":    {"5"},
-		"override_library_0":     {"2"},
+		"override_binding_0":     {"2"},
 		"override_category_1":    {"7"},
-		"override_library_1":     {"1"},
+		"override_binding_1":     {"1"},
 		"override_category_2":    {"0"}, // dropped: empty category
-		"override_library_2":     {"3"},
+		"override_binding_2":     {"3"},
 		"override_category_3":    {"9"},
-		"override_library_3":     {"0"}, // dropped: empty library
+		"override_binding_3":     {"0"}, // dropped: empty binding
 	}
 	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -294,14 +293,16 @@ func TestSaveSettingsPersistsOverrideRows(t *testing.T) {
 	if st.settings.SuwayomiPassword != "test-placeholder-pw" {
 		t.Errorf("Suwayomi password not persisted; got %q", st.settings.SuwayomiPassword)
 	}
-	if got := st.settings.SuwayomiCategoryOverrides; len(got) != 2 {
+	// Plan B Task 5: POST writes the v2 SuwayomiCategoryBindings map, not the
+	// legacy v1 SuwayomiCategoryOverrides. Values are Library Binding IDs.
+	if got := st.settings.SuwayomiCategoryBindings; len(got) != 2 {
 		t.Fatalf("want exactly 2 overrides persisted (rows with both fields populated), got %d: %+v", len(got), got)
 	}
-	if st.settings.SuwayomiCategoryOverrides[5] != 2 {
-		t.Errorf("want overrides[5]=2, got %d", st.settings.SuwayomiCategoryOverrides[5])
+	if st.settings.SuwayomiCategoryBindings[5] != 2 {
+		t.Errorf("want overrides[5]=2, got %d", st.settings.SuwayomiCategoryBindings[5])
 	}
-	if st.settings.SuwayomiCategoryOverrides[7] != 1 {
-		t.Errorf("want overrides[7]=1, got %d", st.settings.SuwayomiCategoryOverrides[7])
+	if st.settings.SuwayomiCategoryBindings[7] != 1 {
+		t.Errorf("want overrides[7]=1, got %d", st.settings.SuwayomiCategoryBindings[7])
 	}
 }
 
@@ -429,32 +430,44 @@ func TestNoAniListClassificationShowsConfigureFirstPrompt(t *testing.T) {
 
 // ---- Truth statement: override-row Kavita library dropdown filtered to KavitaLibIDsByType.
 
-func TestOverrideRowLibraryDropdownFilteredToContentTypes(t *testing.T) {
+// TestOverrideRowBindingDropdownListsAllBindings pins Plan B v2's widening
+// of the override-row right-hand dropdown. v1 filtered to the three primary
+// content-type Kavita libraries (Library Map Plan C reverse-lookup
+// constraint); v2 lists every binding. Plan A dissolved the constraint by
+// adding a first-class Binding type that owns its own library root.
+func TestOverrideRowBindingDropdownListsAllBindings(t *testing.T) {
 	cats := []map[string]any{{"id": 5, "name": "Korean Webtoons", "order": 1}}
 	srv := suwayomiStubServer(t, cats, 0)
 	defer srv.Close()
 
-	h := newSuwayomiHandler(srv.URL, nil, map[model.ContentType]int64{
-		model.TypeManga:  10,
-		model.TypeManhwa: 20,
-		model.TypeManhua: 30,
-	})
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 10, Name: "Manga"},
+			{ID: 20, Name: "Manhwa"},
+			{ID: 30, Name: "Light Novels"}, // explicitly NON-primary
+		},
+		settings: model.Settings{
+			SuwayomiBaseURL:    srv.URL,
+			SuwayomiAuthType:   model.SuwayomiAuthNone,
+			KavitaLibIDsByType: map[model.ContentType]int64{model.TypeManga: 1},
+			LibraryRoots:       map[model.ContentType]string{},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
 
-	// Force the page to surface a row so we can inspect the lib dropdown.
-	// Easiest: GET /settings (renders with an empty Add button + template).
 	req := httptest.NewRequest(http.MethodGet, "/api/suwayomi/categories/fragment", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	body := rr.Body.String()
-	// Library options 10, 20, 30 must all appear in the template.
+	// Binding options 10, 20, 30 must all appear in the override-row template.
 	for _, want := range []string{`value="10"`, `value="20"`, `value="30"`} {
 		if !strings.Contains(body, want) {
-			t.Errorf("library option %q missing from override fragment", want)
+			t.Errorf("binding option %q missing from override fragment", want)
 		}
 	}
-	// A library NOT in KavitaLibIDsByType (e.g. 999) must NOT appear.
+	// A binding not in the store (999) must NOT appear.
 	if strings.Contains(body, `value="999"`) {
-		t.Errorf("unexpected library option 999 in override fragment — must be filtered to KavitaLibIDsByType")
+		t.Errorf("unexpected binding option 999 in override fragment")
 	}
 }
 
@@ -476,9 +489,117 @@ func TestFormatVia(t *testing.T) {
 		{"suwayomi-override:category=bad", "suwayomi-override:category=bad"},
 	}
 	for _, tc := range tests {
-		got := formatVia(tc.in, cats)
+		got := formatVia(tc.in, nil, nil, cats)
 		if got != tc.want {
 			t.Errorf("formatVia(%q): want %q, got %q", tc.in, tc.want, got)
+		}
+	}
+}
+
+// TestFormatViaResolvesRuleIDToName covers Plan A's rule:<id> Via shape:
+// the renderer looks up the ClassificationRule by ID and returns its Name.
+func TestFormatViaResolvesRuleIDToName(t *testing.T) {
+	rules := []model.ClassificationRule{
+		{ID: 5, Name: "Japanese 18+"},
+	}
+	got := formatVia("rule:5", rules, nil, nil)
+	if got != "Japanese 18+" {
+		t.Errorf("formatVia rule:5: want %q, got %q", "Japanese 18+", got)
+	}
+}
+
+// TestFormatViaFallsBackToUnknownForMissingRule confirms a rule:<id> referring
+// to a deleted/missing rule renders as "Unknown rule (ID: N)" rather than the
+// raw prefix — the activity log stays readable after a rule is removed.
+func TestFormatViaFallsBackToUnknownForMissingRule(t *testing.T) {
+	got := formatVia("rule:999", nil, nil, nil)
+	if got != "Unknown rule (ID: 999)" {
+		t.Errorf("formatVia missing rule: want %q, got %q", "Unknown rule (ID: 999)", got)
+	}
+}
+
+// TestFormatViaPathRuleSameAsRule confirms path-rule:<id> (the short-circuit
+// rule path used by the classifier's step 1 for path-only conditions)
+// resolves through the same rules list as rule:<id>.
+func TestFormatViaPathRuleSameAsRule(t *testing.T) {
+	rules := []model.ClassificationRule{
+		{ID: 7, Name: "Comics by path"},
+	}
+	got := formatVia("path-rule:7", rules, nil, nil)
+	if got != "Comics by path" {
+		t.Errorf("formatVia path-rule:7: want %q, got %q", "Comics by path", got)
+	}
+}
+
+// TestFormatViaPathRuleFallsBackToUnknownForMissingRule mirrors the rule:
+// fallback for path-rule:.
+func TestFormatViaPathRuleFallsBackToUnknownForMissingRule(t *testing.T) {
+	got := formatVia("path-rule:42", nil, nil, nil)
+	if got != "Unknown rule (ID: 42)" {
+		t.Errorf("formatVia path-rule missing: want %q, got %q", "Unknown rule (ID: 42)", got)
+	}
+}
+
+// TestFormatViaDefaultBindingShowsBindingName covers Plan A's default-binding
+// Via — the catch-all routing target. The renderer resolves Settings.
+// DefaultBindingID against the bindings list and surfaces the name.
+func TestFormatViaDefaultBindingShowsBindingName(t *testing.T) {
+	id := int64(3)
+	settings := model.Settings{DefaultBindingID: &id}
+	bindings := []model.Binding{{ID: 3, Name: "Catch-all"}}
+	got := formatViaWithSettings("default-binding", nil, bindings, nil, settings)
+	if !strings.Contains(got, "Catch-all") {
+		t.Errorf("formatViaWithSettings default-binding: want label containing %q, got %q", "Catch-all", got)
+	}
+}
+
+// TestFormatViaDefaultBindingFallbackWhenBindingDeleted covers the case where
+// a series was routed via default-binding but the configured binding has
+// since been deleted. The renderer must surface a fallback ("deleted" / "ID")
+// rather than silently dropping the label.
+func TestFormatViaDefaultBindingFallbackWhenBindingDeleted(t *testing.T) {
+	id := int64(99)
+	settings := model.Settings{DefaultBindingID: &id}
+	got := formatViaWithSettings("default-binding", nil, nil, nil, settings)
+	if !strings.Contains(got, "deleted") && !strings.Contains(got, "Unknown") {
+		t.Errorf("formatViaWithSettings default-binding deleted: want fallback containing 'deleted' or 'Unknown', got %q", got)
+	}
+}
+
+// TestFormatViaDefaultBindingFallbackWhenNoneSet covers the case where the
+// catch-all is disabled (DefaultBindingID == nil) but a legacy log row still
+// carries via=default-binding (e.g. config edited mid-run). The renderer
+// must produce a recognisable label rather than the raw sentinel.
+func TestFormatViaDefaultBindingFallbackWhenNoneSet(t *testing.T) {
+	settings := model.Settings{DefaultBindingID: nil}
+	got := formatViaWithSettings("default-binding", nil, nil, nil, settings)
+	if !strings.Contains(got, "none") && !strings.Contains(got, "Default binding") {
+		t.Errorf("formatViaWithSettings default-binding nil: want recognisable label, got %q", got)
+	}
+}
+
+// TestFormatViaWithSettingsDelegatesNonDefaultBindingShapes confirms the
+// sister function delegates to formatVia for every Via shape except
+// default-binding — so callers can use formatViaWithSettings uniformly.
+func TestFormatViaWithSettingsDelegatesNonDefaultBindingShapes(t *testing.T) {
+	cats := map[int64]string{5: "Korean Webtoons"}
+	rules := []model.ClassificationRule{{ID: 7, Name: "Comics by path"}}
+	settings := model.Settings{}
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", "—"},
+		{"unmatched", "Unmatched"},
+		{"anilist:JP", "AniList (JP)"},
+		{"suwayomi-override:category=5", "Korean Webtoons"},
+		{"rule:7", "Comics by path"},
+		{"path-rule:7", "Comics by path"},
+	}
+	for _, tc := range tests {
+		got := formatViaWithSettings(tc.in, rules, nil, cats, settings)
+		if got != tc.want {
+			t.Errorf("formatViaWithSettings(%q): want %q, got %q", tc.in, tc.want, got)
 		}
 	}
 }
@@ -486,16 +607,17 @@ func TestFormatVia(t *testing.T) {
 // parseSuwayomiOverrides direct test — covers the row-pairing logic.
 func TestParseSuwayomiOverrides(t *testing.T) {
 	form := map[string][]string{
+		// Plan B v2 renamed override_library_<idx> → override_binding_<idx>.
 		"override_category_0":    {"5"},
-		"override_library_0":     {"100"},
+		"override_binding_0":     {"100"},
 		"override_category_1":    {"7"},
-		"override_library_1":     {"200"},
+		"override_binding_1":     {"200"},
 		"override_category_99":   {"0"}, // dropped
-		"override_library_99":    {"300"},
+		"override_binding_99":    {"300"},
 		"override_category_100":  {"50"},
-		"override_library_100":   {"0"}, // dropped
+		"override_binding_100":   {"0"}, // dropped
 		"override_category_xyz":  {"60"},
-		"override_library_xyz":   {"400"},
+		"override_binding_xyz":   {"400"},
 		"unrelated_field":        {"ignored"},
 	}
 	got := parseSuwayomiOverrides(form)
@@ -587,12 +709,13 @@ func TestSuwayomiCategoriesEndpoint(t *testing.T) {
 // parser many times to defeat Go's randomised map iteration.
 func TestParseSuwayomiOverridesDuplicateCategoryDeterministic(t *testing.T) {
 	form := map[string][]string{
+		// Plan B v2 renamed override_library_<idx> → override_binding_<idx>.
 		"override_category_0":  {"5"},
-		"override_library_0":   {"100"},
+		"override_binding_0":   {"100"},
 		"override_category_1":  {"5"}, // same category as row 0
-		"override_library_1":   {"200"},
+		"override_binding_1":   {"200"},
 		"override_category_2":  {"5"}, // same category as rows 0 + 1
-		"override_library_2":   {"300"},
+		"override_binding_2":   {"300"},
 	}
 	const want = int64(300) // index 2 is highest → its library wins
 	for i := 0; i < 200; i++ {
@@ -604,38 +727,31 @@ func TestParseSuwayomiOverridesDuplicateCategoryDeterministic(t *testing.T) {
 	}
 }
 
-// Critical #2 regression test: clicking Refresh (the fragment endpoint) MUST
-// produce the same Kavita library-name labels that /settings produces on
-// initial GET. Before the consolidation refactor the fragment only called
-// overrideLibraryChoices() and skipped resolveOverrideLibraryNames(),
-// regressing labels to "Library #N (Manga)" placeholders.
-func TestRefreshFragmentResolvesKavitaLibraryNames(t *testing.T) {
-	// Suwayomi stub: one category.
+// Critical regression test (Plan B v2 shape): clicking Refresh (the fragment
+// endpoint) MUST produce the same binding-name labels that /settings produces
+// on initial GET. Before the Plan C consolidation refactor the fragment
+// regressed Kavita library labels; Plan B widened the dropdown to bindings
+// but kept the same fragment-equals-settings contract — both routes must
+// emit the same binding names + selected option.
+func TestRefreshFragmentBindingLabelsMatchSettings(t *testing.T) {
 	swCats := []map[string]any{
 		{"id": 5, "name": "Korean Webtoons", "order": 1},
 	}
 	swSrv := suwayomiStubServer(t, swCats, 0)
 	defer swSrv.Close()
 
-	// Kavita stub: two libraries the user has mapped to content types.
-	kavLibs := []kavitaTestLibrary{
-		{ID: 100, Name: "My Manga Library"},
-		{ID: 200, Name: "My Manhwa Library"},
-	}
-	kavSrv := kavitaStubLibServer(t, kavLibs)
-	defer kavSrv.Close()
-
 	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 100, Name: "My Manga Library"},
+			{ID: 200, Name: "My Manhwa Library"},
+		},
 		settings: model.Settings{
 			SuwayomiBaseURL:           swSrv.URL,
 			SuwayomiAuthType:          model.SuwayomiAuthNone,
 			SuwayomiCategoryOverrides: map[int64]int64{5: 200},
-			KavitaBaseURL:             kavSrv.URL,
-			KavitaAPIKey:              "stubkey",
 			LibraryRoots:              map[model.ContentType]string{},
 			KavitaLibIDsByType: map[model.ContentType]int64{
-				model.TypeManga:  100,
-				model.TypeManhwa: 200,
+				model.TypeManga: 100,
 			},
 		},
 	}
@@ -649,20 +765,16 @@ func TestRefreshFragmentResolvesKavitaLibraryNames(t *testing.T) {
 	}
 	body := rr.Body.String()
 
-	// Resolved Kavita library names must appear, not the "Library #N" placeholder.
+	// Both binding names from the store must appear in the dropdown.
 	if !strings.Contains(body, "My Manga Library") {
-		t.Errorf("fragment missing resolved name 'My Manga Library'; body:\n%s", body)
+		t.Errorf("fragment missing binding name 'My Manga Library'; body:\n%s", body)
 	}
 	if !strings.Contains(body, "My Manhwa Library") {
-		t.Errorf("fragment missing resolved name 'My Manhwa Library'; body:\n%s", body)
+		t.Errorf("fragment missing binding name 'My Manhwa Library'; body:\n%s", body)
 	}
-	if strings.Contains(body, "Library #100") || strings.Contains(body, "Library #200") {
-		t.Errorf("fragment still shows placeholder 'Library #N' label — name-resolution regressed; body:\n%s", body)
-	}
-
-	// The saved row's library option must be the selected one.
-	if !strings.Contains(body, `value="200"`) {
-		t.Errorf("fragment missing library option value=200; body:\n%s", body)
+	// The saved row's binding option (ID 200) must be selected.
+	if !strings.Contains(body, `value="200" selected`) {
+		t.Errorf("fragment missing selected binding option value=200; body:\n%s", body)
 	}
 }
 

@@ -114,61 +114,146 @@
     </div>
   </div>
 
-  <!-- Library Roots -->
+  <!-- Library Bindings (Plan B v2) -->
   <div class="settings-card">
-    <div class="settings-card-header">
-      <p class="settings-card-title">Library Roots</p>
-      <p class="settings-card-desc">Root paths on disk where each content type will be filed.</p>
+    <div class="settings-card-header has-action">
+      <div>
+        <p class="settings-card-title">Library Bindings</p>
+        <p class="settings-card-desc">Each binding is one library destination. A name (e.g. <em>Manga</em>, <em>Manhwa 18+</em>), a filesystem root, a Kavita library, and a default 18+ flag. Classification rules and Suwayomi category overrides below route series here.</p>
+      </div>
+      <button type="button" class="btn-sm" onclick="addBindingRow()">+ Add Binding</button>
     </div>
     <div class="settings-card-body">
+      <div id="binding-rows-body">
+        {{template "binding-rows" .}}
+      </div>
+      {{if not .Bindings}}
+      <div class="empty-state" style="margin:8px 0 0 0;">
+        <p><b>No bindings configured.</b></p>
+        <p>To start using mangarr, configure at least one binding to define your first library destination. Click <b>+ Add Binding</b> above.</p>
+      </div>
+      {{end}}
+    </div>
+  </div>
+
+  <template id="binding-row-template">
+    <div class="settings-row binding-row" data-binding-id="0">
+      <input type="hidden" name="binding_id___NEW_IDX__" value="0">
+      <div class="settings-input-wrap binding-row-fields">
+        <input type="text" name="binding_name___NEW_IDX__" value=""
+          placeholder="Name (e.g. Manga, Manhwa 18+)" class="binding-name">
+        <input type="text" name="binding_library_root___NEW_IDX__" value=""
+          placeholder="/media/Library/..." class="binding-root">
+        <select name="binding_kavita_lib___NEW_IDX__" class="binding-kavita">
+          <option value="0">(none)</option>
+          {{range .KavitaLibraries}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+        </select>
+        <label class="binding-adult">
+          <input type="checkbox" name="binding_default_is_adult___NEW_IDX__">
+          18+
+        </label>
+        <button type="button" class="btn-sm binding-delete"
+          onclick="this.closest('.binding-row').remove()" title="Delete binding">&#x2715;</button>
+      </div>
+    </div>
+  </template>
+
+  <!-- Classification Rules (Plan B v2) -->
+  <div class="settings-card">
+    <div class="settings-card-header has-action">
+      <div>
+        <p class="settings-card-title">Classification Rules</p>
+        <p class="settings-card-desc">Rules are evaluated ascending by <em>Priority</em> (lower number = higher precedence). The first matching rule routes the series to its target binding. Conditions are AND-semantics; leave any field as <em>Any</em> to skip that constraint.</p>
+      </div>
+      {{if .Bindings}}<button type="button" class="btn-sm" onclick="addRuleRow()">+ Add Rule</button>{{end}}
+    </div>
+    <div class="settings-card-body">
+      {{if .Bindings}}
+        <div id="rule-rows-body">
+          {{template "rule-rows" .}}
+        </div>
+        {{if not .Rules}}
+        <p class="empty-state" style="margin:8px 0 0 0;">No rules configured. Click <b>+ Add Rule</b> above to define how series get classified.</p>
+        {{end}}
+      {{else}}
+        <p class="empty-state" style="margin:8px 0 0 0;">Configure at least one binding above before adding classification rules — rules need a target binding to route to.</p>
+      {{end}}
+    </div>
+  </div>
+
+  <template id="rule-row-template">
+    <div class="settings-row rule-row" data-rule-id="0">
+      <input type="hidden" name="rule_id___NEW_IDX__" value="0">
+      <div class="settings-input-wrap rule-row-fields">
+        <input type="number" name="rule_priority___NEW_IDX__" value="1000"
+          min="0" max="9999" class="rule-priority"
+          title="Lower number = higher priority">
+        <input type="text" name="rule_name___NEW_IDX__" value=""
+          placeholder="Rule name" class="rule-name">
+        <label class="rule-cond">country
+          <select name="rule_country___NEW_IDX__">
+            <option value="" selected>Any</option>
+            <option value="JP">JP</option>
+            <option value="KR">KR</option>
+            <option value="CN">CN</option>
+            <option value="TW">TW</option>
+          </select>
+        </label>
+        <label class="rule-cond">adult
+          <select name="rule_adult___NEW_IDX__">
+            <option value="" selected>Any</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </label>
+        <label class="rule-cond">format
+          <select name="rule_format___NEW_IDX__">
+            <option value="" selected>Any</option>
+            <option value="MANGA">Manga</option>
+            <option value="NOVEL">Novel</option>
+            <option value="ONE_SHOT">One-shot</option>
+          </select>
+        </label>
+        <label class="rule-cond">path
+          <input type="text" name="rule_path___NEW_IDX__" value=""
+            placeholder="/media/Downloads/..." class="rule-path">
+        </label>
+        <label class="rule-target">&rarr; binding
+          <select name="rule_binding___NEW_IDX__" class="rule-binding">
+            <option value="0">&mdash; pick &mdash;</option>
+            {{range .Bindings}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+          </select>
+        </label>
+        <button type="button" class="btn-sm rule-delete"
+          onclick="this.closest('.rule-row').remove()" title="Delete rule">&#x2715;</button>
+      </div>
+    </div>
+  </template>
+
+  <!-- Default Binding (Plan B v2) -->
+  <div class="settings-card">
+    <div class="settings-card-header">
+      <p class="settings-card-title">Default Binding</p>
+      <p class="settings-card-desc">When no Suwayomi override and no Classification Rule matches a series, route it here. Leave as <em>Send to Unmatched</em> to hold series for manual classification (safer; matches pre-v2 behaviour).</p>
+    </div>
+    <div class="settings-card-body">
+      {{if .Bindings}}
       <div class="settings-row">
-        <label class="settings-label">Manga root</label>
-        <div class="settings-input-wrap settings-input-with-browse">
-          <input type="text" name="root_manga" id="root_manga" value="{{.RootManga}}"
-            placeholder="/media/Library/Books/Manga">
-          <button type="button" class="btn-browse" title="Browse filesystem"
-            hx-get="/api/browse/fragment"
-            hx-vals='js:{path: document.getElementById("root_manga").value || "/media", target: "root_manga"}'
-            hx-target="#browse-modal-body"
-            hx-swap="innerHTML"
-            onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>
-            Browse
-          </button>
+        <label class="settings-label">Fallback target</label>
+        <div class="settings-input-wrap">
+          {{$defBinding := int64Or .Settings.DefaultBindingID 0}}
+          <select name="default_binding_id">
+            <option value="0"{{if eq $defBinding 0}} selected{{end}}>&mdash; Send to Unmatched &mdash;</option>
+            {{range .Bindings}}<option value="{{.ID}}"{{if eq .ID $defBinding}} selected{{end}}>{{.Name}}</option>{{end}}
+            {{if and (gt $defBinding 0) (not (bindingExists .Bindings $defBinding))}}
+              <option value="{{$defBinding}}" selected>Unknown binding (ID: {{$defBinding}})</option>
+            {{end}}
+          </select>
         </div>
       </div>
-      <div class="settings-row">
-        <label class="settings-label">Manhwa root</label>
-        <div class="settings-input-wrap settings-input-with-browse">
-          <input type="text" name="root_manhwa" id="root_manhwa" value="{{.RootManhwa}}"
-            placeholder="/media/Library/Books/Manhwa">
-          <button type="button" class="btn-browse" title="Browse filesystem"
-            hx-get="/api/browse/fragment"
-            hx-vals='js:{path: document.getElementById("root_manhwa").value || "/media", target: "root_manhwa"}'
-            hx-target="#browse-modal-body"
-            hx-swap="innerHTML"
-            onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>
-            Browse
-          </button>
-        </div>
-      </div>
-      <div class="settings-row">
-        <label class="settings-label">Manhua root</label>
-        <div class="settings-input-wrap settings-input-with-browse">
-          <input type="text" name="root_manhua" id="root_manhua" value="{{.RootManhua}}"
-            placeholder="/media/Library/Books/Manhua">
-          <button type="button" class="btn-browse" title="Browse filesystem"
-            hx-get="/api/browse/fragment"
-            hx-vals='js:{path: document.getElementById("root_manhua").value || "/media", target: "root_manhua"}'
-            hx-target="#browse-modal-body"
-            hx-swap="innerHTML"
-            onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>
-            Browse
-          </button>
-        </div>
-      </div>
+      {{else}}
+      <p class="empty-state" style="margin:8px 0 0 0;">Configure at least one binding above to enable a default-binding fallback.</p>
+      {{end}}
     </div>
   </div>
 
@@ -227,82 +312,12 @@
   <div class="settings-card">
     <div class="settings-card-header">
       <p class="settings-card-title">Library Map</p>
-      <p class="settings-card-desc">How mangarr decides which Kavita library a series belongs to. AniList classification is the default; Suwayomi categories can override it for specific groupings.</p>
+      <p class="settings-card-desc">When a series comes from a Suwayomi category below, route it to the chosen binding instead of falling through to the Classification Rules above.</p>
     </div>
     <div class="settings-card-body" style="padding-bottom:8px;">
 
-      <!-- Sub-card: Default AniList Classification (first, drives the override card below) -->
-      <div class="settings-subcard">
-        <div class="settings-subcard-header" style="display:flex;align-items:center;justify-content:space-between;">
-          <div>
-            <p class="settings-subcard-title">Default: AniList Classification</p>
-            <p class="settings-subcard-desc">For series that don't match a Suwayomi override below, mangarr asks AniList for <code>countryOfOrigin</code> and routes by content type.</p>
-          </div>
-          <button type="button" class="btn-sm"
-                  hx-get="/api/kavita/libraries/fragment"
-                  hx-target="#kavita-lib-selects"
-                  hx-swap="innerHTML">Sync</button>
-        </div>
-        <div id="kavita-lib-selects">
-{{if .KavitaLibError}}
-<div class="form-error">Kavita unreachable: {{.KavitaLibError}}. Check Settings &#8594; Kavita Connection.</div>
-{{end}}
-{{if .KavitaLibraries}}
-        <div class="settings-row">
-          <label class="settings-label">MANGA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manga">
-              <option value="0">(none)</option>
-              {{if and (gt .KavitaLibManga 0) (kavitaLibNotInList .KavitaLibManga .KavitaLibraries)}}<option value="{{.KavitaLibManga}}" selected>Unknown (ID: {{.KavitaLibManga}})</option>{{end}}
-              {{range .KavitaLibraries}}<option value="{{.ID}}"{{if eq .ID $.KavitaLibManga}} selected{{end}}>{{.Name}}</option>{{end}}
-            </select>
-          </div>
-        </div>
-        <div class="settings-row">
-          <label class="settings-label">MANHWA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manhwa">
-              <option value="0">(none)</option>
-              {{if and (gt .KavitaLibManhwa 0) (kavitaLibNotInList .KavitaLibManhwa .KavitaLibraries)}}<option value="{{.KavitaLibManhwa}}" selected>Unknown (ID: {{.KavitaLibManhwa}})</option>{{end}}
-              {{range .KavitaLibraries}}<option value="{{.ID}}"{{if eq .ID $.KavitaLibManhwa}} selected{{end}}>{{.Name}}</option>{{end}}
-            </select>
-          </div>
-        </div>
-        <div class="settings-row">
-          <label class="settings-label">MANHUA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manhua">
-              <option value="0">(none)</option>
-              {{if and (gt .KavitaLibManhua 0) (kavitaLibNotInList .KavitaLibManhua .KavitaLibraries)}}<option value="{{.KavitaLibManhua}}" selected>Unknown (ID: {{.KavitaLibManhua}})</option>{{end}}
-              {{range .KavitaLibraries}}<option value="{{.ID}}"{{if eq .ID $.KavitaLibManhua}} selected{{end}}>{{.Name}}</option>{{end}}
-            </select>
-          </div>
-        </div>
-{{else}}
-        <div class="settings-row">
-          <label class="settings-label">MANGA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manga" disabled><option value="{{.KavitaLibManga}}">Click Sync after configuring Kavita above{{if gt .KavitaLibManga 0}} (saved: {{.KavitaLibManga}}){{end}}</option></select>
-          </div>
-        </div>
-        <div class="settings-row">
-          <label class="settings-label">MANHWA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manhwa" disabled><option value="{{.KavitaLibManhwa}}">Click Sync after configuring Kavita above{{if gt .KavitaLibManhwa 0}} (saved: {{.KavitaLibManhwa}}){{end}}</option></select>
-          </div>
-        </div>
-        <div class="settings-row">
-          <label class="settings-label">MANHUA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manhua" disabled><option value="{{.KavitaLibManhua}}">Click Sync after configuring Kavita above{{if gt .KavitaLibManhua 0}} (saved: {{.KavitaLibManhua}}){{end}}</option></select>
-          </div>
-        </div>
-{{end}}
-        </div>
-      </div>
-
       <!-- Sub-card: Suwayomi Category Overrides -->
-      <div class="settings-subcard" style="margin-top:16px;">
+      <div class="settings-subcard">
         <div class="settings-subcard-header" style="display:flex;align-items:center;justify-content:space-between;">
           <div>
             <p class="settings-subcard-title">Suwayomi Category Overrides</p>
@@ -490,6 +505,54 @@
       '</div>';
     list.appendChild(row);
     if (window.htmx) { htmx.process(row); }
+  };
+})();
+
+// Add a new empty Library Binding row by cloning the <template>.
+// Each new row gets a unique suffix (newN) so its form fields don't
+// collide on POST. The submit handler in Task 5 will treat the suffix
+// as ID=0 (new row); the row's hidden binding_id_<suffix> is also 0.
+(function() {
+  var counter = 0;
+  window.addBindingRow = function() {
+    counter++;
+    var tpl = document.getElementById('binding-row-template');
+    var body = document.getElementById('binding-rows-body');
+    if (!tpl || !body) { return; }
+    var idx = 'new' + counter;
+    // Materialise the template into a detached wrapper so we can run
+    // a string replace on its innerHTML before appending. Cloning the
+    // DocumentFragment and walking attributes is more correct but
+    // dramatically more code; replaceAll on a freshly-cloned subtree
+    // can't conflict with the rest of the page.
+    var frag = document.importNode(tpl.content, true);
+    var wrapper = document.createElement('div');
+    wrapper.appendChild(frag);
+    wrapper.innerHTML = wrapper.innerHTML.replaceAll('__NEW_IDX__', idx);
+    while (wrapper.firstChild) {
+      body.appendChild(wrapper.firstChild);
+    }
+  };
+})();
+
+// Add a new empty Classification Rule row by cloning the <template>.
+// Mirrors addBindingRow above: __NEW_IDX__ → 'newN' so form fields don't
+// collide. The submit handler in Task 5 treats the suffix as ID=0 (new row).
+(function() {
+  var counter = 0;
+  window.addRuleRow = function() {
+    counter++;
+    var tpl = document.getElementById('rule-row-template');
+    var body = document.getElementById('rule-rows-body');
+    if (!tpl || !body) { return; }
+    var idx = 'new' + counter;
+    var frag = document.importNode(tpl.content, true);
+    var wrapper = document.createElement('div');
+    wrapper.appendChild(frag);
+    wrapper.innerHTML = wrapper.innerHTML.replaceAll('__NEW_IDX__', idx);
+    while (wrapper.firstChild) {
+      body.appendChild(wrapper.firstChild);
+    }
   };
 })();
 

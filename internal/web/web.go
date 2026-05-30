@@ -30,7 +30,8 @@
 //	POST /api/backups/run            → Trigger immediate backup; returns new Entry as JSON
 //	GET  /api/backups/{name}         → Download a backup file
 //	GET  /api/kavita/libraries       → JSON list of Kavita libraries
-//	GET  /api/kavita/libraries/fragment → HTMX HTML fragment: three library <select> elements
+//	GET  /api/bindings                → JSON list of Library Bindings (Plan B v2)
+//	GET  /api/rules                   → JSON list of Classification Rules ordered ascending by priority (Plan B v2)
 //	GET  /metrics                    → Prometheus metrics (text/plain; version=0.0.4)
 //	GET  /static/*                   → Embedded static assets (htmx.min.js)
 package web
@@ -87,6 +88,10 @@ type Store interface {
 	GetSettings() (model.Settings, error)
 	SaveSettings(model.Settings) error
 	SetSeriesType(id int64, ct model.ContentType) error
+	ListBindings() ([]model.Binding, error)
+	ListRules() ([]model.ClassificationRule, error)
+	SaveBindings([]model.Binding) error
+	SaveRules([]model.ClassificationRule) error
 }
 
 // Runner can execute one poll pass on demand.
@@ -244,12 +249,15 @@ func NewHandler(opts HandlerOpts) *Handler {
 
 	// Kavita library picker API
 	h.mux.HandleFunc("GET /api/kavita/libraries", h.apiKavitaLibraries)
-	h.mux.HandleFunc("GET /api/kavita/libraries/fragment", h.apiKavitaLibrariesFragment)
 
 	// Suwayomi connection + category override API
 	h.mux.HandleFunc("GET /api/suwayomi/test", h.apiSuwayomiTest)
 	h.mux.HandleFunc("GET /api/suwayomi/categories", h.apiSuwayomiCategories)
 	h.mux.HandleFunc("GET /api/suwayomi/categories/fragment", h.apiSuwayomiCategoriesFragment)
+
+	// Library Bindings v2 read-only JSON endpoints (Plan B)
+	h.mux.HandleFunc("GET /api/bindings", h.apiBindings)
+	h.mux.HandleFunc("GET /api/rules", h.apiRules)
 
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
@@ -282,6 +290,10 @@ func parsePageTemplates() map[string]*template.Template {
 	// adding the partial to a new page is a one-line change here, not a
 	// fan-out across the codebase.
 	withOverrideRows := map[string]bool{"settings.html": true}
+	// Pages that need the binding-rows partial (Plan B Library Bindings card).
+	withBindingRows := map[string]bool{"settings.html": true}
+	// Pages that need the rule-rows partial (Plan B Classification Rules card).
+	withRuleRows := map[string]bool{"settings.html": true}
 	m := make(map[string]*template.Template, len(pages)+1)
 	for _, name := range pages {
 		// Parse base + the specific page. This gives each page its own
@@ -289,6 +301,12 @@ func parsePageTemplates() map[string]*template.Template {
 		files := []string{"templates/base.html", "templates/" + name}
 		if withOverrideRows[name] {
 			files = append(files, "templates/override-rows.html")
+		}
+		if withBindingRows[name] {
+			files = append(files, "templates/binding-rows.html")
+		}
+		if withRuleRows[name] {
+			files = append(files, "templates/rule-rows.html")
 		}
 		t := template.Must(
 			template.New("").Funcs(templateFuncs()).ParseFS(assets, files...),
@@ -344,6 +362,49 @@ func templateFuncs() template.FuncMap {
 				}
 			}
 			return true
+		},
+		// deref nil-safely dereferences a *bool, returning false for nil.
+		// Used by rule-rows.html to compare a rule's IsAdult condition
+		// pointer against a yes/no <option> value without exploding on nil.
+		"deref": func(b *bool) bool {
+			if b == nil {
+				return false
+			}
+			return *b
+		},
+		// derefStr nil-safely dereferences a *string, returning "" for nil.
+		// Used by rule-rows.html to compare a rule's CountryOfOrigin /
+		// Format condition pointers against string literals in <option>
+		// values. html/template's `eq` rejects *string vs string with
+		// "incompatible types for comparison" — derefing in Go avoids
+		// the reflect-time type mismatch.
+		"derefStr": func(s *string) string {
+			if s == nil {
+				return ""
+			}
+			return *s
+		},
+		// bindingExists returns true if the given binding ID is present
+		// in the supplied bindings slice. Used by rule-rows.html to detect
+		// orphaned BindingID references and render the
+		// "Unknown binding (ID: N)" placeholder option.
+		"bindingExists": func(bindings []model.Binding, id int64) bool {
+			for _, b := range bindings {
+				if b.ID == id {
+					return true
+				}
+			}
+			return false
+		},
+		// int64Or nil-safely dereferences a *int64, returning the fallback
+		// for nil. Used by the Default Binding picker so the template can
+		// compare {{.Settings.DefaultBindingID}} against literal option
+		// values without an html/template type-mismatch on the nil case.
+		"int64Or": func(p *int64, fallback int64) int64 {
+			if p == nil {
+				return fallback
+			}
+			return *p
 		},
 	}
 }
@@ -412,31 +473,33 @@ func diskSpaceClass(pctUsed float64) string {
 }
 
 // settingsPageData holds pre-extracted plain fields for the Settings template.
-//
-// We deliberately AVOID using {{index .Settings.LibraryRoots "Manga"}} in
-// the template: html/template's reflect-based call requires the key arg type
-// to match exactly, and "Manga" is a string literal while LibraryRoots is
-// keyed by model.ContentType. The reflection panic returns HTTP 200 with a
-// half-rendered body — a silent UX break. Extract values in Go where types
-// are checked at compile time, then pass plain strings/ints to the template.
 type settingsPageData struct {
-	Page                    string
-	Settings                model.Settings
-	KavitaAPIKey            string
-	Flash                   string
-	Error                   string
-	DownloadRoots           []string // pre-extracted from Settings for template convenience
-	RootManga               string
-	RootManhwa              string
-	RootManhua              string
-	KavitaLibManga          int64
-	KavitaLibManhwa         int64
-	KavitaLibManhua         int64
+	Page          string
+	Settings      model.Settings
+	KavitaAPIKey  string
+	Flash         string
+	Error         string
+	DownloadRoots []string // pre-extracted from Settings for template convenience
 	// KavitaLibraries holds the fetched Kavita library list for the select dropdowns.
 	// Nil/empty means Kavita is not configured or unreachable → render placeholders.
 	KavitaLibraries []kavita.Library
 	// KavitaLibError is set when a library fetch attempt failed; displayed inline.
 	KavitaLibError string
+
+	// --- Library Bindings v2 (Plan B) ---
+	// Bindings carries every persisted Library Binding from the v2 store.
+	// Empty slice renders an empty-state hint; the "+ Add Binding"
+	// affordance is always present. Reuses .KavitaLibraries (above) for
+	// the per-row Kavita dropdown so we fetch once and render twice.
+	Bindings []model.Binding
+
+	// Rules carries every persisted Classification Rule from the v2 store
+	// in ascending Priority order. Empty slice renders an empty-state hint;
+	// the "+ Add Rule" affordance is always present. The per-row target
+	// dropdown reuses .Bindings (above) for its options so a deleted
+	// binding referenced by a rule renders as "Unknown binding (ID: N)"
+	// instead of silently disappearing.
+	Rules []model.ClassificationRule
 
 	// --- Library Map: Suwayomi connection ---
 	SuwayomiBaseURL  string
@@ -647,10 +710,13 @@ type activityPageData struct {
 // buildActivityRows resolves the Via field of every entry to a display label.
 // suwayomi-override:category=N is joined against the current Suwayomi
 // category list; missing IDs render as "Unknown (ID: N)". anilist:JP/KR/CN/TW
-// render as "AniList (XX)". unmatched/empty are handled in a switch.
+// render as "AniList (XX)". rule:N / path-rule:N resolve against the user's
+// ClassificationRule list. default-binding resolves against Settings +
+// Bindings. unmatched/empty are handled in a switch.
 //
 // The Suwayomi category list is fetched at most once per page render — when
-// at least one row carries a suwayomi-override Via.
+// at least one row carries a suwayomi-override Via. Rules + bindings + settings
+// are read once per page render regardless of row count.
 func buildActivityRows(ctx context.Context, st Store, list []model.ActivityEntry) []activityRow {
 	rows := make([]activityRow, 0, len(list))
 	var catNamesByID map[int64]string
@@ -661,26 +727,31 @@ func buildActivityRows(ctx context.Context, st Store, list []model.ActivityEntry
 			break
 		}
 	}
+	// Settings is needed unconditionally — both for the Suwayomi client and
+	// the default-binding Via renderer. Treat lookup failure as empty.
+	settings, _ := st.GetSettings()
 	if needSuwayomi {
-		settings, err := st.GetSettings()
-		if err == nil {
-			if client, ok := newSuwayomiClient(settings); ok {
-				fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				cats, err := client.ListCategories(fetchCtx)
-				cancel()
-				if err == nil {
-					catNamesByID = make(map[int64]string, len(cats))
-					for _, c := range cats {
-						catNamesByID[c.ID] = c.Name
-					}
+		if client, ok := newSuwayomiClient(settings); ok {
+			fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			cats, err := client.ListCategories(fetchCtx)
+			cancel()
+			if err == nil {
+				catNamesByID = make(map[int64]string, len(cats))
+				for _, c := range cats {
+					catNamesByID[c.ID] = c.Name
 				}
 			}
 		}
 	}
+	// Rules + bindings are cheap (in-memory list) and needed by rule:/path-rule:
+	// and default-binding Via renderers respectively. Treat lookup failure as
+	// nil — formatVia falls back to "Unknown rule (ID: N)" / "deleted" labels.
+	rules, _ := st.ListRules()
+	bindings, _ := st.ListBindings()
 	for _, e := range list {
 		rows = append(rows, activityRow{
 			ActivityEntry: e,
-			ViaLabel:      formatVia(e.Via, catNamesByID),
+			ViaLabel:      formatViaWithSettings(e.Via, rules, bindings, catNamesByID, settings),
 		})
 	}
 	return rows
@@ -688,16 +759,30 @@ func buildActivityRows(ctx context.Context, st Store, list []model.ActivityEntry
 
 // formatVia renders a raw Via value into a human-readable label.
 //
-//	"anilist:JP"                  → "AniList (JP)"
+//	"anilist:JP"                   → "AniList (JP)"
 //	"suwayomi-override:category=5" → "<categoryName>" or "Unknown (ID: 5)"
-//	"unmatched"                   → "Unmatched"
-//	""                            → "—" (pre-Plan-B legacy rows)
-func formatVia(via string, catNamesByID map[int64]string) string {
+//	"rule:7"                       → "<ClassificationRule.Name>" or "Unknown rule (ID: 7)"
+//	"path-rule:7"                  → same as rule:
+//	"default-binding"              → "Default binding" (use formatViaWithSettings to
+//	                                  resolve the configured binding name)
+//	"unmatched"                    → "Unmatched"
+//	""                             → "—" (pre-Plan-B legacy rows)
+func formatVia(via string, rules []model.ClassificationRule, bindings []model.Binding, catNamesByID map[int64]string) string {
+	_ = bindings // accepted for signature symmetry with formatViaWithSettings; default-binding requires Settings
 	switch {
 	case via == "":
 		return "—"
 	case via == classifier.ViaUnmatched:
 		return "Unmatched"
+	case via == classifier.ViaDefaultBinding:
+		// Stateless fallback — callers wanting the binding name should use
+		// formatViaWithSettings. Returning a useful sentinel keeps activity
+		// logs readable even from contexts that don't have Settings handy.
+		return "Default binding"
+	case strings.HasPrefix(via, classifier.ViaRulePrefix):
+		return resolveRuleVia(via, classifier.ViaRulePrefix, rules)
+	case strings.HasPrefix(via, classifier.ViaPathRulePrefix):
+		return resolveRuleVia(via, classifier.ViaPathRulePrefix, rules)
 	case strings.HasPrefix(via, classifier.ViaAniListPrefix):
 		code := strings.TrimPrefix(via, classifier.ViaAniListPrefix)
 		if code == "" {
@@ -717,6 +802,46 @@ func formatVia(via string, catNamesByID map[int64]string) string {
 	default:
 		return via
 	}
+}
+
+// formatViaWithSettings is formatVia plus the resolution context needed to
+// render the Via == classifier.ViaDefaultBinding case to the configured
+// binding name. All other Via shapes delegate to formatVia.
+//
+//	default-binding (DefaultBindingID set, binding exists)  → "Default binding (<name>)"
+//	default-binding (DefaultBindingID set, binding deleted) → "Default binding (deleted, ID: N)"
+//	default-binding (DefaultBindingID == nil)               → "Default binding (none)"
+func formatViaWithSettings(via string, rules []model.ClassificationRule, bindings []model.Binding, catNamesByID map[int64]string, settings model.Settings) string {
+	if via == classifier.ViaDefaultBinding {
+		if settings.DefaultBindingID == nil {
+			return "Default binding (none)"
+		}
+		id := *settings.DefaultBindingID
+		for _, b := range bindings {
+			if b.ID == id {
+				return fmt.Sprintf("Default binding (%s)", b.Name)
+			}
+		}
+		return fmt.Sprintf("Default binding (deleted, ID: %d)", id)
+	}
+	return formatVia(via, rules, bindings, catNamesByID)
+}
+
+// resolveRuleVia looks up a rule:/path-rule:<id> Via against the supplied
+// rules list, returning the rule's Name or a "Unknown rule (ID: N)" fallback.
+// Unparseable IDs return the raw Via string.
+func resolveRuleVia(via, prefix string, rules []model.ClassificationRule) string {
+	rawID := strings.TrimPrefix(via, prefix)
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil {
+		return via
+	}
+	for _, r := range rules {
+		if r.ID == id {
+			return r.Name
+		}
+	}
+	return fmt.Sprintf("Unknown rule (ID: %d)", id)
 }
 
 func (h *Handler) pageTasks(w http.ResponseWriter, r *http.Request) {
@@ -828,31 +953,111 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// --- Library Bindings v2 (Plan B) ---
+	// Best-effort: a store error renders the card with an empty list and
+	// the same "+ Add Binding" affordance so the user can still create
+	// one. We deliberately don't fail the whole page on a binding load
+	// error — the v1 sections below it must still be reachable until
+	// Task 8 removes them.
+	bindings, err := h.store.ListBindings()
+	if err != nil {
+		bindings = nil
+	}
+	// Classification rules — best-effort, same rationale as bindings above.
+	rules, err := h.store.ListRules()
+	if err != nil {
+		rules = nil
+	}
+
 	// --- Library Map: Suwayomi + Override rows ---
 	// Both /settings and the override-fragment HTMX endpoint route
 	// through buildLibraryMapData → identical rendering on initial GET
-	// and after the user clicks Refresh.
+	// and after the user clicks Refresh. The v2 override-row dropdown
+	// lists every binding, so we pass them through here.
 	lmCtx, lmCancel := context.WithTimeout(r.Context(), 3*time.Second)
-	libraryMap := buildLibraryMapData(lmCtx, settings)
+	libraryMap := buildLibraryMapData(lmCtx, settings, bindings)
 	lmCancel()
 
-	// Pre-extract values typed-keyed by model.ContentType into plain fields,
-	// so the template can use {{.RootManga}} etc. with no reflection-time
-	// type mismatch. See settingsPageData doc comment.
 	h.render(w, "settings.html", settingsPageData{
 		Page:                    "settings",
 		Settings:                settings,
 		KavitaAPIKey:            settings.KavitaAPIKey,
 		Flash:                   flashMsg,
 		DownloadRoots:           settings.DownloadRoots,
-		RootManga:               settings.LibraryRoots[model.TypeManga],
-		RootManhwa:              settings.LibraryRoots[model.TypeManhwa],
-		RootManhua:              settings.LibraryRoots[model.TypeManhua],
-		KavitaLibManga:          settings.KavitaLibIDsByType[model.TypeManga],
-		KavitaLibManhwa:         settings.KavitaLibIDsByType[model.TypeManhwa],
-		KavitaLibManhua:         settings.KavitaLibIDsByType[model.TypeManhua],
 		KavitaLibraries:         kavitaLibs,
 		KavitaLibError:          kavitaLibErr,
+		Bindings:                bindings,
+		Rules:                   rules,
+		SuwayomiBaseURL:         settings.SuwayomiBaseURL,
+		SuwayomiAuthType:        settings.SuwayomiAuthType,
+		SuwayomiUsername:        settings.SuwayomiUsername,
+		SuwayomiPassword:        settings.SuwayomiPassword,
+		LibraryMap:              libraryMap,
+		RenameExample:           renameExample(settings.RenameScheme),
+		DiskRows:                diskRows,
+		RecycleBinPath:          h.recycleBinPath,
+		RecycleBinRetentionDays: h.recycleBinRetentionDays,
+		BackupDir:               h.backupCfg.Dir,
+		BackupRetentionDays:     h.backupCfg.RetentionDays,
+		BackupIntervalHours:     h.backupCfg.IntervalHours,
+		Backups:                 views,
+		BackupNow:               now,
+	})
+}
+
+// renderSettingsWithError re-renders the Settings page with an error banner
+// and the user's in-progress edits preserved. Used by validation paths
+// (rename-scheme validator, no-delete-while-referenced guard, etc.) so a
+// rejected POST surfaces the failure inline without losing form values.
+//
+// The "preserved edits" argument list mirrors what saveSettings has already
+// parsed at the point of failure: the to-be-saved Settings (incl Suwayomi
+// overrides + DefaultBindingID), the submitted bindings, and the submitted
+// rules. Stored chrome (disk rows, backup list, recycle bin config) is
+// re-loaded fresh because it's not user-edited in the form. Kavita
+// libraries are NOT re-fetched on the error path — placeholder selects are
+// acceptable here and we don't want a slow remote call gating the error
+// render.
+func (h *Handler) renderSettingsWithError(
+	w http.ResponseWriter,
+	r *http.Request,
+	settings model.Settings,
+	bindings []model.Binding,
+	rules []model.ClassificationRule,
+	msg string,
+) {
+	if settings.LibraryRoots == nil {
+		settings.LibraryRoots = map[model.ContentType]string{}
+	}
+	if settings.KavitaLibIDsByType == nil {
+		settings.KavitaLibIDsByType = map[model.ContentType]int64{}
+	}
+	diskRows := h.buildDiskRows(settings)
+	now := time.Now()
+	entries, _ := dbbackup.List(h.backupDir)
+	views := make([]backupEntryView, 0, len(entries))
+	for _, e := range entries {
+		views = append(views, backupEntryView{
+			Entry:     e,
+			SizeHuman: formatBytes(e.SizeBytes),
+			AgeHuman:  formatAge(now, e.ModTime),
+		})
+	}
+	// Library map: best-effort, same as pageSettings. Pass the submitted
+	// bindings so the override-row dropdown reflects user edits.
+	lmCtx, lmCancel := context.WithTimeout(r.Context(), 3*time.Second)
+	libraryMap := buildLibraryMapData(lmCtx, settings, bindings)
+	lmCancel()
+
+	w.WriteHeader(http.StatusBadRequest)
+	h.render(w, "settings.html", settingsPageData{
+		Page:                    "settings",
+		Settings:                settings,
+		KavitaAPIKey:            settings.KavitaAPIKey,
+		Error:                   msg,
+		DownloadRoots:           settings.DownloadRoots,
+		Bindings:                bindings,
+		Rules:                   rules,
 		SuwayomiBaseURL:         settings.SuwayomiBaseURL,
 		SuwayomiAuthType:        settings.SuwayomiAuthType,
 		SuwayomiUsername:        settings.SuwayomiUsername,
@@ -1053,19 +1258,11 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 	settings.KavitaBaseURL = strings.TrimRight(r.FormValue("kavita_base_url"), "/")
 	settings.KavitaAPIKey = r.FormValue("kavita_api_key")
 
-	if settings.LibraryRoots == nil {
-		settings.LibraryRoots = map[model.ContentType]string{}
-	}
-	setIfNonEmpty(settings.LibraryRoots, model.TypeManga, r.FormValue("root_manga"))
-	setIfNonEmpty(settings.LibraryRoots, model.TypeManhwa, r.FormValue("root_manhwa"))
-	setIfNonEmpty(settings.LibraryRoots, model.TypeManhua, r.FormValue("root_manhua"))
-
-	if settings.KavitaLibIDsByType == nil {
-		settings.KavitaLibIDsByType = map[model.ContentType]int64{}
-	}
-	setLibID(settings.KavitaLibIDsByType, model.TypeManga, r.FormValue("kavita_lib_manga"))
-	setLibID(settings.KavitaLibIDsByType, model.TypeManhwa, r.FormValue("kavita_lib_manhwa"))
-	setLibID(settings.KavitaLibIDsByType, model.TypeManhua, r.FormValue("kavita_lib_manhua"))
+	// Plan B Task 8: the v1 root_<type> + kavita_lib_<type> form fields no
+	// longer arrive on the POST — Library Bindings (binding_*) supersede them.
+	// The v1 model fields Settings.LibraryRoots + Settings.KavitaLibIDsByType
+	// stay populated by Migration 2 for one-release rollback safety and pass
+	// through this handler untouched.
 
 	// --- Suwayomi connection + category overrides ---
 	settings.SuwayomiBaseURL = strings.TrimRight(strings.TrimSpace(r.FormValue("suwayomi_base_url")), "/")
@@ -1085,34 +1282,66 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 	settings.SuwayomiPassword = r.FormValue("suwayomi_password")
 
 	// Parse override rows. Form fields come as override_category_<idx> +
-	// override_library_<idx> pairs (idx is the JS counter, not stable).
-	// Walk r.Form and pick out matching pairs.
-	settings.SuwayomiCategoryOverrides = parseSuwayomiOverrides(r.Form)
+	// override_binding_<idx> pairs (idx is the JS counter, not stable).
+	// Plan B Task 5: writes now land in the v2 SuwayomiCategoryBindings map
+	// (Binding ID values) rather than the v1 SuwayomiCategoryOverrides map
+	// (Kavita library ID values). The v1 field is preserved by Migration 2
+	// for read-only fallback but no longer written from this handler — that
+	// closes the Plan A→B boundary where UI edits silently went to a map the
+	// classifier ignores.
+	settings.SuwayomiCategoryBindings = parseSuwayomiOverrides(r.Form)
+
+	// Parse the v2 form surfaces: Library Bindings, Classification Rules,
+	// Default Binding picker. Persist atomically (each store call is its
+	// own transaction; SaveBindings precedes SaveRules so rule FKs are
+	// guaranteed valid against the just-saved binding rows).
+	bindings, err := parseBindingsFromForm(r)
+	if err != nil {
+		http.Error(w, "parse bindings: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	rules, err := parseRulesFromForm(r)
+	if err != nil {
+		http.Error(w, "parse rules: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	settings.DefaultBindingID = parseDefaultBindingIDFromForm(r)
 
 	// Validate the rename scheme before persisting. On failure, re-render the
 	// Settings page with the error shown inline and all form values preserved
 	// so the user does not lose in-progress edits.
 	if err := filer.ValidateScheme(settings.RenameScheme); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		h.render(w, "settings.html", settingsPageData{
-			Page:            "settings",
-			Settings:        settings,
-			KavitaAPIKey:    settings.KavitaAPIKey,
-			Error:           "Invalid rename scheme: " + err.Error(),
-			DownloadRoots:   settings.DownloadRoots,
-			RootManga:       settings.LibraryRoots[model.TypeManga],
-			RootManhwa:      settings.LibraryRoots[model.TypeManhwa],
-			RootManhua:      settings.LibraryRoots[model.TypeManhua],
-			KavitaLibManga:  settings.KavitaLibIDsByType[model.TypeManga],
-			KavitaLibManhwa: settings.KavitaLibIDsByType[model.TypeManhwa],
-			KavitaLibManhua: settings.KavitaLibIDsByType[model.TypeManhua],
-			RenameExample:   renameExample(settings.RenameScheme),
-			// Kavita libraries not re-fetched on validation error — user will see
-			// placeholder selects, which is acceptable since this is an error path.
-		})
+		h.renderSettingsWithError(w, r, settings, bindings, rules, "Invalid rename scheme: "+err.Error())
 		return
 	}
 
+	// Validate that no submitted binding deletion would orphan a rule,
+	// Suwayomi override, or the Default Binding picker. Runs BEFORE
+	// SaveBindings so partial state never lands — if any reference would
+	// dangle, the whole POST is rejected and the form re-renders with an
+	// error banner naming each conflict. The user's in-progress edits are
+	// preserved (we pass the submitted bindings/rules/settings back to the
+	// renderer, not the stored values) so they can fix the conflict
+	// without losing work.
+	existing, _ := h.store.ListBindings()
+	if err := validateBindingsNotReferenced(bindings, rules, settings.SuwayomiCategoryBindings, settings.DefaultBindingID, existing); err != nil {
+		h.renderSettingsWithError(w, r, settings, bindings, rules, err.Error())
+		return
+	}
+
+	// Persist v2 surfaces. SaveBindings BEFORE SaveRules so the FK target
+	// rows exist when rule rows reference them. Each call is atomic
+	// (single-tx replace-all from Plan A); cross-method atomicity is not
+	// required for Plan B — partial failure mid-sequence leaves the user
+	// with a recoverable state and re-submitting the form corrects it.
+	if err := h.store.SaveBindings(bindings); err != nil {
+		http.Error(w, "save bindings: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := h.store.SaveRules(rules); err != nil {
+		http.Error(w, "save rules: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if err := h.store.SaveSettings(settings); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1777,126 +2006,6 @@ func (h *Handler) apiKavitaLibraries(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, kavitaLibrariesResponse{Libraries: libs})
 }
 
-// apiKavitaLibrariesFragment handles GET /api/kavita/libraries/fragment.
-// Returns an HTML fragment for HTMX: three labeled <select> elements populated
-// with Kavita library options. On failure returns HTTP 200 with an inline error
-// message (so HTMX always swaps the content and the user sees a readable message).
-//
-// Builds a fresh kavita.Client from current Settings each call so the user can
-// change Kavita URL/key in the form, click Save, then click Sync — and it just
-// works without any restart.
-func (h *Handler) apiKavitaLibrariesFragment(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-	settings, err := h.store.GetSettings()
-	if err != nil {
-		// Can't read settings — render error + disabled placeholders.
-		fmt.Fprintf(w, `<div class="form-error">Cannot read settings: %s</div>`, html(err.Error()))
-		writeKavitaLibPlaceholders(w, 0, 0, 0)
-		return
-	}
-	if settings.KavitaLibIDsByType == nil {
-		settings.KavitaLibIDsByType = map[model.ContentType]int64{}
-	}
-	savedManga := settings.KavitaLibIDsByType[model.TypeManga]
-	savedManhwa := settings.KavitaLibIDsByType[model.TypeManhwa]
-	savedManhua := settings.KavitaLibIDsByType[model.TypeManhua]
-
-	if settings.KavitaBaseURL == "" || settings.KavitaAPIKey == "" {
-		fmt.Fprint(w, `<div class="form-error">Kavita not configured. Set the base URL and API key in Settings &#8594; Kavita Connection above, click Save, then Sync.</div>`)
-		writeKavitaLibPlaceholders(w, savedManga, savedManhwa, savedManhua)
-		return
-	}
-
-	fetchCtx, fetchCancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer fetchCancel()
-	client := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)
-	libs, err := client.ListLibraries(fetchCtx)
-	if err != nil {
-		fmt.Fprintf(w, `<div class="form-error">Kavita unreachable: %s. Check Settings &#8594; Kavita Connection.</div>`,
-			html(err.Error()))
-		writeKavitaLibPlaceholders(w, savedManga, savedManhwa, savedManhua)
-		return
-	}
-
-	writeKavitaLibSelects(w, libs, savedManga, savedManhwa, savedManhua)
-}
-
-// writeKavitaLibSelects renders three labeled <select> elements populated with
-// the given Kavita library list. The currently-saved IDs get the selected attribute.
-// If a saved ID is non-zero but missing from the list, an "Unknown (ID: N)" option
-// is prepended.
-func writeKavitaLibSelects(w http.ResponseWriter, libs []kavita.Library, savedManga, savedManhwa, savedManhua int64) {
-	type entry struct {
-		label   string
-		name    string
-		savedID int64
-	}
-	rows := []entry{
-		{"MANGA LIBRARY", "kavita_lib_manga", savedManga},
-		{"MANHWA LIBRARY", "kavita_lib_manhwa", savedManhwa},
-		{"MANHUA LIBRARY", "kavita_lib_manhua", savedManhua},
-	}
-	for _, row := range rows {
-		fmt.Fprintf(w, `<div class="settings-row"><label class="settings-label">%s</label><div class="settings-input-wrap">`,
-			html(row.label))
-		fmt.Fprintf(w, `<select name="%s">`, html(row.name))
-		fmt.Fprint(w, `<option value="0">(none)</option>`)
-		// Prepend unknown option if saved ID is non-zero but not in list.
-		if row.savedID > 0 {
-			found := false
-			for _, lib := range libs {
-				if lib.ID == row.savedID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				fmt.Fprintf(w, `<option value="%d" selected>Unknown (ID: %d)</option>`,
-					row.savedID, row.savedID)
-			}
-		}
-		for _, lib := range libs {
-			sel := ""
-			if lib.ID == row.savedID {
-				sel = " selected"
-			}
-			fmt.Fprintf(w, `<option value="%d"%s>%s</option>`,
-				lib.ID, sel, html(lib.Name))
-		}
-		fmt.Fprint(w, `</select></div></div>`)
-	}
-}
-
-// writeKavitaLibPlaceholders renders three disabled <select> elements with a
-// placeholder option. The select name= attributes are preserved so form POST
-// parsing keeps working. A non-zero savedID renders a "(saved: N)" hint so the
-// user knows a value is persisted even though the list is unavailable.
-func writeKavitaLibPlaceholders(w http.ResponseWriter, savedManga, savedManhwa, savedManhua int64) {
-	type entry struct {
-		label   string
-		name    string
-		savedID int64
-	}
-	rows := []entry{
-		{"MANGA LIBRARY", "kavita_lib_manga", savedManga},
-		{"MANHWA LIBRARY", "kavita_lib_manhwa", savedManhwa},
-		{"MANHUA LIBRARY", "kavita_lib_manhua", savedManhua},
-	}
-	for _, row := range rows {
-		fmt.Fprintf(w, `<div class="settings-row"><label class="settings-label">%s</label><div class="settings-input-wrap">`,
-			html(row.label))
-		if row.savedID > 0 {
-			fmt.Fprintf(w, `<select name="%s" disabled><option value="%d" selected>Click Sync after configuring Kavita above (saved: %d)</option></select>`,
-				html(row.name), row.savedID, row.savedID)
-		} else {
-			fmt.Fprintf(w, `<select name="%s" disabled><option value="0">Click Sync after configuring Kavita above</option></select>`,
-				html(row.name))
-		}
-		fmt.Fprint(w, `</div></div>`)
-	}
-}
-
 // breadcrumb represents one segment in the path-browser breadcrumbs.
 type breadcrumb struct {
 	Label string
@@ -1994,18 +2103,6 @@ func jsonErr(w http.ResponseWriter, err error, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-}
-
-func setIfNonEmpty(m map[model.ContentType]string, k model.ContentType, v string) {
-	if v = strings.TrimSpace(v); v != "" {
-		m[k] = v
-	}
-}
-
-func setLibID(m map[model.ContentType]int64, k model.ContentType, v string) {
-	if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && n > 0 {
-		m[k] = n
-	}
 }
 
 func selectedIf(b bool) string {
