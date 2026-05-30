@@ -290,6 +290,8 @@ func parsePageTemplates() map[string]*template.Template {
 	// adding the partial to a new page is a one-line change here, not a
 	// fan-out across the codebase.
 	withOverrideRows := map[string]bool{"settings.html": true}
+	// Pages that need the binding-rows partial (Plan B Library Bindings card).
+	withBindingRows := map[string]bool{"settings.html": true}
 	m := make(map[string]*template.Template, len(pages)+1)
 	for _, name := range pages {
 		// Parse base + the specific page. This gives each page its own
@@ -297,6 +299,9 @@ func parsePageTemplates() map[string]*template.Template {
 		files := []string{"templates/base.html", "templates/" + name}
 		if withOverrideRows[name] {
 			files = append(files, "templates/override-rows.html")
+		}
+		if withBindingRows[name] {
+			files = append(files, "templates/binding-rows.html")
 		}
 		t := template.Must(
 			template.New("").Funcs(templateFuncs()).ParseFS(assets, files...),
@@ -445,6 +450,13 @@ type settingsPageData struct {
 	KavitaLibraries []kavita.Library
 	// KavitaLibError is set when a library fetch attempt failed; displayed inline.
 	KavitaLibError string
+
+	// --- Library Bindings v2 (Plan B) ---
+	// Bindings carries every persisted Library Binding from the v2 store.
+	// Empty slice renders an empty-state hint; the "+ Add Binding"
+	// affordance is always present. Reuses .KavitaLibraries (above) for
+	// the per-row Kavita dropdown so we fetch once and render twice.
+	Bindings []model.Binding
 
 	// --- Library Map: Suwayomi connection ---
 	SuwayomiBaseURL  string
@@ -844,6 +856,17 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 	libraryMap := buildLibraryMapData(lmCtx, settings)
 	lmCancel()
 
+	// --- Library Bindings v2 (Plan B) ---
+	// Best-effort: a store error renders the card with an empty list and
+	// the same "+ Add Binding" affordance so the user can still create
+	// one. We deliberately don't fail the whole page on a binding load
+	// error — the v1 sections below it must still be reachable until
+	// Task 8 removes them.
+	bindings, err := h.store.ListBindings()
+	if err != nil {
+		bindings = nil
+	}
+
 	// Pre-extract values typed-keyed by model.ContentType into plain fields,
 	// so the template can use {{.RootManga}} etc. with no reflection-time
 	// type mismatch. See settingsPageData doc comment.
@@ -861,6 +884,7 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		KavitaLibManhua:         settings.KavitaLibIDsByType[model.TypeManhua],
 		KavitaLibraries:         kavitaLibs,
 		KavitaLibError:          kavitaLibErr,
+		Bindings:                bindings,
 		SuwayomiBaseURL:         settings.SuwayomiBaseURL,
 		SuwayomiAuthType:        settings.SuwayomiAuthType,
 		SuwayomiUsername:        settings.SuwayomiUsername,

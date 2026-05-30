@@ -112,3 +112,89 @@ func TestAPIRulesEmptyReturnsJSONArrayNotNull(t *testing.T) {
 		t.Errorf("empty rules should marshal as []; got %q", body)
 	}
 }
+
+// TestSettingsPageRendersLibraryBindingsCard pins that the new card
+// renders existing bindings as form rows with Name, LibraryRoot, the
+// Kavita library dropdown, and a DefaultIsAdult checkbox.
+func TestSettingsPageRendersLibraryBindingsCard(t *testing.T) {
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 1, Name: "Manga", LibraryRoot: "/media/Library/Manga", KavitaLibID: 1, DefaultIsAdult: false},
+			{ID: 2, Name: "Manhwa 18+", LibraryRoot: "/media/Library/M18", KavitaLibID: 2, DefaultIsAdult: true},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "Library Bindings") {
+		t.Errorf("expected 'Library Bindings' heading in rendered HTML")
+	}
+	for _, want := range []string{"Manga", "/media/Library/Manga", "Manhwa 18+", "/media/Library/M18"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in rendered Library Bindings card", want)
+		}
+	}
+	// DefaultIsAdult checkbox: the 18+ row (ID 2) should be checked.
+	if !strings.Contains(body, `name="binding_default_is_adult_2" checked`) &&
+		!strings.Contains(body, `name="binding_default_is_adult_2" value="on" checked`) {
+		t.Errorf("expected DefaultIsAdult checkbox to be checked for binding ID 2; body excerpt: %s",
+			excerpt(body, "binding_default_is_adult_2", 120))
+	}
+	// The non-adult row (ID 1) must NOT have a checked attribute.
+	if strings.Contains(body, `name="binding_default_is_adult_1" checked`) {
+		t.Errorf("expected DefaultIsAdult checkbox NOT checked for binding ID 1")
+	}
+}
+
+// TestSettingsPageRendersAddBindingAffordance pins the + Add Binding
+// button exists even when there are no bindings yet.
+func TestSettingsPageRendersAddBindingAffordance(t *testing.T) {
+	st := &fakeStore{}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "+ Add Binding") {
+		t.Errorf("expected '+ Add Binding' affordance in rendered HTML")
+	}
+	// The <template> element is what powers the client-side add — pin it
+	// with the placeholder token so Task 5's POST handler can rely on the
+	// naming convention.
+	if !strings.Contains(body, "__NEW_IDX__") {
+		t.Errorf("expected '__NEW_IDX__' placeholder in the binding-row <template>")
+	}
+	if !strings.Contains(body, `id="binding-row-template"`) {
+		t.Errorf("expected <template id=\"binding-row-template\"> in rendered HTML")
+	}
+}
+
+// excerpt returns the substring of s around the first occurrence of needle.
+// Used to make test failures readable when the assertion is "body contains X".
+func excerpt(s, needle string, width int) string {
+	i := strings.Index(s, needle)
+	if i < 0 {
+		return "(needle not present)"
+	}
+	start := i - width/2
+	if start < 0 {
+		start = 0
+	}
+	end := i + len(needle) + width/2
+	if end > len(s) {
+		end = len(s)
+	}
+	return "..." + s[start:end] + "..."
+}

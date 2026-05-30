@@ -114,6 +114,47 @@
     </div>
   </div>
 
+  <!-- Library Bindings (Plan B v2) -->
+  <div class="settings-card">
+    <div class="settings-card-header" style="display:flex;align-items:center;justify-content:space-between;">
+      <div>
+        <p class="settings-card-title">Library Bindings</p>
+        <p class="settings-card-desc">Each binding is one library destination. A name (e.g. <em>Manga</em>, <em>Manhwa 18+</em>), a filesystem root, a Kavita library, and a default 18+ flag. Classification rules and Suwayomi category overrides below route series here.</p>
+      </div>
+      <button type="button" class="btn-sm" onclick="addBindingRow()">+ Add Binding</button>
+    </div>
+    <div class="settings-card-body">
+      <div id="binding-rows-body">
+        {{template "binding-rows" .}}
+      </div>
+      {{if not .Bindings}}
+      <p class="empty-state" style="margin:8px 0 0 0;">No bindings configured. Click <b>+ Add Binding</b> above to create your first library destination.</p>
+      {{end}}
+    </div>
+  </div>
+
+  <template id="binding-row-template">
+    <div class="settings-row binding-row" data-binding-id="0">
+      <input type="hidden" name="binding_id___NEW_IDX__" value="0">
+      <div class="settings-input-wrap binding-row-fields">
+        <input type="text" name="binding_name___NEW_IDX__" value=""
+          placeholder="Name (e.g. Manga, Manhwa 18+)" class="binding-name">
+        <input type="text" name="binding_library_root___NEW_IDX__" value=""
+          placeholder="/media/Library/..." class="binding-root">
+        <select name="binding_kavita_lib___NEW_IDX__" class="binding-kavita">
+          <option value="0">(none)</option>
+          {{range .KavitaLibraries}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+        </select>
+        <label class="binding-adult">
+          <input type="checkbox" name="binding_default_is_adult___NEW_IDX__">
+          18+
+        </label>
+        <button type="button" class="btn-sm binding-delete"
+          onclick="this.closest('.binding-row').remove()" title="Delete binding">&#x2715;</button>
+      </div>
+    </div>
+  </template>
+
   <!-- Library Roots -->
   <div class="settings-card">
     <div class="settings-card-header">
@@ -490,6 +531,33 @@
       '</div>';
     list.appendChild(row);
     if (window.htmx) { htmx.process(row); }
+  };
+})();
+
+// Add a new empty Library Binding row by cloning the <template>.
+// Each new row gets a unique suffix (newN) so its form fields don't
+// collide on POST. The submit handler in Task 5 will treat the suffix
+// as ID=0 (new row); the row's hidden binding_id_<suffix> is also 0.
+(function() {
+  var counter = 0;
+  window.addBindingRow = function() {
+    counter++;
+    var tpl = document.getElementById('binding-row-template');
+    var body = document.getElementById('binding-rows-body');
+    if (!tpl || !body) { return; }
+    var idx = 'new' + counter;
+    // Materialise the template into a detached wrapper so we can run
+    // a string replace on its innerHTML before appending. Cloning the
+    // DocumentFragment and walking attributes is more correct but
+    // dramatically more code; replaceAll on a freshly-cloned subtree
+    // can't conflict with the rest of the page.
+    var frag = document.importNode(tpl.content, true);
+    var wrapper = document.createElement('div');
+    wrapper.appendChild(frag);
+    wrapper.innerHTML = wrapper.innerHTML.replaceAll('__NEW_IDX__', idx);
+    while (wrapper.firstChild) {
+      body.appendChild(wrapper.firstChild);
+    }
   };
 })();
 

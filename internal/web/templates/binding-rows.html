@@ -1,0 +1,26 @@
+{{define "binding-rows"}}
+{{$libs := .KavitaLibraries}}
+{{range .Bindings}}
+<div class="settings-row binding-row" data-binding-id="{{.ID}}">
+  <input type="hidden" name="binding_id_{{.ID}}" value="{{.ID}}">
+  <div class="settings-input-wrap binding-row-fields">
+    <input type="text" name="binding_name_{{.ID}}" value="{{.Name}}"
+      placeholder="Name (e.g. Manga, Manhwa 18+)" class="binding-name">
+    <input type="text" name="binding_library_root_{{.ID}}" value="{{.LibraryRoot}}"
+      placeholder="/media/Library/..." class="binding-root">
+    <select name="binding_kavita_lib_{{.ID}}" class="binding-kavita">
+      <option value="0">(none)</option>
+      {{$current := .KavitaLibID}}
+      {{if and (gt $current 0) (kavitaLibNotInList $current $libs)}}<option value="{{$current}}" selected>Unknown (ID: {{$current}})</option>{{end}}
+      {{range $libs}}<option value="{{.ID}}"{{if eq .ID $current}} selected{{end}}>{{.Name}}</option>{{end}}
+    </select>
+    <label class="binding-adult">
+      <input type="checkbox" name="binding_default_is_adult_{{.ID}}"{{if .DefaultIsAdult}} checked{{end}}>
+      18+
+    </label>
+    <button type="button" class="btn-sm binding-delete"
+      onclick="this.closest('.binding-row').remove()" title="Delete binding">&#x2715;</button>
+  </div>
+</div>
+{{end}}
+{{end}}
