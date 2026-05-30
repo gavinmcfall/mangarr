@@ -112,3 +112,50 @@ type Settings struct {
 	// feature disabled = pure AniList classification.
 	SuwayomiCategoryOverrides map[int64]int64 `json:"suwayomi_category_overrides,omitempty"`
 }
+
+// Binding is one library destination the user has defined. Replaces the
+// closed-enum routing of v1 (Library Map). Each binding owns a filesystem
+// root and a Kavita library ID for the scan trigger.
+type Binding struct {
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	LibraryRoot    string `json:"library_root"`
+	KavitaLibID    int64  `json:"kavita_lib_id"`
+	DefaultIsAdult bool   `json:"default_is_adult"`
+}
+
+// ClassificationRule maps a metadata condition to a binding. Rules are
+// stored as an ordered list; the classifier walks them ascending by
+// Priority and routes the series to the first matching rule's binding.
+type ClassificationRule struct {
+	ID        int64         `json:"id"`
+	Priority  int           `json:"priority"`
+	Name      string        `json:"name"`
+	Condition RuleCondition `json:"condition"`
+	BindingID int64         `json:"binding_id"`
+}
+
+// RuleCondition is AND-semantics across set fields. Pointer types let nil
+// mean "wildcard" (don't constrain) while explicit zero values (e.g. an
+// explicit IsAdult=false) constrain to that value.
+type RuleCondition struct {
+	CountryOfOrigin  *string `json:"country_of_origin,omitempty"`
+	IsAdult          *bool   `json:"is_adult,omitempty"`
+	Format           *string `json:"format,omitempty"`
+	SourcePathPrefix *string `json:"source_path_prefix,omitempty"`
+}
+
+// IsPathOnly reports whether this condition only constrains the source
+// path. Path-only rules are evaluated in the classifier's step 1 short-
+// circuit, before any AniList call.
+func (c RuleCondition) IsPathOnly() bool {
+	return c.SourcePathPrefix != nil && c.CountryOfOrigin == nil && c.IsAdult == nil && c.Format == nil
+}
+
+// Decision is the classifier's output: which binding to route to, plus
+// the Via tag that gets recorded on the activity log entry so users can
+// audit how each series was classified.
+type Decision struct {
+	BindingID int64
+	Via       string
+}
