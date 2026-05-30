@@ -30,7 +30,6 @@
 //	POST /api/backups/run            → Trigger immediate backup; returns new Entry as JSON
 //	GET  /api/backups/{name}         → Download a backup file
 //	GET  /api/kavita/libraries       → JSON list of Kavita libraries
-//	GET  /api/kavita/libraries/fragment → HTMX HTML fragment: three library <select> elements
 //	GET  /api/bindings                → JSON list of Library Bindings (Plan B v2)
 //	GET  /api/rules                   → JSON list of Classification Rules ordered ascending by priority (Plan B v2)
 //	GET  /metrics                    → Prometheus metrics (text/plain; version=0.0.4)
@@ -250,7 +249,6 @@ func NewHandler(opts HandlerOpts) *Handler {
 
 	// Kavita library picker API
 	h.mux.HandleFunc("GET /api/kavita/libraries", h.apiKavitaLibraries)
-	h.mux.HandleFunc("GET /api/kavita/libraries/fragment", h.apiKavitaLibrariesFragment)
 
 	// Suwayomi connection + category override API
 	h.mux.HandleFunc("GET /api/suwayomi/test", h.apiSuwayomiTest)
@@ -475,26 +473,13 @@ func diskSpaceClass(pctUsed float64) string {
 }
 
 // settingsPageData holds pre-extracted plain fields for the Settings template.
-//
-// We deliberately AVOID using {{index .Settings.LibraryRoots "Manga"}} in
-// the template: html/template's reflect-based call requires the key arg type
-// to match exactly, and "Manga" is a string literal while LibraryRoots is
-// keyed by model.ContentType. The reflection panic returns HTTP 200 with a
-// half-rendered body — a silent UX break. Extract values in Go where types
-// are checked at compile time, then pass plain strings/ints to the template.
 type settingsPageData struct {
-	Page                    string
-	Settings                model.Settings
-	KavitaAPIKey            string
-	Flash                   string
-	Error                   string
-	DownloadRoots           []string // pre-extracted from Settings for template convenience
-	RootManga               string
-	RootManhwa              string
-	RootManhua              string
-	KavitaLibManga          int64
-	KavitaLibManhwa         int64
-	KavitaLibManhua         int64
+	Page          string
+	Settings      model.Settings
+	KavitaAPIKey  string
+	Flash         string
+	Error         string
+	DownloadRoots []string // pre-extracted from Settings for template convenience
 	// KavitaLibraries holds the fetched Kavita library list for the select dropdowns.
 	// Nil/empty means Kavita is not configured or unreachable → render placeholders.
 	KavitaLibraries []kavita.Library
@@ -993,21 +978,12 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 	libraryMap := buildLibraryMapData(lmCtx, settings, bindings)
 	lmCancel()
 
-	// Pre-extract values typed-keyed by model.ContentType into plain fields,
-	// so the template can use {{.RootManga}} etc. with no reflection-time
-	// type mismatch. See settingsPageData doc comment.
 	h.render(w, "settings.html", settingsPageData{
 		Page:                    "settings",
 		Settings:                settings,
 		KavitaAPIKey:            settings.KavitaAPIKey,
 		Flash:                   flashMsg,
 		DownloadRoots:           settings.DownloadRoots,
-		RootManga:               settings.LibraryRoots[model.TypeManga],
-		RootManhwa:              settings.LibraryRoots[model.TypeManhwa],
-		RootManhua:              settings.LibraryRoots[model.TypeManhua],
-		KavitaLibManga:          settings.KavitaLibIDsByType[model.TypeManga],
-		KavitaLibManhwa:         settings.KavitaLibIDsByType[model.TypeManhwa],
-		KavitaLibManhua:         settings.KavitaLibIDsByType[model.TypeManhua],
 		KavitaLibraries:         kavitaLibs,
 		KavitaLibError:          kavitaLibErr,
 		Bindings:                bindings,
@@ -1080,12 +1056,6 @@ func (h *Handler) renderSettingsWithError(
 		KavitaAPIKey:            settings.KavitaAPIKey,
 		Error:                   msg,
 		DownloadRoots:           settings.DownloadRoots,
-		RootManga:               settings.LibraryRoots[model.TypeManga],
-		RootManhwa:              settings.LibraryRoots[model.TypeManhwa],
-		RootManhua:              settings.LibraryRoots[model.TypeManhua],
-		KavitaLibManga:          settings.KavitaLibIDsByType[model.TypeManga],
-		KavitaLibManhwa:         settings.KavitaLibIDsByType[model.TypeManhwa],
-		KavitaLibManhua:         settings.KavitaLibIDsByType[model.TypeManhua],
 		Bindings:                bindings,
 		Rules:                   rules,
 		SuwayomiBaseURL:         settings.SuwayomiBaseURL,
@@ -1288,19 +1258,11 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 	settings.KavitaBaseURL = strings.TrimRight(r.FormValue("kavita_base_url"), "/")
 	settings.KavitaAPIKey = r.FormValue("kavita_api_key")
 
-	if settings.LibraryRoots == nil {
-		settings.LibraryRoots = map[model.ContentType]string{}
-	}
-	setIfNonEmpty(settings.LibraryRoots, model.TypeManga, r.FormValue("root_manga"))
-	setIfNonEmpty(settings.LibraryRoots, model.TypeManhwa, r.FormValue("root_manhwa"))
-	setIfNonEmpty(settings.LibraryRoots, model.TypeManhua, r.FormValue("root_manhua"))
-
-	if settings.KavitaLibIDsByType == nil {
-		settings.KavitaLibIDsByType = map[model.ContentType]int64{}
-	}
-	setLibID(settings.KavitaLibIDsByType, model.TypeManga, r.FormValue("kavita_lib_manga"))
-	setLibID(settings.KavitaLibIDsByType, model.TypeManhwa, r.FormValue("kavita_lib_manhwa"))
-	setLibID(settings.KavitaLibIDsByType, model.TypeManhua, r.FormValue("kavita_lib_manhua"))
+	// Plan B Task 8: the v1 root_<type> + kavita_lib_<type> form fields no
+	// longer arrive on the POST — Library Bindings (binding_*) supersede them.
+	// The v1 model fields Settings.LibraryRoots + Settings.KavitaLibIDsByType
+	// stay populated by Migration 2 for one-release rollback safety and pass
+	// through this handler untouched.
 
 	// --- Suwayomi connection + category overrides ---
 	settings.SuwayomiBaseURL = strings.TrimRight(strings.TrimSpace(r.FormValue("suwayomi_base_url")), "/")
@@ -2044,126 +2006,6 @@ func (h *Handler) apiKavitaLibraries(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, kavitaLibrariesResponse{Libraries: libs})
 }
 
-// apiKavitaLibrariesFragment handles GET /api/kavita/libraries/fragment.
-// Returns an HTML fragment for HTMX: three labeled <select> elements populated
-// with Kavita library options. On failure returns HTTP 200 with an inline error
-// message (so HTMX always swaps the content and the user sees a readable message).
-//
-// Builds a fresh kavita.Client from current Settings each call so the user can
-// change Kavita URL/key in the form, click Save, then click Sync — and it just
-// works without any restart.
-func (h *Handler) apiKavitaLibrariesFragment(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-	settings, err := h.store.GetSettings()
-	if err != nil {
-		// Can't read settings — render error + disabled placeholders.
-		fmt.Fprintf(w, `<div class="form-error">Cannot read settings: %s</div>`, html(err.Error()))
-		writeKavitaLibPlaceholders(w, 0, 0, 0)
-		return
-	}
-	if settings.KavitaLibIDsByType == nil {
-		settings.KavitaLibIDsByType = map[model.ContentType]int64{}
-	}
-	savedManga := settings.KavitaLibIDsByType[model.TypeManga]
-	savedManhwa := settings.KavitaLibIDsByType[model.TypeManhwa]
-	savedManhua := settings.KavitaLibIDsByType[model.TypeManhua]
-
-	if settings.KavitaBaseURL == "" || settings.KavitaAPIKey == "" {
-		fmt.Fprint(w, `<div class="form-error">Kavita not configured. Set the base URL and API key in Settings &#8594; Kavita Connection above, click Save, then Sync.</div>`)
-		writeKavitaLibPlaceholders(w, savedManga, savedManhwa, savedManhua)
-		return
-	}
-
-	fetchCtx, fetchCancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer fetchCancel()
-	client := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)
-	libs, err := client.ListLibraries(fetchCtx)
-	if err != nil {
-		fmt.Fprintf(w, `<div class="form-error">Kavita unreachable: %s. Check Settings &#8594; Kavita Connection.</div>`,
-			html(err.Error()))
-		writeKavitaLibPlaceholders(w, savedManga, savedManhwa, savedManhua)
-		return
-	}
-
-	writeKavitaLibSelects(w, libs, savedManga, savedManhwa, savedManhua)
-}
-
-// writeKavitaLibSelects renders three labeled <select> elements populated with
-// the given Kavita library list. The currently-saved IDs get the selected attribute.
-// If a saved ID is non-zero but missing from the list, an "Unknown (ID: N)" option
-// is prepended.
-func writeKavitaLibSelects(w http.ResponseWriter, libs []kavita.Library, savedManga, savedManhwa, savedManhua int64) {
-	type entry struct {
-		label   string
-		name    string
-		savedID int64
-	}
-	rows := []entry{
-		{"MANGA LIBRARY", "kavita_lib_manga", savedManga},
-		{"MANHWA LIBRARY", "kavita_lib_manhwa", savedManhwa},
-		{"MANHUA LIBRARY", "kavita_lib_manhua", savedManhua},
-	}
-	for _, row := range rows {
-		fmt.Fprintf(w, `<div class="settings-row"><label class="settings-label">%s</label><div class="settings-input-wrap">`,
-			html(row.label))
-		fmt.Fprintf(w, `<select name="%s">`, html(row.name))
-		fmt.Fprint(w, `<option value="0">(none)</option>`)
-		// Prepend unknown option if saved ID is non-zero but not in list.
-		if row.savedID > 0 {
-			found := false
-			for _, lib := range libs {
-				if lib.ID == row.savedID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				fmt.Fprintf(w, `<option value="%d" selected>Unknown (ID: %d)</option>`,
-					row.savedID, row.savedID)
-			}
-		}
-		for _, lib := range libs {
-			sel := ""
-			if lib.ID == row.savedID {
-				sel = " selected"
-			}
-			fmt.Fprintf(w, `<option value="%d"%s>%s</option>`,
-				lib.ID, sel, html(lib.Name))
-		}
-		fmt.Fprint(w, `</select></div></div>`)
-	}
-}
-
-// writeKavitaLibPlaceholders renders three disabled <select> elements with a
-// placeholder option. The select name= attributes are preserved so form POST
-// parsing keeps working. A non-zero savedID renders a "(saved: N)" hint so the
-// user knows a value is persisted even though the list is unavailable.
-func writeKavitaLibPlaceholders(w http.ResponseWriter, savedManga, savedManhwa, savedManhua int64) {
-	type entry struct {
-		label   string
-		name    string
-		savedID int64
-	}
-	rows := []entry{
-		{"MANGA LIBRARY", "kavita_lib_manga", savedManga},
-		{"MANHWA LIBRARY", "kavita_lib_manhwa", savedManhwa},
-		{"MANHUA LIBRARY", "kavita_lib_manhua", savedManhua},
-	}
-	for _, row := range rows {
-		fmt.Fprintf(w, `<div class="settings-row"><label class="settings-label">%s</label><div class="settings-input-wrap">`,
-			html(row.label))
-		if row.savedID > 0 {
-			fmt.Fprintf(w, `<select name="%s" disabled><option value="%d" selected>Click Sync after configuring Kavita above (saved: %d)</option></select>`,
-				html(row.name), row.savedID, row.savedID)
-		} else {
-			fmt.Fprintf(w, `<select name="%s" disabled><option value="0">Click Sync after configuring Kavita above</option></select>`,
-				html(row.name))
-		}
-		fmt.Fprint(w, `</div></div>`)
-	}
-}
-
 // breadcrumb represents one segment in the path-browser breadcrumbs.
 type breadcrumb struct {
 	Label string
@@ -2261,18 +2103,6 @@ func jsonErr(w http.ResponseWriter, err error, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-}
-
-func setIfNonEmpty(m map[model.ContentType]string, k model.ContentType, v string) {
-	if v = strings.TrimSpace(v); v != "" {
-		m[k] = v
-	}
-}
-
-func setLibID(m map[model.ContentType]int64, k model.ContentType, v string) {
-	if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && n > 0 {
-		m[k] = n
-	}
 }
 
 func selectedIf(b bool) string {

@@ -184,32 +184,11 @@ func TestSettingsPageHasLibraryMapHeading(t *testing.T) {
 	if !strings.Contains(body, "Library Map") {
 		t.Errorf("'Library Map' section heading missing")
 	}
-	// And the AniList sub-card MUST appear inside it.
-	if !strings.Contains(body, "Default: AniList Classification") {
-		t.Errorf("'Default: AniList Classification' sub-card heading missing")
-	}
+	// Plan B Task 8: the v1 "Default: AniList Classification" sub-card is gone
+	// — Bindings + Classification Rules + Default Binding cover that surface
+	// now. The Suwayomi Category Overrides sub-card remains inside Library Map.
 	if !strings.Contains(body, "Suwayomi Category Overrides") {
 		t.Errorf("'Suwayomi Category Overrides' sub-card heading missing")
-	}
-}
-
-// ---- Truth statement: Library Map contains two sub-cards in the right order.
-
-func TestLibraryMapSubcardOrdering(t *testing.T) {
-	h := newSuwayomiHandler("", nil, map[model.ContentType]int64{
-		model.TypeManga: 1, model.TypeManhwa: 2, model.TypeManhua: 3,
-	})
-	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	body := rr.Body.String()
-	idxAniList := strings.Index(body, "Default: AniList Classification")
-	idxOverrides := strings.Index(body, "Suwayomi Category Overrides")
-	if idxAniList < 0 || idxOverrides < 0 {
-		t.Fatalf("both sub-cards must be present (anilist=%d override=%d)", idxAniList, idxOverrides)
-	}
-	if idxOverrides < idxAniList {
-		t.Fatalf("Suwayomi Category Overrides sub-card appears BEFORE Default AniList — want AniList first (Plan B carry-forward)")
 	}
 }
 

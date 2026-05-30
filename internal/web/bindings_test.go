@@ -802,3 +802,48 @@ func TestPOSTSettingsRejectsDeletingBindingReferencedByDefaultBindingPicker(t *t
 		t.Errorf("expected error banner naming the referenced binding; body: %s", body)
 	}
 }
+
+// Plan B Task 8: the v1 "Library Roots" filesystem-path inputs are replaced by
+// the Library Bindings card's LibraryRoot column. Confirm the v1 heading and
+// form fields are no longer rendered on the Settings page.
+func TestSettingsPageNoLongerRendersV1LibraryRootsSection(t *testing.T) {
+	h, _, _ := newTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	// v1 section heading is gone (the wording was "Library Roots" inside its
+	// own settings-card; Plan B Bindings card supersedes it).
+	if strings.Contains(body, ">Library Roots<") {
+		t.Errorf("v1 'Library Roots' section heading still present; should be replaced by Library Bindings card")
+	}
+	// v1 form fields are gone.
+	if strings.Contains(body, `name="root_manga"`) ||
+		strings.Contains(body, `name="root_manhwa"`) ||
+		strings.Contains(body, `name="root_manhua"`) {
+		t.Errorf("v1 root_<type> form fields still rendered")
+	}
+}
+
+// Plan B Task 8: the v1 "Default: AniList Classification" subcard's three
+// kavita_lib_<type> dropdowns are replaced by per-binding KavitaLibID columns
+// in the Library Bindings card. Confirm the v1 dropdowns are no longer rendered.
+func TestSettingsPageNoLongerRendersV1KavitaLibrariesSection(t *testing.T) {
+	h, _, _ := newTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if strings.Contains(body, `name="kavita_lib_manga"`) ||
+		strings.Contains(body, `name="kavita_lib_manhwa"`) ||
+		strings.Contains(body, `name="kavita_lib_manhua"`) {
+		t.Errorf("v1 kavita_lib_<type> form fields still rendered")
+	}
+	// The "Default: AniList Classification" subcard wording is also gone;
+	// classification is now driven by Classification Rules + Default Binding.
+	if strings.Contains(body, "Default: AniList Classification") {
+		t.Errorf("v1 'Default: AniList Classification' subcard title still present")
+	}
+}

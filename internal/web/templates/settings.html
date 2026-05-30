@@ -246,64 +246,6 @@
     </div>
   </div>
 
-  <!-- Library Roots -->
-  <div class="settings-card">
-    <div class="settings-card-header">
-      <p class="settings-card-title">Library Roots</p>
-      <p class="settings-card-desc">Root paths on disk where each content type will be filed.</p>
-    </div>
-    <div class="settings-card-body">
-      <div class="settings-row">
-        <label class="settings-label">Manga root</label>
-        <div class="settings-input-wrap settings-input-with-browse">
-          <input type="text" name="root_manga" id="root_manga" value="{{.RootManga}}"
-            placeholder="/media/Library/Books/Manga">
-          <button type="button" class="btn-browse" title="Browse filesystem"
-            hx-get="/api/browse/fragment"
-            hx-vals='js:{path: document.getElementById("root_manga").value || "/media", target: "root_manga"}'
-            hx-target="#browse-modal-body"
-            hx-swap="innerHTML"
-            onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>
-            Browse
-          </button>
-        </div>
-      </div>
-      <div class="settings-row">
-        <label class="settings-label">Manhwa root</label>
-        <div class="settings-input-wrap settings-input-with-browse">
-          <input type="text" name="root_manhwa" id="root_manhwa" value="{{.RootManhwa}}"
-            placeholder="/media/Library/Books/Manhwa">
-          <button type="button" class="btn-browse" title="Browse filesystem"
-            hx-get="/api/browse/fragment"
-            hx-vals='js:{path: document.getElementById("root_manhwa").value || "/media", target: "root_manhwa"}'
-            hx-target="#browse-modal-body"
-            hx-swap="innerHTML"
-            onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>
-            Browse
-          </button>
-        </div>
-      </div>
-      <div class="settings-row">
-        <label class="settings-label">Manhua root</label>
-        <div class="settings-input-wrap settings-input-with-browse">
-          <input type="text" name="root_manhua" id="root_manhua" value="{{.RootManhua}}"
-            placeholder="/media/Library/Books/Manhua">
-          <button type="button" class="btn-browse" title="Browse filesystem"
-            hx-get="/api/browse/fragment"
-            hx-vals='js:{path: document.getElementById("root_manhua").value || "/media", target: "root_manhua"}'
-            hx-target="#browse-modal-body"
-            hx-swap="innerHTML"
-            onclick="document.getElementById('browse-modal').classList.add('browse-modal-open')">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v8.25m19.5 0A2.25 2.25 0 0 1 19.5 16.5h-15a2.25 2.25 0 0 1-2.25-2.25m19.5 0v-7.5A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v7.5" /></svg>
-            Browse
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <!-- Suwayomi Connection -->
   <div class="settings-card">
     <div class="settings-card-header">
@@ -359,82 +301,12 @@
   <div class="settings-card">
     <div class="settings-card-header">
       <p class="settings-card-title">Library Map</p>
-      <p class="settings-card-desc">How mangarr decides which Kavita library a series belongs to. AniList classification is the default; Suwayomi categories can override it for specific groupings.</p>
+      <p class="settings-card-desc">When a series comes from a Suwayomi category below, route it to the chosen binding instead of falling through to the Classification Rules above.</p>
     </div>
     <div class="settings-card-body" style="padding-bottom:8px;">
 
-      <!-- Sub-card: Default AniList Classification (first, drives the override card below) -->
-      <div class="settings-subcard">
-        <div class="settings-subcard-header" style="display:flex;align-items:center;justify-content:space-between;">
-          <div>
-            <p class="settings-subcard-title">Default: AniList Classification</p>
-            <p class="settings-subcard-desc">For series that don't match a Suwayomi override below, mangarr asks AniList for <code>countryOfOrigin</code> and routes by content type.</p>
-          </div>
-          <button type="button" class="btn-sm"
-                  hx-get="/api/kavita/libraries/fragment"
-                  hx-target="#kavita-lib-selects"
-                  hx-swap="innerHTML">Sync</button>
-        </div>
-        <div id="kavita-lib-selects">
-{{if .KavitaLibError}}
-<div class="form-error">Kavita unreachable: {{.KavitaLibError}}. Check Settings &#8594; Kavita Connection.</div>
-{{end}}
-{{if .KavitaLibraries}}
-        <div class="settings-row">
-          <label class="settings-label">MANGA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manga">
-              <option value="0">(none)</option>
-              {{if and (gt .KavitaLibManga 0) (kavitaLibNotInList .KavitaLibManga .KavitaLibraries)}}<option value="{{.KavitaLibManga}}" selected>Unknown (ID: {{.KavitaLibManga}})</option>{{end}}
-              {{range .KavitaLibraries}}<option value="{{.ID}}"{{if eq .ID $.KavitaLibManga}} selected{{end}}>{{.Name}}</option>{{end}}
-            </select>
-          </div>
-        </div>
-        <div class="settings-row">
-          <label class="settings-label">MANHWA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manhwa">
-              <option value="0">(none)</option>
-              {{if and (gt .KavitaLibManhwa 0) (kavitaLibNotInList .KavitaLibManhwa .KavitaLibraries)}}<option value="{{.KavitaLibManhwa}}" selected>Unknown (ID: {{.KavitaLibManhwa}})</option>{{end}}
-              {{range .KavitaLibraries}}<option value="{{.ID}}"{{if eq .ID $.KavitaLibManhwa}} selected{{end}}>{{.Name}}</option>{{end}}
-            </select>
-          </div>
-        </div>
-        <div class="settings-row">
-          <label class="settings-label">MANHUA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manhua">
-              <option value="0">(none)</option>
-              {{if and (gt .KavitaLibManhua 0) (kavitaLibNotInList .KavitaLibManhua .KavitaLibraries)}}<option value="{{.KavitaLibManhua}}" selected>Unknown (ID: {{.KavitaLibManhua}})</option>{{end}}
-              {{range .KavitaLibraries}}<option value="{{.ID}}"{{if eq .ID $.KavitaLibManhua}} selected{{end}}>{{.Name}}</option>{{end}}
-            </select>
-          </div>
-        </div>
-{{else}}
-        <div class="settings-row">
-          <label class="settings-label">MANGA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manga" disabled><option value="{{.KavitaLibManga}}">Click Sync after configuring Kavita above{{if gt .KavitaLibManga 0}} (saved: {{.KavitaLibManga}}){{end}}</option></select>
-          </div>
-        </div>
-        <div class="settings-row">
-          <label class="settings-label">MANHWA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manhwa" disabled><option value="{{.KavitaLibManhwa}}">Click Sync after configuring Kavita above{{if gt .KavitaLibManhwa 0}} (saved: {{.KavitaLibManhwa}}){{end}}</option></select>
-          </div>
-        </div>
-        <div class="settings-row">
-          <label class="settings-label">MANHUA LIBRARY</label>
-          <div class="settings-input-wrap">
-            <select name="kavita_lib_manhua" disabled><option value="{{.KavitaLibManhua}}">Click Sync after configuring Kavita above{{if gt .KavitaLibManhua 0}} (saved: {{.KavitaLibManhua}}){{end}}</option></select>
-          </div>
-        </div>
-{{end}}
-        </div>
-      </div>
-
       <!-- Sub-card: Suwayomi Category Overrides -->
-      <div class="settings-subcard" style="margin-top:16px;">
+      <div class="settings-subcard">
         <div class="settings-subcard-header" style="display:flex;align-items:center;justify-content:space-between;">
           <div>
             <p class="settings-subcard-title">Suwayomi Category Overrides</p>

@@ -325,11 +325,10 @@ func TestSettingsPageReturns200(t *testing.T) {
 	body := rr.Body.String()
 	// Assert the form rendered to the END (not corrupted mid-render by a
 	// template panic, which previously returned 200 with a half-baked body).
-	if !strings.Contains(body, `name="root_manga"`) {
-		t.Fatalf("settings form did not render root_manga input; body:\n%s", body)
-	}
-	if !strings.Contains(body, `name="kavita_lib_manhua"`) {
-		t.Fatalf("settings form did not render kavita_lib_manhua input (renders near the end)")
+	// Plan B Task 8: the v1 root_<type>/kavita_lib_<type> inputs are gone;
+	// assert on Plan B surfaces (Library Bindings card + Save button) instead.
+	if !strings.Contains(body, "Library Bindings") {
+		t.Fatalf("settings form did not render Library Bindings card; body:\n%s", body)
 	}
 	if !strings.Contains(body, "Save settings") {
 		t.Fatalf("settings form submit button missing — render incomplete")
@@ -499,17 +498,16 @@ func TestSaveSettingsFormPost(t *testing.T) {
 	// DNS lookup for the placeholder hostname. Returns empty library list = OK.
 	stub := kavitaStubServer(t, nil, 0, 0)
 	defer stub.Close()
+	// Plan B Task 8: the v1 root_<type> + kavita_lib_<type> form fields are
+	// gone — the Library Bindings card supersedes them. This POST exercises
+	// the remaining settings (Kavita connection, file mode, rename scheme,
+	// poll minutes) which still round-trip through saveSettings.
 	form := url.Values{
-		"file_mode":         {"copy"},
-		"rename_scheme":     {"{series}/{series} - Ch.{chapter}.cbz"},
-		"poll_minutes":      {"60"},
-		"kavita_base_url":   {stub.URL},
-		"kavita_api_key":    {"test-key"},
-		"root_manga":        {"/lib/Manga"},
-		"root_manhwa":       {"/lib/Manhwa"},
-		"root_manhua":       {""},
-		"kavita_lib_manga":  {"7"},
-		"kavita_lib_manhwa": {"9"},
+		"file_mode":       {"copy"},
+		"rename_scheme":   {"{series}/{series} - Ch.{chapter}.cbz"},
+		"poll_minutes":    {"60"},
+		"kavita_base_url": {stub.URL},
+		"kavita_api_key":  {"test-key"},
 	}
 	req := httptest.NewRequest(http.MethodPost, "/settings",
 		strings.NewReader(form.Encode()))
@@ -525,14 +523,8 @@ func TestSaveSettingsFormPost(t *testing.T) {
 	if st.settings.FileMode != model.ModeCopy {
 		t.Fatalf("want ModeCopy, got %q", st.settings.FileMode)
 	}
-	if st.settings.LibraryRoots[model.TypeManga] != "/lib/Manga" {
-		t.Fatalf("want manga root /lib/Manga, got %q", st.settings.LibraryRoots[model.TypeManga])
-	}
 	if st.settings.KavitaAPIKey != "test-key" {
 		t.Fatalf("want KavitaAPIKey=test-key, got %q", st.settings.KavitaAPIKey)
-	}
-	if st.settings.KavitaLibIDsByType[model.TypeManga] != 7 {
-		t.Fatalf("want KavitaLibIDsByType[Manga]=7, got %d", st.settings.KavitaLibIDsByType[model.TypeManga])
 	}
 
 	// Round-trip: GET /settings and assert the rendered form pre-populates
@@ -545,18 +537,8 @@ func TestSaveSettingsFormPost(t *testing.T) {
 		t.Fatalf("follow-up GET /settings: want 200, got %d", rr2.Code)
 	}
 	body := rr2.Body.String()
-	if !strings.Contains(body, `value="/lib/Manga"`) {
-		t.Fatalf("rendered settings form does not contain saved manga root; body excerpt:\n%s",
-			snippet(body, "root_manga", 120))
-	}
-	if !strings.Contains(body, `value="/lib/Manhwa"`) {
-		t.Fatalf("rendered settings form does not contain saved manhwa root")
-	}
 	if !strings.Contains(body, `value="60"`) {
 		t.Fatalf("rendered settings form does not contain saved poll_minutes=60")
-	}
-	if !strings.Contains(body, `value="7"`) {
-		t.Fatalf("rendered settings form does not contain saved kavita_lib_manga=7")
 	}
 	if !strings.Contains(body, `value="test-key"`) {
 		t.Fatalf("rendered settings form does not contain saved kavita_api_key")
@@ -568,14 +550,11 @@ func TestSaveSettingsInvalidSchemeReturns400(t *testing.T) {
 	savedBefore := st.settings.RenameScheme
 
 	form := url.Values{
-		"file_mode":         {"copy"},
-		"rename_scheme":     {"{series}/{series} - Ch.{chapter}.cbz - {volume}"},
-		"poll_minutes":      {"60"},
-		"kavita_base_url":   {"http://kavita:5000"},
-		"kavita_api_key":    {"test-key"},
-		"root_manga":        {"/lib/Manga"},
-		"kavita_lib_manga":  {"7"},
-		"kavita_lib_manhwa": {"9"},
+		"file_mode":       {"copy"},
+		"rename_scheme":   {"{series}/{series} - Ch.{chapter}.cbz - {volume}"},
+		"poll_minutes":    {"60"},
+		"kavita_base_url": {"http://kavita:5000"},
+		"kavita_api_key":  {"test-key"},
 	}
 	req := httptest.NewRequest(http.MethodPost, "/settings",
 		strings.NewReader(form.Encode()))
@@ -1840,9 +1819,13 @@ func TestSaveSettingsFormPostUpdatesDownloadRoots(t *testing.T) {
 }
 
 func TestBrowseFromCurrentPathRendersHxVals(t *testing.T) {
+	// After Plan B Task 8 the v1 Library Roots browse buttons are gone, so
+	// this test now exercises the Download Roots browse buttons (the only
+	// remaining Browse-button surface on the Settings page).
 	st := &fakeStore{
 		settings: model.Settings{
-			LibraryRoots:       map[model.ContentType]string{model.TypeManga: "/lib/Manga"},
+			DownloadRoots:      []string{"/media/Downloads/suwayomi"},
+			LibraryRoots:       map[model.ContentType]string{},
 			KavitaLibIDsByType: map[model.ContentType]int64{},
 		},
 	}
@@ -2034,194 +2017,5 @@ func TestAPIKavitaLibrariesWhenUnconfiguredReturns503(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("want 503 when Kavita not configured, got %d; body: %s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestKavitaLibrariesFragmentRendersSelects(t *testing.T) {
-	libs := []kavita.Library{
-		{ID: 3, Name: "Manhwa", Type: 0},
-		{ID: 7, Name: "Manga JP", Type: 0},
-	}
-	srv := kavitaStubServer(t, libs, 0, 0)
-	defer srv.Close()
-	h := newKavitaLibHandler(srv.URL, 7, 3, 0)
-	req := httptest.NewRequest(http.MethodGet, "/api/kavita/libraries/fragment", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
-	}
-	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
-		t.Fatalf("want text/html, got %q", ct)
-	}
-	body := rr.Body.String()
-	// All three select name= attributes must be present.
-	if !strings.Contains(body, `name="kavita_lib_manga"`) {
-		t.Errorf("kavita_lib_manga select not in fragment; body:\n%s", body)
-	}
-	if !strings.Contains(body, `name="kavita_lib_manhwa"`) {
-		t.Errorf("kavita_lib_manhwa select not in fragment; body:\n%s", body)
-	}
-	if !strings.Contains(body, `name="kavita_lib_manhua"`) {
-		t.Errorf("kavita_lib_manhua select not in fragment; body:\n%s", body)
-	}
-	// Library names must appear as options.
-	if !strings.Contains(body, "Manga JP") {
-		t.Errorf("library 'Manga JP' not in fragment; body:\n%s", body)
-	}
-	if !strings.Contains(body, "Manhwa") {
-		t.Errorf("library 'Manhwa' not in fragment; body:\n%s", body)
-	}
-	// The currently-saved IDs (manga=7, manhwa=3) must be selected.
-	if !strings.Contains(body, `value="7" selected`) {
-		t.Errorf("manga library ID 7 not selected in fragment; body:\n%s", body)
-	}
-	if !strings.Contains(body, `value="3" selected`) {
-		t.Errorf("manhwa library ID 3 not selected in fragment; body:\n%s", body)
-	}
-}
-
-func TestKavitaLibrariesFragmentShowsErrorOnFailure(t *testing.T) {
-	// Use an httptest server that returns 401 on auth → kavita.ListLibraries
-	// fails immediately (no real network hang), and the fragment endpoint
-	// renders an inline error + the three placeholder selects.
-	srv := kavitaStubServer(t, nil, http.StatusUnauthorized, 0)
-	defer srv.Close()
-	h := newKavitaLibHandler(srv.URL, 0, 0, 0)
-	req := httptest.NewRequest(http.MethodGet, "/api/kavita/libraries/fragment", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	// Must return 200 so HTMX swaps the content.
-	if rr.Code != http.StatusOK {
-		t.Fatalf("want 200 (UX > strict HTTP), got %d; body: %s", rr.Code, rr.Body.String())
-	}
-	body := rr.Body.String()
-	if !strings.Contains(body, "Kavita unreachable") {
-		t.Errorf("expected 'Kavita unreachable' inline error; body:\n%s", body)
-	}
-	// The three select placeholders must still render so layout doesn't shift.
-	if !strings.Contains(body, `name="kavita_lib_manga"`) {
-		t.Errorf("kavita_lib_manga select not in error fragment; body:\n%s", body)
-	}
-	if !strings.Contains(body, `name="kavita_lib_manhua"`) {
-		t.Errorf("kavita_lib_manhua select not in error fragment; body:\n%s", body)
-	}
-}
-
-func TestKavitaLibrariesFragmentWhenUnconfiguredShowsConfigurePrompt(t *testing.T) {
-	// Settings has no URL/key configured → fragment 200 with "not configured" message.
-	st := &fakeStore{
-		settings: model.Settings{
-			LibraryRoots:       map[model.ContentType]string{},
-			KavitaLibIDsByType: map[model.ContentType]int64{},
-		},
-	}
-	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
-	req := httptest.NewRequest(http.MethodGet, "/api/kavita/libraries/fragment", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
-	}
-	body := rr.Body.String()
-	if !strings.Contains(body, "not configured") {
-		t.Errorf("expected 'not configured' message; body:\n%s", body)
-	}
-	if !strings.Contains(body, `name="kavita_lib_manga"`) {
-		t.Errorf("placeholder select for kavita_lib_manga missing; body:\n%s", body)
-	}
-}
-
-func TestKavitaLibrariesFragmentRendersUnknownOption(t *testing.T) {
-	// Saved manga ID=99 is not in the fetched library list.
-	libs := []kavita.Library{
-		{ID: 1, Name: "Comics", Type: 1},
-	}
-	srv := kavitaStubServer(t, libs, 0, 0)
-	defer srv.Close()
-	h := newKavitaLibHandler(srv.URL, 99, 0, 0)
-	req := httptest.NewRequest(http.MethodGet, "/api/kavita/libraries/fragment", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
-	}
-	body := rr.Body.String()
-	if !strings.Contains(body, "Unknown (ID: 99)") {
-		t.Errorf("expected 'Unknown (ID: 99)' option for orphaned saved ID; body:\n%s", body)
-	}
-}
-
-func TestSettingsPageRendersKavitaLibSelectsWhenKavitaConfigured(t *testing.T) {
-	libs := []kavita.Library{
-		{ID: 5, Name: "My Manga", Type: 0},
-		{ID: 6, Name: "My Manhwa", Type: 0},
-	}
-	srv := kavitaStubServer(t, libs, 0, 0)
-	defer srv.Close()
-	h := newKavitaLibHandler(srv.URL, 5, 6, 0)
-	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
-	}
-	body := rr.Body.String()
-	// Section heading: renamed to "Library Map" in Plan C.
-	if !strings.Contains(body, "Library Map") {
-		t.Errorf("'Library Map' heading not in settings page; body excerpt:\n%s", snippet(body, "Library", 300))
-	}
-	// Sync button.
-	if !strings.Contains(body, "Sync") {
-		t.Errorf("'Sync' button not in settings page; body excerpt:\n%s", snippet(body, "Kavita", 300))
-	}
-	// Populated selects — library names must appear.
-	if !strings.Contains(body, "My Manga") {
-		t.Errorf("library 'My Manga' not in settings page; body excerpt:\n%s", snippet(body, "kavita_lib", 400))
-	}
-	if !strings.Contains(body, "My Manhwa") {
-		t.Errorf("library 'My Manhwa' not in settings page; body excerpt:\n%s", snippet(body, "kavita_lib", 400))
-	}
-	// Select name= attributes must be present (for existing TestSettingsPageReturns200 compat).
-	if !strings.Contains(body, `name="kavita_lib_manhua"`) {
-		t.Errorf("kavita_lib_manhua select not in settings page; body:\n%s", snippet(body, "kavita_lib", 500))
-	}
-}
-
-func TestSettingsPageRendersPlaceholderSelectsWhenKavitaNotConfigured(t *testing.T) {
-	// No Kavita URL configured → placeholder selects with the name= attribute preserved.
-	st := &fakeStore{
-		settings: model.Settings{
-			LibraryRoots:       map[model.ContentType]string{},
-			KavitaLibIDsByType: map[model.ContentType]int64{},
-		},
-	}
-	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
-	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
-	}
-	body := rr.Body.String()
-	// The name= attributes must still be present for backwards compat.
-	if !strings.Contains(body, `name="kavita_lib_manga"`) {
-		t.Errorf("kavita_lib_manga select not present as placeholder; body:\n%s", snippet(body, "kavita_lib", 400))
-	}
-	if !strings.Contains(body, `name="kavita_lib_manhwa"`) {
-		t.Errorf("kavita_lib_manhwa select not present as placeholder; body:\n%s", snippet(body, "kavita_lib", 400))
-	}
-	if !strings.Contains(body, `name="kavita_lib_manhua"`) {
-		t.Errorf("kavita_lib_manhua select not present as placeholder; body:\n%s", snippet(body, "kavita_lib", 400))
-	}
-	// Must be disabled placeholders (no real options).
-	if !strings.Contains(body, "Click Sync after configuring Kavita") {
-		t.Errorf("placeholder text not present in selects; body:\n%s", snippet(body, "kavita_lib", 500))
 	}
 }
