@@ -296,14 +296,16 @@ func TestSaveSettingsPersistsOverrideRows(t *testing.T) {
 	if st.settings.SuwayomiPassword != "test-placeholder-pw" {
 		t.Errorf("Suwayomi password not persisted; got %q", st.settings.SuwayomiPassword)
 	}
-	if got := st.settings.SuwayomiCategoryOverrides; len(got) != 2 {
+	// Plan B Task 5: POST writes the v2 SuwayomiCategoryBindings map, not the
+	// legacy v1 SuwayomiCategoryOverrides. Values are Library Binding IDs.
+	if got := st.settings.SuwayomiCategoryBindings; len(got) != 2 {
 		t.Fatalf("want exactly 2 overrides persisted (rows with both fields populated), got %d: %+v", len(got), got)
 	}
-	if st.settings.SuwayomiCategoryOverrides[5] != 2 {
-		t.Errorf("want overrides[5]=2, got %d", st.settings.SuwayomiCategoryOverrides[5])
+	if st.settings.SuwayomiCategoryBindings[5] != 2 {
+		t.Errorf("want overrides[5]=2, got %d", st.settings.SuwayomiCategoryBindings[5])
 	}
-	if st.settings.SuwayomiCategoryOverrides[7] != 1 {
-		t.Errorf("want overrides[7]=1, got %d", st.settings.SuwayomiCategoryOverrides[7])
+	if st.settings.SuwayomiCategoryBindings[7] != 1 {
+		t.Errorf("want overrides[7]=1, got %d", st.settings.SuwayomiCategoryBindings[7])
 	}
 }
 

@@ -74,8 +74,47 @@ func (f *fakeStore) SetSeriesType(id int64, ct model.ContentType) error {
 	}
 	return nil
 }
-func (f *fakeStore) ListBindings() ([]model.Binding, error)            { return f.bindings, nil }
-func (f *fakeStore) ListRules() ([]model.ClassificationRule, error)    { return f.rules, nil }
+func (f *fakeStore) ListBindings() ([]model.Binding, error)         { return f.bindings, nil }
+func (f *fakeStore) ListRules() ([]model.ClassificationRule, error) { return f.rules, nil }
+func (f *fakeStore) SaveBindings(in []model.Binding) error {
+	// Assign a synthetic ID to any incoming row with ID==0 so subsequent
+	// lookups (e.g. tests checking FK consistency) have something to bind to.
+	// Real *store.Store does the same via INSERT-RETURNING.
+	nextID := int64(1)
+	for _, b := range f.bindings {
+		if b.ID >= nextID {
+			nextID = b.ID + 1
+		}
+	}
+	out := make([]model.Binding, 0, len(in))
+	for _, b := range in {
+		if b.ID == 0 {
+			b.ID = nextID
+			nextID++
+		}
+		out = append(out, b)
+	}
+	f.bindings = out
+	return nil
+}
+func (f *fakeStore) SaveRules(in []model.ClassificationRule) error {
+	nextID := int64(1)
+	for _, r := range f.rules {
+		if r.ID >= nextID {
+			nextID = r.ID + 1
+		}
+	}
+	out := make([]model.ClassificationRule, 0, len(in))
+	for _, r := range in {
+		if r.ID == 0 {
+			r.ID = nextID
+			nextID++
+		}
+		out = append(out, r)
+	}
+	f.rules = out
+	return nil
+}
 
 // fakeRunner records RunOnce calls.
 type fakeRunner struct{ called int }

@@ -91,6 +91,8 @@ type Store interface {
 	SetSeriesType(id int64, ct model.ContentType) error
 	ListBindings() ([]model.Binding, error)
 	ListRules() ([]model.ClassificationRule, error)
+	SaveBindings([]model.Binding) error
+	SaveRules([]model.ClassificationRule) error
 }
 
 // Runner can execute one poll pass on demand.
@@ -1181,10 +1183,29 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Parse override rows. Form fields come as override_category_<idx> +
 	// override_binding_<idx> pairs (idx is the JS counter, not stable).
-	// Walk r.Form and pick out matching pairs. Plan B v2 renamed the
-	// right-hand field; Task 5 will migrate the persisted target from
-	// SuwayomiCategoryOverrides to SuwayomiCategoryBindings.
-	settings.SuwayomiCategoryOverrides = parseSuwayomiOverrides(r.Form)
+	// Plan B Task 5: writes now land in the v2 SuwayomiCategoryBindings map
+	// (Binding ID values) rather than the v1 SuwayomiCategoryOverrides map
+	// (Kavita library ID values). The v1 field is preserved by Migration 2
+	// for read-only fallback but no longer written from this handler — that
+	// closes the Plan A→B boundary where UI edits silently went to a map the
+	// classifier ignores.
+	settings.SuwayomiCategoryBindings = parseSuwayomiOverrides(r.Form)
+
+	// Parse the v2 form surfaces: Library Bindings, Classification Rules,
+	// Default Binding picker. Persist atomically (each store call is its
+	// own transaction; SaveBindings precedes SaveRules so rule FKs are
+	// guaranteed valid against the just-saved binding rows).
+	bindings, err := parseBindingsFromForm(r)
+	if err != nil {
+		http.Error(w, "parse bindings: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	rules, err := parseRulesFromForm(r)
+	if err != nil {
+		http.Error(w, "parse rules: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	settings.DefaultBindingID = parseDefaultBindingIDFromForm(r)
 
 	// Validate the rename scheme before persisting. On failure, re-render the
 	// Settings page with the error shown inline and all form values preserved
@@ -1210,6 +1231,19 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Persist v2 surfaces. SaveBindings BEFORE SaveRules so the FK target
+	// rows exist when rule rows reference them. Each call is atomic
+	// (single-tx replace-all from Plan A); cross-method atomicity is not
+	// required for Plan B — partial failure mid-sequence leaves the user
+	// with a recoverable state and re-submitting the form corrects it.
+	if err := h.store.SaveBindings(bindings); err != nil {
+		http.Error(w, "save bindings: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := h.store.SaveRules(rules); err != nil {
+		http.Error(w, "save rules: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if err := h.store.SaveSettings(settings); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

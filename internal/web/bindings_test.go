@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -487,6 +488,158 @@ func TestSuwayomiOverridesFragmentUsesBindingFormFieldName(t *testing.T) {
 }
 
 // excerpt returns the substring of s around the first occurrence of needle.
+// ----- Task 5: atomic POST persists bindings + rules + default + Suwayomi overrides -----
+
+func TestPOSTSettingsPersistsNewBindings(t *testing.T) {
+	st := &fakeStore{}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	form := url.Values{}
+	// Existing v1 fields the saveSettings handler reads — keep them populated
+	// so the existing flow doesn't error.
+	form.Set("file_mode", "hardlink")
+	form.Set("rename_scheme", "{series}/{series} - Ch.{chapter}.cbz")
+	form.Set("poll_minutes", "15")
+	// Two new bindings, both with ID=0 (new). Form-field naming convention
+	// binding_<column>_<suffix>.
+	form.Set("binding_id_new1", "0")
+	form.Set("binding_name_new1", "Manga")
+	form.Set("binding_library_root_new1", "/media/Library/Manga")
+	form.Set("binding_kavita_lib_new1", "1")
+	// no binding_default_is_adult_new1 → unchecked
+	form.Set("binding_id_new2", "0")
+	form.Set("binding_name_new2", "Manhwa 18+")
+	form.Set("binding_library_root_new2", "/media/Library/M18")
+	form.Set("binding_kavita_lib_new2", "2")
+	form.Set("binding_default_is_adult_new2", "on")
+
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther && rec.Code != http.StatusOK {
+		t.Fatalf("status: want 303 or 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	bindings, _ := st.ListBindings()
+	if len(bindings) != 2 {
+		t.Fatalf("want 2 bindings persisted, got %d (%+v)", len(bindings), bindings)
+	}
+	// Form-suffix sort puts new1 before new2 lexicographically; fakeStore
+	// preserves submission order.
+	if bindings[0].Name != "Manga" || bindings[1].Name != "Manhwa 18+" {
+		t.Errorf("bindings persisted in wrong order or names: %+v", bindings)
+	}
+	if bindings[1].DefaultIsAdult != true {
+		t.Errorf("expected Manhwa 18+ to have DefaultIsAdult=true, got %+v", bindings[1])
+	}
+}
+
+func TestPOSTSettingsPersistsRules(t *testing.T) {
+	st := &fakeStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga"}}, // seeded for FK
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	form := url.Values{}
+	form.Set("file_mode", "hardlink")
+	form.Set("rename_scheme", "{series}/{series} - Ch.{chapter}.cbz")
+	form.Set("rule_id_new1", "0")
+	form.Set("rule_priority_new1", "100")
+	form.Set("rule_name_new1", "Japanese")
+	form.Set("rule_country_new1", "JP")
+	form.Set("rule_binding_new1", "1")
+
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther && rec.Code != http.StatusOK {
+		t.Fatalf("status: want 303 or 200, got %d", rec.Code)
+	}
+
+	rules, _ := st.ListRules()
+	if len(rules) != 1 || rules[0].Priority != 100 || rules[0].Name != "Japanese" {
+		t.Fatalf("rule not persisted as expected: %+v", rules)
+	}
+	if rules[0].Condition.CountryOfOrigin == nil || *rules[0].Condition.CountryOfOrigin != "JP" {
+		t.Errorf("rule CountryOfOrigin lost: %+v", rules[0].Condition)
+	}
+}
+
+func TestPOSTSettingsPersistsDefaultBindingID(t *testing.T) {
+	st := &fakeStore{
+		bindings: []model.Binding{{ID: 5, Name: "Catch-all"}},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	form := url.Values{}
+	form.Set("file_mode", "hardlink")
+	form.Set("rename_scheme", "{series}/{series} - Ch.{chapter}.cbz")
+	form.Set("default_binding_id", "5")
+
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got, _ := st.GetSettings()
+	if got.DefaultBindingID == nil || *got.DefaultBindingID != 5 {
+		t.Errorf("expected DefaultBindingID 5 after POST, got %v", got.DefaultBindingID)
+	}
+}
+
+func TestPOSTSettingsPersistsSuwayomiOverridesToV2Field(t *testing.T) {
+	st := &fakeStore{
+		bindings: []model.Binding{{ID: 7, Name: "Light Novels"}},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	form := url.Values{}
+	form.Set("file_mode", "hardlink")
+	form.Set("rename_scheme", "{series}/{series} - Ch.{chapter}.cbz")
+	// v2 renamed the right-hand to override_binding_<idx>; verify Plan B
+	// writes to SuwayomiCategoryBindings, NOT the v1 SuwayomiCategoryOverrides.
+	form.Set("override_category_new1", "42")
+	form.Set("override_binding_new1", "7")
+
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got, _ := st.GetSettings()
+	if got.SuwayomiCategoryBindings[42] != 7 {
+		t.Errorf("expected SuwayomiCategoryBindings[42] = 7, got %v", got.SuwayomiCategoryBindings)
+	}
+}
+
+func TestPOSTSettingsEmptyDefaultBindingClearsTheField(t *testing.T) {
+	id := int64(5)
+	st := &fakeStore{
+		bindings: []model.Binding{{ID: 5, Name: "Catch-all"}},
+		settings: model.Settings{DefaultBindingID: &id},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	form := url.Values{}
+	form.Set("file_mode", "hardlink")
+	form.Set("rename_scheme", "{series}/{series} - Ch.{chapter}.cbz")
+	form.Set("default_binding_id", "0") // 0 → nil
+
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got, _ := st.GetSettings()
+	if got.DefaultBindingID != nil {
+		t.Errorf("expected DefaultBindingID nil after POST with 0, got %v", *got.DefaultBindingID)
+	}
+}
+
 // Used to make test failures readable when the assertion is "body contains X".
 func excerpt(s, needle string, width int) string {
 	i := strings.Index(s, needle)
