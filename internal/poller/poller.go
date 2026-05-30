@@ -2,20 +2,26 @@
 //
 // On each RunOnce call the poller:
 //  1. Calls Scanner.ScanAll() to get candidate series from all download roots.
-//  2. For each series, classifies its type via Classifier.Classify.
-//     - TypeUnknown (or classify error): routed to UnmatchedSink + ActionUnmatched.
-//     - Known type with no configured library root: ActionError (misconfiguration).
-//     - Known type with a root: filed via Filer.File + ActionFiled, then Kavita scan.
-//  3. After filing, triggers a Kavita library scan (once per library per RunOnce
-//     call). The dedup map is marked only on success — a transient Kavita
-//     failure does not block a retry from a later same-type series in this tick.
-//  4. Every outcome (filed/unmatched/scan-triggered/error) is recorded via
-//     ActivityWriter for the UI's Activity/History view. Activity writes are
-//     best-effort: a failed AddActivity does not abort the tick.
+//  2. Loads the bindings table once via Bindings.ListBindings.
+//  3. For each series, classifies it via Classifier.Classify(ctx, ScanItem),
+//     getting a Decision{BindingID, Via}.
+//     - BindingID == 0 (or unresolvable): routed to UnmatchedSink + ActionUnmatched.
+//     - BindingID present but no matching row: ActionError (binding deleted
+//       between save and tick — surfaces the race to the operator).
+//     - BindingID resolved: filed into Binding.LibraryRoot via Filer.File +
+//       ActionFiled, then Kavita scan against Binding.KavitaLibID.
+//  4. After filing, triggers a Kavita library scan (once per library per
+//     RunOnce call). The dedup map is marked only on success — a transient
+//     Kavita failure does not block a retry from a later same-binding series
+//     in this tick.
+//  5. Every outcome (filed/unmatched/scan-triggered/error) is recorded via
+//     ActivityWriter with the Decision.Via tag for the UI's Activity/History
+//     view. Activity writes are best-effort: a failed AddActivity does not
+//     abort the tick.
 //
 // Interfaces are minimal so unit tests inject fakes without importing the
-// concrete scanner/classifier/filer/kavita packages. The concrete wiring lives
-// in main.go (Task 9).
+// concrete scanner/classifier/filer/kavita packages. The concrete wiring
+// lives in main.go.
 package poller
 
 import (
@@ -24,6 +30,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/gavinmcfall/mangarr/internal/classifier"
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
@@ -31,46 +38,39 @@ import (
 )
 
 // Scanner returns all candidate series from every configured download root.
-// The concrete implementation in main.go wraps scanner.Scan for each root.
 type Scanner interface {
 	ScanAll() ([]model.Series, error)
 }
 
-// Classifier maps a series to a ContentType plus a "via" reason string
-// (e.g. "anilist:KR", "suwayomi-override:category=42", "unmatched") used
-// in activity log entries. classifier.Classifier satisfies this interface
-// directly via its ClassifySeries method.
-//
-// The Via channel exists so the Library Map override path (Plan B)
-// records which classifier produced the routing decision. Pre-Plan-B
-// callers (Preview, the one-off FileOne path) still use the plain
-// title-only Classify method on the concrete classifier — they keep
-// receiving just (ContentType, error) and write empty Via.
+// Classifier is the six-step routing entry point: returns a Decision
+// the poller resolves to a Binding for filing + Kavita scan triggering.
+// *classifier.Classifier (constructed via classifier.New) satisfies this.
 type Classifier interface {
-	ClassifySeries(s model.Series) (model.ContentType, string, error)
+	Classify(ctx context.Context, item classifier.ScanItem) (model.Decision, error)
+}
+
+// BindingLister exposes the bindings table for the poller's per-tick
+// resolution of Decision.BindingID. *store.Store satisfies this directly.
+type BindingLister interface {
+	ListBindings() ([]model.Binding, error)
 }
 
 // Filer moves/copies/hardlinks the series files into the destination root.
-// The concrete implementation in main.go adapts filer.Filer.File, which takes
-// (series string, srcDir string, dstRoot string).
 type Filer interface {
 	File(s model.Series, dstRoot string) error
 }
 
-// Kavita triggers a library scan by library ID (int64 matches model.Settings.KavitaLibIDs).
-// kavita.Client.ScanLibrary satisfies this interface directly.
+// Kavita triggers a library scan by library ID.
 type Kavita interface {
 	ScanLibrary(libraryID int64) error
 }
 
-// UnmatchedSink records series whose type could not be determined.
-// The concrete implementation in main.go upserts into the store with StatusUnmatched.
+// UnmatchedSink records series that produced Decision{BindingID:0}.
 type UnmatchedSink interface {
 	MarkUnmatched(s model.Series) error
 }
 
 // ActivityWriter records an audit entry for the UI's Activity/History view.
-// store.Store.AddActivity satisfies this interface directly.
 type ActivityWriter interface {
 	AddActivity(e model.ActivityEntry) error
 }
@@ -86,20 +86,19 @@ type MetricsSink interface {
 }
 
 // Cache backs the per-title classification override used by FileOne.
-// store.Store satisfies this interface directly.
 type Cache interface {
 	CacheClassification(title string, ct model.ContentType) error
 }
 
-// SeriesStore is the subset of store.Store that FileOne needs for series lookup
-// and type update.
+// SeriesStore is the subset of store.Store that FileOne needs for series
+// lookup and type update.
 type SeriesStore interface {
 	GetSeriesByID(id int64) (model.Series, error)
 	SetSeriesType(id int64, ct model.ContentType) error
 }
 
-// Planner returns a dry-run plan for a series without touching the filesystem.
-// filer.Filer satisfies this interface via its Plan method.
+// Planner returns a dry-run plan for a series without touching the
+// filesystem. filer.Filer satisfies this via its Plan method.
 type Planner interface {
 	Plan(series, srcDir, dstRoot string) ([]filer.PlanEntry, error)
 }
@@ -109,9 +108,10 @@ type PreviewEntry struct {
 	Title        string            `json:"title"`
 	SourcePath   string            `json:"source_path"`
 	Source       string            `json:"source"`
-	Classified   model.ContentType `json:"classified"`    // empty if classifier returned Unknown
-	Reason       string            `json:"reason"`        // why Classified is empty / cached / etc.
-	DstRoot      string            `json:"dst_root"`      // empty if can't be filed (Unknown or no library root)
+	Classified   model.ContentType `json:"classified"`    // empty under v2 — preview now routes by Binding, not ContentType
+	BindingName  string            `json:"binding_name"`  // v2: human-readable binding label, empty when unmatched
+	Reason       string            `json:"reason"`        // why the row is unmatched / errored
+	DstRoot      string            `json:"dst_root"`      // empty if can't be filed
 	ChapterPlans []filer.PlanEntry `json:"chapter_plans"` // per-chapter from Plan; empty when DstRoot is empty
 	Status       string            `json:"status"`        // "matched" | "unmatched" | "misconfigured"
 	Note         string            `json:"note"`          // human note for the row
@@ -126,41 +126,39 @@ type SettingsProvider interface {
 }
 
 // SuwayomiClientFactory builds a fresh suwayomi.Client from the supplied
-// Settings on every call. Lives on the Poller so tests can substitute a
-// stub that never opens a real socket. Returns (nil, nil) when
-// Settings.SuwayomiBaseURL is empty — the poller treats that as
-// "feature disabled" and skips the refresh entirely.
+// Settings on every call.
 type SuwayomiClientFactory func(set model.Settings) (*suwayomi.Client, error)
 
-// Poller holds the wired-up dependencies and configuration for one orchestration tick.
+// Poller holds the wired-up dependencies and configuration for one
+// orchestration tick.
 type Poller struct {
-	Scanner      Scanner
-	Classifier   Classifier
-	Filer        Filer
-	Planner      Planner // optional; used by Preview only
-	Kavita       Kavita
-	Unmatched    UnmatchedSink
-	Activity     ActivityWriter
-	Metrics      MetricsSink                  // optional; nil disables all metric calls
-	Cache        Cache                        // optional; used by FileOne to persist manual type overrides
-	Store        SeriesStore                  // optional; used by FileOne to load and update series
-	LibraryRoots map[model.ContentType]string // content type → absolute library path
-	LibraryIDs   map[model.ContentType]int64  // content type → Kavita library ID
-	RecycleBin   *recyclebin.Bin              // optional; GC is called at end of each RunOnce tick
+	Scanner    Scanner
+	Classifier Classifier
+	Filer      Filer
+	Planner    Planner // optional; used by Preview only
+	Kavita     Kavita
+	Unmatched  UnmatchedSink
+	Activity   ActivityWriter
+	Metrics    MetricsSink // optional; nil disables all metric calls
+
+	// Bindings is the v2 routing table: the poller loads it once per tick
+	// and resolves Decision.BindingID against it.
+	Bindings BindingLister
+
+	Cache Cache // optional; used by FileOne to persist manual type overrides
+	Store SeriesStore // optional; used by FileOne to load and update series
+
+	// v1 ContentType→destination maps. Used by FileOne (manual classify
+	// from Unmatched) only; RunOnce uses Bindings instead. These remain
+	// until the deprecated v1 Settings fields are dropped one release
+	// after Plan A; the manual-classify UI still routes by ContentType.
+	LibraryRoots map[model.ContentType]string
+	LibraryIDs   map[model.ContentType]int64
+
+	RecycleBin *recyclebin.Bin // optional; GC is called at end of each RunOnce tick
 
 	// Library Map (Plan B). All three optional; nil values disable the
 	// Suwayomi override path without affecting AniList classification.
-	//
-	// SuwayomiCache is the long-lived shared cache the classifier reads on
-	// the file-time hot path. The poller refreshes it at the top of each
-	// RunOnce tick.
-	//
-	// SuwayomiClient is the constructor that builds a fresh client from
-	// current Settings every tick (PR #28 fresh-per-call pattern). A nil
-	// factory or an empty SuwayomiBaseURL in Settings skips the refresh.
-	//
-	// Settings is read on every tick to learn the current SuwayomiBaseURL,
-	// auth params, and DownloadRoots (passed to PathCache.Refresh).
 	SuwayomiCache  *suwayomi.PathCache
 	SuwayomiClient SuwayomiClientFactory
 	Settings       SettingsProvider
@@ -169,33 +167,22 @@ type Poller struct {
 // RunOnce performs one complete scan→classify→file→scan pass.
 //
 // Errors from individual series do not abort the tick; every series is
-// processed. A non-nil error is only returned for failures that prevent any
-// meaningful work (e.g. the scanner itself fails to start).
+// processed. A non-nil error is only returned for failures that prevent
+// any meaningful work (e.g. the scanner itself fails to start, or the
+// bindings table is unreadable).
 //
-// Kavita scans are deduplicated: if multiple series share the same ContentType
-// in a single RunOnce call, only one scan is triggered for that library —
-// BUT only on success. A failed scan does not poison the dedup map, so a
-// later same-type series in this tick will retry.
+// Kavita scans are deduplicated per binding library ID: if multiple
+// series share the same Binding in a single RunOnce call, only one scan
+// is triggered for that library — BUT only on success. A failed scan
+// does not poison the dedup map, so a later same-binding series in this
+// tick will retry.
 //
 // Every outcome is recorded via ActivityWriter (filed / unmatched /
-// scan-triggered / error) AFTER the action completes — never before — so a
-// mid-tick crash cannot produce a phantom success entry.
+// scan-triggered / error) AFTER the action completes — never before —
+// so a mid-tick crash cannot produce a phantom success entry.
 func (p *Poller) RunOnce(ctx context.Context) error {
 	// Library Map (Plan B): refresh the Suwayomi path cache at the top
-	// of every tick, BEFORE we scan, so the classifier's override path
-	// has fresh data when classifying any files this tick discovers.
-	//
-	// Failure here is non-fatal — the classifier falls through to
-	// AniList for cache misses, and previously-cached entries stay live
-	// (PathCache.Refresh swaps atomically on success only). One warning
-	// log per failed refresh, no activity entry — these are operator
-	// concerns, not per-series events.
-	//
-	// ctx scope is intentionally narrow: only the Suwayomi refresh
-	// observes cancellation today. Plumbing ctx into Scanner.ScanAll,
-	// Classifier, Filer.File, Kavita.ScanLibrary, etc. is a separate
-	// refactor and not in Plan B's scope — those calls retain their
-	// pre-Plan-B signatures.
+	// of every tick before classification consumes it.
 	p.refreshSuwayomiCache(ctx)
 
 	series, err := p.Scanner.ScanAll()
@@ -203,13 +190,29 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		return err
 	}
 
+	// Load bindings once per tick and build a lookup map. Cheap (handful
+	// of rows) and avoids N round-trips for series-heavy ticks.
+	bindingByID, err := p.loadBindings()
+	if err != nil {
+		// Bindings table unreadable — this is a hard fail; without
+		// bindings the poller has nowhere to route anything.
+		return fmt.Errorf("load bindings: %w", err)
+	}
+
 	// Track which Kavita library IDs have been scanned SUCCESSFULLY this tick.
 	scanned := map[int64]bool{}
 
 	for _, s := range series {
-		ct, via, classifyErr := p.Classifier.ClassifySeries(s)
-		if classifyErr != nil || ct == model.TypeUnknown {
-			// Route to unmatched — classification failed or type unknown.
+		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
+			Title:     s.Title,
+			ParentDir: s.SourcePath,
+		})
+		if classifyErr != nil || d.BindingID == 0 {
+			// Classifier failed or routed to Unmatched.
+			via := d.Via
+			if via == "" {
+				via = classifier.ViaUnmatched
+			}
 			if err := p.Unmatched.MarkUnmatched(s); err != nil {
 				p.recordActivityVia(s.Title, model.ActionError, via,
 					fmt.Sprintf("mark unmatched: %v", err))
@@ -222,56 +225,60 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			continue
 		}
 
-		root, ok := p.LibraryRoots[ct]
+		binding, ok := bindingByID[d.BindingID]
 		if !ok {
-			// Known type but no configured root — this is a misconfiguration,
-			// NOT something a user can fix from the Unmatched UI (reclassifying
-			// "Manhwa" → "Manhwa" would just loop forever). Record as error so
-			// the operator sees it in Activity and updates Settings.
-			p.recordActivityVia(s.Title, model.ActionError, via,
-				fmt.Sprintf("type %s has no configured library root — check Settings", ct))
+			// Decision references a binding that no longer exists.
+			// Race window: user deleted the binding between save and
+			// tick. Surface as ActionError so the operator sees it.
+			p.recordActivityVia(s.Title, model.ActionError, d.Via,
+				fmt.Sprintf("binding %d not found — was it deleted?", d.BindingID))
+			continue
+		}
+		if binding.LibraryRoot == "" {
+			// Binding exists but has no destination — misconfiguration.
+			p.recordActivityVia(s.Title, model.ActionError, d.Via,
+				fmt.Sprintf("binding %q (id=%d) has empty library_root — check Settings", binding.Name, binding.ID))
 			continue
 		}
 
-		s.Type = ct
-		if err := p.Filer.File(s, root); err != nil {
-			// Filer error: record, do NOT trigger scan, move on.
-			p.recordActivityVia(s.Title, model.ActionError, via,
+		if err := p.Filer.File(s, binding.LibraryRoot); err != nil {
+			p.recordActivityVia(s.Title, model.ActionError, d.Via,
 				fmt.Sprintf("file: %v", err))
 			if p.Metrics != nil {
 				p.Metrics.IncFileError()
 			}
 			continue
 		}
-		p.recordActivityVia(s.Title, model.ActionFiled, via,
-			fmt.Sprintf("filed into %s", root))
+		p.recordActivityVia(s.Title, model.ActionFiled, d.Via,
+			fmt.Sprintf("filed into %s", binding.LibraryRoot))
 		if p.Metrics != nil {
-			p.Metrics.IncFilesFiled(string(ct))
+			p.Metrics.IncFilesFiled(binding.Name)
 		}
 
-		// Trigger a Kavita scan for this library (once per library per tick,
-		// gated on SUCCESS so a transient failure can be retried by the next
-		// same-type series in this tick).
-		if id, ok := p.LibraryIDs[ct]; ok && !scanned[id] {
-			if err := p.Kavita.ScanLibrary(id); err != nil {
-				p.recordActivityVia(s.Title, model.ActionError, via,
-					fmt.Sprintf("kavita scan library %d: %v", id, err))
+		// Trigger a Kavita scan against the binding's library (once per
+		// library per tick, gated on SUCCESS so a transient failure can
+		// be retried by the next same-binding series in this tick).
+		// KavitaLibID == 0 means "no Kavita scan needed" — skip silently.
+		if binding.KavitaLibID != 0 && !scanned[binding.KavitaLibID] {
+			if err := p.Kavita.ScanLibrary(binding.KavitaLibID); err != nil {
+				p.recordActivityVia(s.Title, model.ActionError, d.Via,
+					fmt.Sprintf("kavita scan library %d: %v", binding.KavitaLibID, err))
 				if p.Metrics != nil {
 					p.Metrics.IncKavitaScan("error")
 				}
-				// Do NOT mark scanned[id] — let the next same-type series retry.
+				// Do NOT mark scanned[id] — let next same-binding series retry.
 				continue
 			}
-			p.recordActivityVia(s.Title, model.ActionScanTriggered, via,
-				fmt.Sprintf("library %d", id))
+			p.recordActivityVia(s.Title, model.ActionScanTriggered, d.Via,
+				fmt.Sprintf("library %d", binding.KavitaLibID))
 			if p.Metrics != nil {
 				p.Metrics.IncKavitaScan("success")
 			}
-			scanned[id] = true
+			scanned[binding.KavitaLibID] = true
 		}
 	}
-	// GC the recycle bin at the end of each tick (best-effort — a GC failure
-	// must never abort the tick or surface as a RunOnce error).
+
+	// GC the recycle bin at the end of each tick (best-effort).
 	if p.RecycleBin != nil {
 		files, dirs, gcErr := p.RecycleBin.GC(time.Now())
 		if gcErr != nil {
@@ -281,7 +288,6 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		}
 	}
 
-	// Update the poller-last-run gauge at the end of every successful tick.
 	if p.Metrics != nil {
 		p.Metrics.SetPollerLastRun(time.Now())
 	}
@@ -289,19 +295,30 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	return nil
 }
 
+// loadBindings fetches the bindings list and indexes it by ID. Nil
+// Bindings is tolerated (returns empty map) so test fixtures and the
+// pre-wiring main.go boot path don't crash; in production main.go wires
+// the real store unconditionally.
+func (p *Poller) loadBindings() (map[int64]model.Binding, error) {
+	if p.Bindings == nil {
+		return map[int64]model.Binding{}, nil
+	}
+	bindings, err := p.Bindings.ListBindings()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]model.Binding, len(bindings))
+	for _, b := range bindings {
+		out[b.ID] = b
+	}
+	return out, nil
+}
+
 // refreshSuwayomiCache rebuilds the Suwayomi path cache from a fresh
 // client built off current Settings. Called at the top of every tick.
 //
-// No-op when any of the Library Map collaborators is missing:
-//   - SuwayomiCache nil (feature not wired)
-//   - SuwayomiClient factory nil
-//   - Settings provider nil
-//   - Settings.SuwayomiBaseURL empty (user has not configured Suwayomi)
-//
-// A failed refresh is logged once and swallowed — the tick continues
-// using whatever the cache already had. The classifier falls through to
-// AniList for any cache miss, so an unreachable Suwayomi degrades the
-// system to pre-Library-Map behaviour, not below it.
+// No-op when any of the Library Map collaborators is missing or when
+// Settings.SuwayomiBaseURL is empty.
 func (p *Poller) refreshSuwayomiCache(ctx context.Context) {
 	if p.SuwayomiCache == nil || p.SuwayomiClient == nil || p.Settings == nil {
 		return
@@ -327,17 +344,9 @@ func (p *Poller) refreshSuwayomiCache(ctx context.Context) {
 	}
 }
 
-// recordActivity writes an activity entry best-effort. A failure to write
-// activity must never abort the tick. If Activity is nil (e.g. minimal test
-// setups), the call is a no-op.
-func (p *Poller) recordActivity(title string, action model.ActivityAction, detail string) {
-	p.recordActivityVia(title, action, "", detail)
-}
-
-// recordActivityVia is recordActivity plus the Via reason from the
-// classifier (e.g. "anilist:KR", "suwayomi-override:category=42",
-// "unmatched"). Empty Via is fine — paths that don't run through the
-// classifier (FileOne, recycle bin GC) just leave it blank.
+// recordActivityVia writes an activity entry best-effort with the Via
+// reason from the classifier's Decision. A failure to write activity
+// must never abort the tick.
 func (p *Poller) recordActivityVia(title string, action model.ActivityAction, via, detail string) {
 	if p.Activity == nil {
 		return
@@ -350,25 +359,20 @@ func (p *Poller) recordActivityVia(title string, action model.ActivityAction, vi
 	})
 }
 
-// FileOne applies the classify-and-file pipeline to a single series identified
-// by its primary key (seriesID) and an explicitly supplied ContentType (ct).
+// FileOne applies the classify-and-file pipeline to a single series
+// identified by its primary key (seriesID) and an explicitly supplied
+// ContentType (ct).
 //
-// Unlike RunOnce, FileOne does NOT call the classifier — the type is given
-// directly by the caller (user intent from the Unmatched page). It DOES write
-// the classification cache via p.Cache so that future chapters of the same
-// title auto-classify without going to AniList.
+// Unlike RunOnce, FileOne does NOT call the classifier — the type is
+// given directly by the caller (user intent from the Unmatched page).
+// It still uses the v1 LibraryRoots/LibraryIDs maps (manually-set
+// ContentType → destination); migrating this surface to v2 bindings is
+// deferred until the deprecated v1 Settings fields are dropped one
+// release after Plan A.
 //
-// Steps:
-//  1. Load the series from p.Store by seriesID.
-//  2. Write the override to p.Cache (if configured).
-//  3. Update the series row's Type + reset Status to pending via p.Store.SetSeriesType.
-//  4. Look up the library root for ct in p.LibraryRoots.
-//  5. Call p.Filer.File; on error write ActionError activity and return.
-//  6. On success, write ActionFiled activity, trigger a Kavita scan for the
-//     matching library (if p.LibraryIDs[ct] is set), and write ActionScanTriggered.
-//
-// All activity writes are best-effort. p.Cache and p.Kavita are optional:
-// a nil Cache skips the cache write; a missing LibraryIDs entry skips the scan.
+// Activity entries are written with Via = classifier.ViaManual so the
+// activity log column distinguishes user-driven routes from automatic
+// classifier decisions.
 func (p *Poller) FileOne(ctx context.Context, seriesID int64, ct model.ContentType) error {
 	if p.Store == nil {
 		return fmt.Errorf("FileOne: Store not configured")
@@ -379,46 +383,41 @@ func (p *Poller) FileOne(ctx context.Context, seriesID int64, ct model.ContentTy
 		return fmt.Errorf("FileOne: load series %d: %w", seriesID, err)
 	}
 
-	// Write the manual override to the cache so future auto-classify picks it up.
 	if p.Cache != nil {
 		if err := p.Cache.CacheClassification(series.Title, ct); err != nil {
 			log.Printf("poller: FileOne: cache write for %q failed (continuing): %v", series.Title, err)
 		}
 	}
 
-	// Update the series type in the store.
 	if err := p.Store.SetSeriesType(seriesID, ct); err != nil {
-		p.recordActivity(series.Title, model.ActionError,
+		p.recordActivityVia(series.Title, model.ActionError, classifier.ViaManual,
 			fmt.Sprintf("FileOne: set series type: %v", err))
 		return fmt.Errorf("FileOne: set series type: %w", err)
 	}
 	series.Type = ct
 
-	// Resolve library root — misconfiguration should surface as an error, not silently pass.
 	root, ok := p.LibraryRoots[ct]
 	if !ok || root == "" {
 		msg := fmt.Sprintf("type %s has no configured library root — check Settings", ct)
-		p.recordActivity(series.Title, model.ActionError, msg)
+		p.recordActivityVia(series.Title, model.ActionError, classifier.ViaManual, msg)
 		return fmt.Errorf("FileOne: %s", msg)
 	}
 
-	// File the series.
 	if err := p.Filer.File(series, root); err != nil {
-		p.recordActivity(series.Title, model.ActionError,
+		p.recordActivityVia(series.Title, model.ActionError, classifier.ViaManual,
 			fmt.Sprintf("file: %v", err))
 		return fmt.Errorf("FileOne: filer: %w", err)
 	}
-	p.recordActivity(series.Title, model.ActionFiled,
+	p.recordActivityVia(series.Title, model.ActionFiled, classifier.ViaManual,
 		fmt.Sprintf("filed into %s", root))
 
-	// Trigger Kavita scan if library ID is configured for this type.
 	if id, ok := p.LibraryIDs[ct]; ok && id != 0 {
 		if p.Kavita != nil {
 			if err := p.Kavita.ScanLibrary(id); err != nil {
-				p.recordActivity(series.Title, model.ActionError,
+				p.recordActivityVia(series.Title, model.ActionError, classifier.ViaManual,
 					fmt.Sprintf("kavita scan library %d: %v", id, err))
 			} else {
-				p.recordActivity(series.Title, model.ActionScanTriggered,
+				p.recordActivityVia(series.Title, model.ActionScanTriggered, classifier.ViaManual,
 					fmt.Sprintf("library %d", id))
 			}
 		}
@@ -428,25 +427,28 @@ func (p *Poller) FileOne(ctx context.Context, seriesID int64, ct model.ContentTy
 }
 
 // Preview runs scanner → classifier → filer.Plan for every series, WITHOUT
-// triggering Kavita scans, writing to disk, or modifying any state (incl. cache).
+// triggering Kavita scans, writing to disk, or modifying any state.
 //
-// The classifier's cache is READ for speed but NOT WRITTEN. Live network calls
-// may still occur for cache-miss titles; if AniList is unavailable, the entry's
-// Classified field stays empty and Reason records the error — the preview
-// continues over other series.
-//
-// Returns a non-nil error only if the scanner itself fails. Individual series
-// errors are surfaced as PreviewEntry.Note with Status="misconfigured".
+// Returns a non-nil error only if the scanner itself fails. Individual
+// series errors are surfaced as PreviewEntry.Note with Status="misconfigured".
 func (p *Poller) Preview(ctx context.Context) ([]PreviewEntry, error) {
+	// Refresh the Suwayomi path cache at the top of Preview so it matches
+	// what RunOnce would do — otherwise a cold-cache Preview would mis-route
+	// items that RunOnce would route via a Suwayomi override.
+	p.refreshSuwayomiCache(ctx)
+
 	series, err := p.Scanner.ScanAll()
 	if err != nil {
 		return nil, err
 	}
 
+	bindingByID, err := p.loadBindings()
+	if err != nil {
+		return nil, fmt.Errorf("load bindings: %w", err)
+	}
+
 	results := make([]PreviewEntry, 0, len(series))
 	for _, s := range series {
-		// Check context cancellation — long previews on large libraries should
-		// respect the caller's deadline.
 		select {
 		case <-ctx.Done():
 			return results, ctx.Err()
@@ -459,36 +461,43 @@ func (p *Poller) Preview(ctx context.Context) ([]PreviewEntry, error) {
 			Source:     s.Source,
 		}
 
-		ct, _, classifyErr := p.Classifier.ClassifySeries(s)
+		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
+			Title:     s.Title,
+			ParentDir: s.SourcePath,
+		})
 		if classifyErr != nil {
 			entry.Status = "unmatched"
 			entry.Reason = fmt.Sprintf("classify error: %v", classifyErr)
 			results = append(results, entry)
 			continue
 		}
-		if ct == model.TypeUnknown {
+		if d.BindingID == 0 {
 			entry.Status = "unmatched"
-			entry.Reason = "AniList returned no match"
+			entry.Reason = "no binding matched"
 			results = append(results, entry)
 			continue
 		}
 
-		entry.Classified = ct
-
-		root, ok := p.LibraryRoots[ct]
-		if !ok || root == "" {
+		binding, ok := bindingByID[d.BindingID]
+		if !ok {
 			entry.Status = "misconfigured"
-			entry.Note = fmt.Sprintf("type %s has no configured library root — check Settings", ct)
+			entry.Note = fmt.Sprintf("binding %d not found — was it deleted?", d.BindingID)
+			results = append(results, entry)
+			continue
+		}
+		if binding.LibraryRoot == "" {
+			entry.Status = "misconfigured"
+			entry.Note = fmt.Sprintf("binding %q has empty library_root — check Settings", binding.Name)
 			results = append(results, entry)
 			continue
 		}
 
-		entry.DstRoot = root
+		entry.BindingName = binding.Name
+		entry.DstRoot = binding.LibraryRoot
 		entry.Status = "matched"
 
-		// Run the plan (read-only filesystem walk).
 		if p.Planner != nil {
-			plans, planErr := p.Planner.Plan(s.Title, s.SourcePath, root)
+			plans, planErr := p.Planner.Plan(s.Title, s.SourcePath, binding.LibraryRoot)
 			if planErr != nil {
 				entry.Status = "misconfigured"
 				entry.Note = fmt.Sprintf("plan error: %v", planErr)

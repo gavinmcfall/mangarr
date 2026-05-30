@@ -2,6 +2,24 @@ package model
 
 import "time"
 
+// ContentType is the pre-Library-Bindings-v2 type tag for a series.
+//
+// Vestigial after Plan A: the classifier no longer emits ContentType
+// (it emits Decision{BindingID, Via}) and the poller routes by
+// Binding, not by ContentType. ContentType is retained because:
+//
+//  1. Migration 2 (internal/store/migrations_v1.go) seeds v2 bindings
+//     from the v1 LibraryRoots/KavitaLibIDsByType maps which are keyed
+//     by ContentType.
+//  2. Settings.LibraryRoots / Settings.KavitaLibIDsByType / Series.Type
+//     are still on the wire so a rollback to the v1 classifier finds
+//     its data.
+//  3. The poller's FileOne (manual classify-from-Unmatched) still takes
+//     a ContentType from the UI.
+//
+// Plan C is expected to drop the deprecated v1 Settings fields one
+// release after Plan A lands, at which point ContentType can be removed
+// entirely.
 type ContentType string
 
 const (
@@ -111,4 +129,66 @@ type Settings struct {
 	// PathCache returns CategoryIDs in that order). Empty/nil map =
 	// feature disabled = pure AniList classification.
 	SuwayomiCategoryOverrides map[int64]int64 `json:"suwayomi_category_overrides,omitempty"`
+
+	// DefaultBindingID is the optional catch-all routing target when no
+	// classification rule matches and no Suwayomi override applies. nil
+	// means "send unmatched series to the Unmatched queue" (the safe
+	// default and the pre-v2 behaviour). Set to a Binding.ID to auto-
+	// route everything else.
+	DefaultBindingID *int64 `json:"default_binding_id,omitempty"`
+
+	// SuwayomiCategoryBindings is the v2 routing map: Suwayomi category ID
+	// → Binding.ID. Populated by Migration 2 from the v1-era
+	// SuwayomiCategoryOverrides (which held Kavita library IDs) via
+	// reverse-lookup against the user's bindings. v1 SuwayomiCategoryOverrides
+	// is left untouched on the settings row so a pre-v2 rollback can still
+	// read it.
+	SuwayomiCategoryBindings map[int64]int64 `json:"suwayomi_category_bindings,omitempty"`
+}
+
+// Binding is one library destination the user has defined. Replaces the
+// closed-enum routing of v1 (Library Map). Each binding owns a filesystem
+// root and a Kavita library ID for the scan trigger.
+type Binding struct {
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	LibraryRoot    string `json:"library_root"`
+	KavitaLibID    int64  `json:"kavita_lib_id"`
+	DefaultIsAdult bool   `json:"default_is_adult"`
+}
+
+// ClassificationRule maps a metadata condition to a binding. Rules are
+// stored as an ordered list; the classifier walks them ascending by
+// Priority and routes the series to the first matching rule's binding.
+type ClassificationRule struct {
+	ID        int64         `json:"id"`
+	Priority  int           `json:"priority"`
+	Name      string        `json:"name"`
+	Condition RuleCondition `json:"condition"`
+	BindingID int64         `json:"binding_id"`
+}
+
+// RuleCondition is AND-semantics across set fields. Pointer types let nil
+// mean "wildcard" (don't constrain) while explicit zero values (e.g. an
+// explicit IsAdult=false) constrain to that value.
+type RuleCondition struct {
+	CountryOfOrigin  *string `json:"country_of_origin,omitempty"`
+	IsAdult          *bool   `json:"is_adult,omitempty"`
+	Format           *string `json:"format,omitempty"`
+	SourcePathPrefix *string `json:"source_path_prefix,omitempty"`
+}
+
+// IsPathOnly reports whether this condition only constrains the source
+// path. Path-only rules are evaluated in the classifier's step 1 short-
+// circuit, before any AniList call.
+func (c RuleCondition) IsPathOnly() bool {
+	return c.SourcePathPrefix != nil && c.CountryOfOrigin == nil && c.IsAdult == nil && c.Format == nil
+}
+
+// Decision is the classifier's output: which binding to route to, plus
+// the Via tag that gets recorded on the activity log entry so users can
+// audit how each series was classified.
+type Decision struct {
+	BindingID int64
+	Via       string
 }

@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gavinmcfall/mangarr/internal/anilist"
 	"github.com/gavinmcfall/mangarr/internal/classifier"
 	"github.com/gavinmcfall/mangarr/internal/config"
 	"github.com/gavinmcfall/mangarr/internal/dbbackup"
@@ -97,18 +98,25 @@ func main() {
 	// ---- metrics registry ----
 	metricsReg := metrics.NewRegistry()
 
-	// ---- classifier (with store-backed cache) ----
+	// ---- classifier (v2 six-step Classify returning Decision) ----
 	// AniList endpoint: use env override if set, else empty string = default (https://graphql.anilist.co).
 	anilistEndpoint := os.Getenv("MANGARR_ANILIST_ENDPOINT")
-	clf := classifier.NewWithCache(anilistEndpoint, st)
-	clf.Metrics = metricsReg
 
 	// ---- suwayomi path cache (Library Map — Plan B) ----
 	// Long-lived, shared between the classifier (hot path) and the
 	// poller (refreshes it at the top of every tick). The cache stays
 	// empty + harmless until the user configures Suwayomi via Settings.
 	suwayomiCache := suwayomi.NewPathCache()
-	clf.WithSuwayomi(suwayomiCache, st)
+
+	// Classifier: widened AniList client (countryOfOrigin + isAdult +
+	// format) + Suwayomi PathCache + store-backed bindings/rules/settings
+	// reader. Note: the v1 in-process AniList cache (NewWithCache) is NOT
+	// wired here — the v2 path makes a fresh AniList call per classify.
+	// This may surface as additional GraphQL traffic on cache-cold ticks;
+	// Plan B/C may re-introduce caching on the v2 path.
+	anilistClient := anilist.New(anilistEndpoint)
+	clf := classifier.New(anilistClient, suwayomiCache, st)
+	clf.Metrics = metricsReg
 
 	// ---- kavita client ----
 	kavitaClient := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)
@@ -162,9 +170,11 @@ func main() {
 		// store.Store.AddActivity satisfies poller.ActivityWriter directly.
 		Activity:     st,
 		Metrics:      metricsReg,
-		// store.Store satisfies poller.Cache and poller.SeriesStore directly.
+		// store.Store satisfies poller.Cache, poller.SeriesStore, and
+		// poller.BindingLister directly.
 		Cache:        st,
 		Store:        st,
+		Bindings:     st,
 		LibraryRoots: settings.LibraryRoots,
 		LibraryIDs:   libIDs,
 		RecycleBin:   bin,

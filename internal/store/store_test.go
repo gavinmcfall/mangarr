@@ -266,3 +266,234 @@ func TestUpsertSeriesUpdates(t *testing.T) {
 		t.Fatalf("update didn't take: %+v", got)
 	}
 }
+
+// --- Library Bindings v2: Task 4 — Store CRUD for bindings ---
+
+func TestListBindingsEmpty(t *testing.T) {
+	s := newTestStore(t)
+	got, err := s.ListBindings()
+	if err != nil {
+		t.Fatalf("ListBindings: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected 0 bindings on fresh store, got %d", len(got))
+	}
+}
+
+func TestSaveBindingsAtomicReplaceAll(t *testing.T) {
+	s := newTestStore(t)
+	first := []model.Binding{
+		{Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1, DefaultIsAdult: false},
+		{Name: "Manhwa", LibraryRoot: "/m/b", KavitaLibID: 2, DefaultIsAdult: false},
+	}
+	if err := s.SaveBindings(first); err != nil {
+		t.Fatalf("SaveBindings first: %v", err)
+	}
+	got, _ := s.ListBindings()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 bindings after first save, got %d", len(got))
+	}
+
+	// Replace with a different set; first set must be gone.
+	second := []model.Binding{
+		{Name: "Comics", LibraryRoot: "/m/c", KavitaLibID: 3, DefaultIsAdult: false},
+	}
+	if err := s.SaveBindings(second); err != nil {
+		t.Fatalf("SaveBindings second: %v", err)
+	}
+	got, _ = s.ListBindings()
+	if len(got) != 1 || got[0].Name != "Comics" {
+		t.Errorf("expected only Comics after replace, got %+v", got)
+	}
+}
+
+func TestSaveBindingsAssignsIDsToNewRows(t *testing.T) {
+	s := newTestStore(t)
+	in := []model.Binding{{Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1}}
+	if err := s.SaveBindings(in); err != nil {
+		t.Fatalf("SaveBindings: %v", err)
+	}
+	out, _ := s.ListBindings()
+	if len(out) != 1 || out[0].ID == 0 {
+		t.Errorf("expected SaveBindings to assign a non-zero ID, got %+v", out)
+	}
+}
+
+// TestSaveBindingsUpsertExistingByID exercises the ID>0 branch — an input
+// row that carries an existing ID should update that row in place rather
+// than insert a duplicate.
+func TestSaveBindingsUpsertExistingByID(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.SaveBindings([]model.Binding{{Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1}}); err != nil {
+		t.Fatalf("seed SaveBindings: %v", err)
+	}
+	seeded, _ := s.ListBindings()
+	if len(seeded) != 1 {
+		t.Fatalf("expected 1 binding after seed, got %d", len(seeded))
+	}
+	existingID := seeded[0].ID
+
+	// Upsert: change the name + library root, keep the ID.
+	updated := []model.Binding{{ID: existingID, Name: "Manga (renamed)", LibraryRoot: "/m/a-new", KavitaLibID: 11}}
+	if err := s.SaveBindings(updated); err != nil {
+		t.Fatalf("upsert SaveBindings: %v", err)
+	}
+	got, _ := s.ListBindings()
+	if len(got) != 1 || got[0].ID != existingID || got[0].Name != "Manga (renamed)" || got[0].LibraryRoot != "/m/a-new" || got[0].KavitaLibID != 11 {
+		t.Errorf("expected upserted binding, got %+v", got)
+	}
+}
+
+func TestListRulesEmpty(t *testing.T) {
+	s := newTestStore(t)
+	got, err := s.ListRules()
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected 0 rules on fresh store, got %d", len(got))
+	}
+}
+
+func TestSaveRulesAndListInPriorityOrder(t *testing.T) {
+	s := newTestStore(t)
+
+	// Need a binding first since rules FK to it.
+	if err := s.SaveBindings([]model.Binding{{Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1}}); err != nil {
+		t.Fatalf("SaveBindings: %v", err)
+	}
+	bindings, _ := s.ListBindings()
+	bid := bindings[0].ID
+
+	jp := "JP"
+	krFalse := false
+	in := []model.ClassificationRule{
+		{Priority: 200, Name: "second", Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: bid},
+		{Priority: 100, Name: "first", Condition: model.RuleCondition{CountryOfOrigin: &jp, IsAdult: &krFalse}, BindingID: bid},
+	}
+	if err := s.SaveRules(in); err != nil {
+		t.Fatalf("SaveRules: %v", err)
+	}
+	got, _ := s.ListRules()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(got))
+	}
+	if got[0].Priority != 100 || got[1].Priority != 200 {
+		t.Errorf("expected ascending priority order, got priorities %d, %d", got[0].Priority, got[1].Priority)
+	}
+	if got[0].Condition.CountryOfOrigin == nil || *got[0].Condition.CountryOfOrigin != "JP" {
+		t.Errorf("first rule Condition.CountryOfOrigin lost in round-trip: %+v", got[0].Condition)
+	}
+	if got[0].Condition.IsAdult == nil || *got[0].Condition.IsAdult != false {
+		t.Errorf("first rule Condition.IsAdult lost in round-trip: %+v", got[0].Condition)
+	}
+}
+
+func TestSaveRulesReplacesAll(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.SaveBindings([]model.Binding{{Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1}})
+	bindings, _ := s.ListBindings()
+	bid := bindings[0].ID
+
+	jp := "JP"
+	if err := s.SaveRules([]model.ClassificationRule{
+		{Priority: 100, Name: "old", Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: bid},
+	}); err != nil {
+		t.Fatalf("first SaveRules: %v", err)
+	}
+	if err := s.SaveRules([]model.ClassificationRule{
+		{Priority: 200, Name: "new", Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: bid},
+	}); err != nil {
+		t.Fatalf("second SaveRules: %v", err)
+	}
+
+	got, _ := s.ListRules()
+	if len(got) != 1 || got[0].Name != "new" {
+		t.Errorf("expected only the new rule after replace, got %+v", got)
+	}
+}
+
+// Bonus test addressing Task 4's reviewer-flagged gap: cover the mixed
+// insert+upsert path in a single SaveRules call.
+func TestSaveRulesMixedInsertAndUpsertInSameCall(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.SaveBindings([]model.Binding{{Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1}})
+	bindings, _ := s.ListBindings()
+	bid := bindings[0].ID
+
+	jp := "JP"
+	if err := s.SaveRules([]model.ClassificationRule{
+		{Priority: 100, Name: "existing", Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: bid},
+	}); err != nil {
+		t.Fatalf("seed SaveRules: %v", err)
+	}
+	seeded, _ := s.ListRules()
+	existingID := seeded[0].ID
+
+	// Same call: upsert the existing one (rename), insert a brand new one (ID=0).
+	if err := s.SaveRules([]model.ClassificationRule{
+		{ID: existingID, Priority: 100, Name: "renamed", Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: bid},
+		{Priority: 200, Name: "new-row", Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: bid},
+	}); err != nil {
+		t.Fatalf("mixed SaveRules: %v", err)
+	}
+
+	got, _ := s.ListRules()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 rules after mixed save, got %d (%+v)", len(got), got)
+	}
+	if got[0].ID != existingID || got[0].Name != "renamed" {
+		t.Errorf("upsert branch lost: existing rule should be 'renamed' with same ID, got %+v", got[0])
+	}
+	if got[1].Name != "new-row" || got[1].ID == 0 {
+		t.Errorf("insert branch lost: new rule should have non-zero ID and name 'new-row', got %+v", got[1])
+	}
+}
+
+// TestSettingsRoundTripDefaultBindingID verifies the Plan A v2 addition
+// (Settings.DefaultBindingID, the no-match fallback) survives JSON
+// round-trip through the store with both nil and explicitly-set values.
+func TestSettingsRoundTripDefaultBindingID(t *testing.T) {
+	t.Run("nil default", func(t *testing.T) {
+		s := newTestStore(t)
+		want := model.Settings{
+			FileMode:     model.ModeHardlink,
+			RenameScheme: "{series}/{series} - Ch.{chapter}.cbz",
+			PollMinutes:  15,
+		}
+		if err := s.SaveSettings(want); err != nil {
+			t.Fatalf("SaveSettings: %v", err)
+		}
+		got, err := s.GetSettings()
+		if err != nil {
+			t.Fatalf("GetSettings: %v", err)
+		}
+		if got.DefaultBindingID != nil {
+			t.Errorf("expected DefaultBindingID nil after round-trip, got %v", *got.DefaultBindingID)
+		}
+	})
+
+	t.Run("set default", func(t *testing.T) {
+		s := newTestStore(t)
+		id := int64(42)
+		want := model.Settings{
+			FileMode:         model.ModeHardlink,
+			RenameScheme:     "{series}/{series} - Ch.{chapter}.cbz",
+			PollMinutes:      15,
+			DefaultBindingID: &id,
+		}
+		if err := s.SaveSettings(want); err != nil {
+			t.Fatalf("SaveSettings: %v", err)
+		}
+		got, err := s.GetSettings()
+		if err != nil {
+			t.Fatalf("GetSettings: %v", err)
+		}
+		if got.DefaultBindingID == nil {
+			t.Fatalf("expected DefaultBindingID set after round-trip, got nil")
+		}
+		if *got.DefaultBindingID != 42 {
+			t.Errorf("expected DefaultBindingID 42, got %d", *got.DefaultBindingID)
+		}
+	})
+}

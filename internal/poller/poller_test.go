@@ -12,11 +12,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gavinmcfall/mangarr/internal/classifier"
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
 	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
+
+// fakeBindingStore satisfies poller.BindingLister for v2 tests.
+type fakeBindingStore struct {
+	bindings []model.Binding
+	err      error
+}
+
+func (f *fakeBindingStore) ListBindings() ([]model.Binding, error) {
+	return f.bindings, f.err
+}
 
 // fakeMetrics records MetricsSink calls so tests can assert call counts.
 type fakeMetrics struct {
@@ -40,41 +51,36 @@ func (f *fakeMetrics) IncUnmatched()                 { f.unmatched++ }
 func (f *fakeMetrics) IncFileError()                 { f.fileErrors++ }
 func (f *fakeMetrics) SetPollerLastRun(_ time.Time)  { f.lastRunSet = true }
 
-// fakes
+// ----- fakes -----
 
+// fakeClassifier returns a fixed Decision (or error) on every Classify call.
+// Tests that exercise per-series decisions use fakeClassifierMap below.
 type fakeClassifier struct {
-	t   model.ContentType
-	err error
+	decision model.Decision
+	err      error
+	calls    int
 }
 
-func (f fakeClassifier) Classify(string) (model.ContentType, error) { return f.t, f.err }
-
-// ClassifySeries adapts the poller.Classifier interface onto fakeClassifier's
-// simple title-only fake. Via is derived from the content type so tests can
-// continue to assert via tags without changing every existing fixture.
-func (f fakeClassifier) ClassifySeries(s model.Series) (model.ContentType, string, error) {
-	if f.err != nil {
-		return model.TypeUnknown, "unmatched", f.err
-	}
-	if f.t == model.TypeUnknown {
-		return model.TypeUnknown, "unmatched", nil
-	}
-	return f.t, "anilist:" + countryForType(f.t), nil
+func (f *fakeClassifier) Classify(_ context.Context, _ classifier.ScanItem) (model.Decision, error) {
+	f.calls++
+	return f.decision, f.err
 }
 
-// countryForType is the inverse of model.CountryToType, used only by the
-// fake classifiers below to emit deterministic Via tags.
-func countryForType(ct model.ContentType) string {
-	switch ct {
-	case model.TypeManga:
-		return "JP"
-	case model.TypeManhwa:
-		return "KR"
-	case model.TypeManhua:
-		return "CN"
-	default:
-		return ""
+// fakeClassifierMap maps a series title to a Decision (or err). Used by
+// Preview tests where each input series should classify differently.
+type fakeClassifierMap struct {
+	decisions map[string]model.Decision
+	errors    map[string]error
+}
+
+func (f *fakeClassifierMap) Classify(_ context.Context, item classifier.ScanItem) (model.Decision, error) {
+	if err, ok := f.errors[item.Title]; ok {
+		return model.Decision{Via: classifier.ViaUnmatched}, err
 	}
+	if d, ok := f.decisions[item.Title]; ok {
+		return d, nil
+	}
+	return model.Decision{Via: classifier.ViaUnmatched}, nil
 }
 
 type fakeScanner struct{ out []model.Series }
@@ -85,6 +91,7 @@ func (f fakeScanner) ScanAll() ([]model.Series, error) { return f.out, nil }
 // errFile / errScan let individual tests inject failures into those code paths.
 type recorder struct {
 	filed     []model.Series
+	filedDst  []string
 	scanned   []int64
 	unmatched []model.Series
 	activity  []model.ActivityEntry
@@ -98,6 +105,7 @@ func (r *recorder) File(s model.Series, dstRoot string) error {
 		return r.errFile
 	}
 	r.filed = append(r.filed, s)
+	r.filedDst = append(r.filedDst, dstRoot)
 	return nil
 }
 
@@ -130,45 +138,134 @@ func (r *recorder) countActions(a model.ActivityAction) int {
 	return n
 }
 
-// ----- behavior tests -----
+// ----- helpers -----
 
-func TestRunOnceFilesAndScans(t *testing.T) {
-	s := model.Series{Title: "Solo Leveling", SourcePath: "/dl/Solo Leveling"}
+// manhwaBinding builds a single-binding store fixture so tests that used to
+// configure LibraryRoots/LibraryIDs for TypeManhwa can keep the same call
+// shape against the v2 BindingID routing.
+func manhwaBinding(libRoot string, kavitaLibID int64) (*fakeBindingStore, model.Decision) {
+	b := model.Binding{ID: 2, Name: "Manhwa", LibraryRoot: libRoot, KavitaLibID: kavitaLibID}
+	return &fakeBindingStore{bindings: []model.Binding{b}}, model.Decision{BindingID: 2, Via: "anilist:KR"}
+}
+
+// mangaBinding mirrors manhwaBinding for Manga.
+func mangaBinding(libRoot string, kavitaLibID int64) (*fakeBindingStore, model.Decision) {
+	b := model.Binding{ID: 1, Name: "Manga", LibraryRoot: libRoot, KavitaLibID: kavitaLibID}
+	return &fakeBindingStore{bindings: []model.Binding{b}}, model.Decision{BindingID: 1, Via: "anilist:JP"}
+}
+
+// ----- v2 behaviour tests -----
+
+// TestRunOnceRoutesByBindingFromV2Classifier is the Task 10 spec test: the
+// classifier returns a Decision with BindingID + Via; the poller resolves
+// the binding via its BindingLister, passes Binding.LibraryRoot to the
+// filer, and triggers a Kavita scan against Binding.KavitaLibID.
+func TestRunOnceRoutesByBindingFromV2Classifier(t *testing.T) {
+	st := &fakeBindingStore{bindings: []model.Binding{
+		{ID: 7, Name: "Manga", LibraryRoot: "/dst/a", KavitaLibID: 99},
+	}}
+	cls := &fakeClassifier{decision: model.Decision{BindingID: 7, Via: "rule:1"}}
 	rec := &recorder{}
 	p := &Poller{
-		Scanner:    fakeScanner{out: []model.Series{s}},
-		Classifier: fakeClassifier{t: model.TypeManhwa},
+		Scanner:    fakeScanner{out: []model.Series{{Title: "Foo", SourcePath: "/src/foo"}}},
+		Classifier: cls,
 		Filer:      rec,
 		Kavita:     rec,
 		Unmatched:  rec,
 		Activity:   rec,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManhwa: filepath.FromSlash("/lib/Manhwa"),
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 2},
+		Bindings:   st,
+	}
+	if err := p.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(rec.filedDst) != 1 || rec.filedDst[0] != "/dst/a" {
+		t.Errorf("expected file routed to /dst/a, got %v", rec.filedDst)
+	}
+	if len(rec.scanned) != 1 || rec.scanned[0] != 99 {
+		t.Errorf("expected Kavita scan triggered for lib 99, got %v", rec.scanned)
+	}
+	// Activity entry must carry the Via from the classifier.
+	var sawFiled bool
+	for _, e := range rec.activity {
+		if e.Action == model.ActionFiled {
+			sawFiled = true
+			if e.Via != "rule:1" {
+				t.Errorf("ActionFiled Via: want rule:1, got %q", e.Via)
+			}
+		}
+	}
+	if !sawFiled {
+		t.Errorf("expected at least one ActionFiled activity entry")
+	}
+}
+
+// TestRunOnceBindingNotFound covers the deleted-between-save-and-tick case:
+// classifier returns BindingID 99 but the bindings table has no row 99.
+// Poller must record ActionError (NOT route to a phantom location) and
+// NOT call the filer.
+func TestRunOnceBindingNotFound(t *testing.T) {
+	st := &fakeBindingStore{bindings: []model.Binding{
+		{ID: 1, Name: "Manga", LibraryRoot: "/lib/manga", KavitaLibID: 1},
+	}}
+	cls := &fakeClassifier{decision: model.Decision{BindingID: 99, Via: "rule:5"}}
+	rec := &recorder{}
+	p := &Poller{
+		Scanner:    fakeScanner{out: []model.Series{{Title: "Orphan", SourcePath: "/src/orphan"}}},
+		Classifier: cls,
+		Filer:      rec,
+		Kavita:     rec,
+		Unmatched:  rec,
+		Activity:   rec,
+		Bindings:   st,
+	}
+	if err := p.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(rec.filed) != 0 {
+		t.Errorf("filer must not be called when binding not found, got %v", rec.filed)
+	}
+	if got := rec.countActions(model.ActionError); got != 1 {
+		t.Errorf("expected 1 ActionError for missing binding, got %d (activity=%+v)", got, rec.activity)
+	}
+}
+
+func TestRunOnceFilesAndScans(t *testing.T) {
+	s := model.Series{Title: "Solo Leveling", SourcePath: "/dl/Solo Leveling"}
+	rec := &recorder{}
+	st, dec := manhwaBinding(filepath.FromSlash("/lib/Manhwa"), 2)
+	p := &Poller{
+		Scanner:    fakeScanner{out: []model.Series{s}},
+		Classifier: &fakeClassifier{decision: dec},
+		Filer:      rec,
+		Kavita:     rec,
+		Unmatched:  rec,
+		Activity:   rec,
+		Bindings:   st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
-	if len(rec.filed) != 1 || rec.filed[0].Type != model.TypeManhwa {
-		t.Fatalf("expected one manhwa filed, got %+v", rec.filed)
+	if len(rec.filed) != 1 {
+		t.Fatalf("expected one filed, got %+v", rec.filed)
+	}
+	if rec.filedDst[0] != filepath.FromSlash("/lib/Manhwa") {
+		t.Fatalf("expected file routed to /lib/Manhwa, got %q", rec.filedDst[0])
 	}
 	if len(rec.scanned) != 1 || rec.scanned[0] != 2 {
 		t.Fatalf("expected scan of lib 2, got %v", rec.scanned)
 	}
 }
 
-func TestRunOnceUnmatchedWhenUnknown(t *testing.T) {
+func TestRunOnceUnmatchedWhenDecisionZero(t *testing.T) {
 	rec := &recorder{}
 	p := &Poller{
-		Scanner:      fakeScanner{out: []model.Series{{Title: "???"}}},
-		Classifier:   fakeClassifier{t: model.TypeUnknown},
-		Filer:        rec,
-		Kavita:       rec,
-		Unmatched:    rec,
-		Activity:     rec,
-		LibraryRoots: map[model.ContentType]string{},
-		LibraryIDs:   map[model.ContentType]int64{},
+		Scanner:    fakeScanner{out: []model.Series{{Title: "???"}}},
+		Classifier: &fakeClassifier{decision: model.Decision{BindingID: 0, Via: classifier.ViaUnmatched}},
+		Filer:      rec,
+		Kavita:     rec,
+		Unmatched:  rec,
+		Activity:   rec,
+		Bindings:   &fakeBindingStore{},
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
@@ -178,24 +275,23 @@ func TestRunOnceUnmatchedWhenUnknown(t *testing.T) {
 	}
 }
 
-// TestRunOnceDeduplicatesKavitaScan: two series of the same type → exactly one Kavita scan.
+// TestRunOnceDeduplicatesKavitaScan: two series routed to the same binding →
+// exactly one Kavita scan.
 func TestRunOnceDeduplicatesKavitaScan(t *testing.T) {
 	series := []model.Series{
 		{Title: "Solo Leveling", SourcePath: "/dl/Solo Leveling"},
 		{Title: "Tower of God", SourcePath: "/dl/Tower of God"},
 	}
 	rec := &recorder{}
+	st, dec := manhwaBinding(filepath.FromSlash("/lib/Manhwa"), 5)
 	p := &Poller{
 		Scanner:    fakeScanner{out: series},
-		Classifier: fakeClassifier{t: model.TypeManhwa},
+		Classifier: &fakeClassifier{decision: dec},
 		Filer:      rec,
 		Kavita:     rec,
 		Unmatched:  rec,
 		Activity:   rec,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManhwa: filepath.FromSlash("/lib/Manhwa"),
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 5},
+		Bindings:   st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
@@ -208,22 +304,23 @@ func TestRunOnceDeduplicatesKavitaScan(t *testing.T) {
 	}
 }
 
-// TestRunOnceNoKavitaWhenNoLibraryID: known type with no LibraryIDs entry →
-// file but no Kavita scan, no error.
-func TestRunOnceNoKavitaWhenNoLibraryID(t *testing.T) {
+// TestRunOnceNoKavitaWhenBindingHasZeroLibID: a binding with KavitaLibID == 0
+// is filed but no Kavita scan is triggered (legitimate case for a library
+// that doesn't need an external scan trigger).
+func TestRunOnceNoKavitaWhenBindingHasZeroLibID(t *testing.T) {
 	s := model.Series{Title: "Berserk", SourcePath: "/dl/Berserk"}
 	rec := &recorder{}
+	st := &fakeBindingStore{bindings: []model.Binding{
+		{ID: 1, Name: "Manga", LibraryRoot: filepath.FromSlash("/lib/Manga"), KavitaLibID: 0},
+	}}
 	p := &Poller{
 		Scanner:    fakeScanner{out: []model.Series{s}},
-		Classifier: fakeClassifier{t: model.TypeManga},
+		Classifier: &fakeClassifier{decision: model.Decision{BindingID: 1, Via: "rule:1"}},
 		Filer:      rec,
 		Kavita:     rec,
 		Unmatched:  rec,
 		Activity:   rec,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManga: filepath.FromSlash("/lib/Manga"),
-		},
-		LibraryIDs: map[model.ContentType]int64{}, // no entry for Manga
+		Bindings:   st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
@@ -243,14 +340,12 @@ func TestRunOnceNoKavitaWhenNoLibraryID(t *testing.T) {
 
 func TestRunOnceRecordsFiledActivity(t *testing.T) {
 	rec := &recorder{}
+	st, dec := manhwaBinding(filepath.FromSlash("/lib/Manhwa"), 2)
 	p := &Poller{
 		Scanner:    fakeScanner{out: []model.Series{{Title: "Solo Leveling"}}},
-		Classifier: fakeClassifier{t: model.TypeManhwa},
+		Classifier: &fakeClassifier{decision: dec},
 		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManhwa: filepath.FromSlash("/lib/Manhwa"),
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 2},
+		Bindings: st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
@@ -258,7 +353,6 @@ func TestRunOnceRecordsFiledActivity(t *testing.T) {
 	if got := rec.countActions(model.ActionFiled); got != 1 {
 		t.Fatalf("expected 1 ActionFiled, got %d (activity=%+v)", got, rec.activity)
 	}
-	// Find the ActionFiled entry and assert SeriesTitle is correct.
 	var filed *model.ActivityEntry
 	for i := range rec.activity {
 		if rec.activity[i].Action == model.ActionFiled {
@@ -273,11 +367,10 @@ func TestRunOnceRecordsFiledActivity(t *testing.T) {
 func TestRunOnceRecordsUnmatchedActivity(t *testing.T) {
 	rec := &recorder{}
 	p := &Poller{
-		Scanner:      fakeScanner{out: []model.Series{{Title: "Unknown Series"}}},
-		Classifier:   fakeClassifier{t: model.TypeUnknown},
-		Filer:        rec, Kavita: rec, Unmatched: rec, Activity: rec,
-		LibraryRoots: map[model.ContentType]string{},
-		LibraryIDs:   map[model.ContentType]int64{},
+		Scanner:    fakeScanner{out: []model.Series{{Title: "Unknown Series"}}},
+		Classifier: &fakeClassifier{decision: model.Decision{Via: classifier.ViaUnmatched}},
+		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
+		Bindings: &fakeBindingStore{},
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
@@ -292,14 +385,12 @@ func TestRunOnceRecordsUnmatchedActivity(t *testing.T) {
 
 func TestRunOnceRecordsScanTriggeredActivity(t *testing.T) {
 	rec := &recorder{}
+	st, dec := manhwaBinding(filepath.FromSlash("/lib/Manhwa"), 7)
 	p := &Poller{
 		Scanner:    fakeScanner{out: []model.Series{{Title: "Solo Leveling"}}},
-		Classifier: fakeClassifier{t: model.TypeManhwa},
+		Classifier: &fakeClassifier{decision: dec},
 		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManhwa: filepath.FromSlash("/lib/Manhwa"),
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 7},
+		Bindings: st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
@@ -311,14 +402,12 @@ func TestRunOnceRecordsScanTriggeredActivity(t *testing.T) {
 
 func TestRunOnceRecordsErrorOnFilerFailure(t *testing.T) {
 	rec := &recorder{errFile: errors.New("disk full")}
+	st, dec := manhwaBinding(filepath.FromSlash("/lib/Manhwa"), 2)
 	p := &Poller{
 		Scanner:    fakeScanner{out: []model.Series{{Title: "Solo Leveling"}}},
-		Classifier: fakeClassifier{t: model.TypeManhwa},
+		Classifier: &fakeClassifier{decision: dec},
 		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManhwa: filepath.FromSlash("/lib/Manhwa"),
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 2},
+		Bindings: st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
@@ -334,8 +423,8 @@ func TestRunOnceRecordsErrorOnFilerFailure(t *testing.T) {
 	}
 }
 
-// TestRunOnceRecordsErrorOnKavitaFailure proves Fix 3: a Kavita failure must
-// NOT poison the dedup map. The second same-type series in this tick MUST
+// TestRunOnceRecordsErrorOnKavitaFailure proves a Kavita failure must NOT
+// poison the dedup map. The second same-binding series in this tick MUST
 // retry the scan (so a transient blip is recoverable within one tick).
 func TestRunOnceRecordsErrorOnKavitaFailure(t *testing.T) {
 	rec := &recorder{errScan: errors.New("kavita 502")}
@@ -343,29 +432,22 @@ func TestRunOnceRecordsErrorOnKavitaFailure(t *testing.T) {
 		{Title: "Solo Leveling", SourcePath: "/dl/Solo Leveling"},
 		{Title: "Tower of God", SourcePath: "/dl/Tower of God"},
 	}
+	st, dec := manhwaBinding(filepath.FromSlash("/lib/Manhwa"), 9)
 	p := &Poller{
 		Scanner:    fakeScanner{out: series},
-		Classifier: fakeClassifier{t: model.TypeManhwa},
+		Classifier: &fakeClassifier{decision: dec},
 		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManhwa: filepath.FromSlash("/lib/Manhwa"),
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 9},
+		Bindings: st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
 	}
-	// Both series filed.
 	if len(rec.filed) != 2 {
 		t.Fatalf("expected 2 filed, got %d", len(rec.filed))
 	}
-	// Both Kavita attempts failed → none in scanned slice.
 	if len(rec.scanned) != 0 {
 		t.Fatalf("Kavita injected errScan but scanned slice has entries: %v", rec.scanned)
 	}
-	// Fix 3 proof: BOTH series must have attempted the scan (= 2 ActionError
-	// entries for kavita), which only happens if the first failure did NOT
-	// poison scanned[id].
 	if got := rec.countActions(model.ActionError); got != 2 {
 		t.Fatalf("expected 2 ActionError (one per failed scan attempt), got %d (activity=%+v)", got, rec.activity)
 	}
@@ -375,13 +457,11 @@ func TestRunOnceRecordsErrorOnKavitaFailure(t *testing.T) {
 }
 
 // TestRunOnceCallsGCWhenBinPresent: when RecycleBin is set, RunOnce must call
-// GC at the end of the tick. We verify this by seeding the bin with an
-// expired file and asserting it has been removed after RunOnce returns.
+// GC at the end of the tick.
 func TestRunOnceCallsGCWhenBinPresent(t *testing.T) {
 	tmp := t.TempDir()
 	binRoot := filepath.Join(tmp, "bin")
 
-	// Seed an old file that is 8 days in the past (beyond the 7-day retention).
 	oldDate := time.Now().AddDate(0, 0, -8).Format("2006-01-02")
 	oldDir := filepath.Join(binRoot, oldDate)
 	if err := os.MkdirAll(oldDir, 0o755); err != nil {
@@ -395,73 +475,37 @@ func TestRunOnceCallsGCWhenBinPresent(t *testing.T) {
 	bin := &recyclebin.Bin{Root: binRoot, Retention: 7 * 24 * time.Hour}
 	rec := &recorder{}
 	p := &Poller{
-		Scanner:      fakeScanner{out: []model.Series{}},
-		Classifier:   fakeClassifier{t: model.TypeUnknown},
-		Filer:        rec,
-		Kavita:       rec,
-		Unmatched:    rec,
-		Activity:     rec,
-		LibraryRoots: map[model.ContentType]string{},
-		LibraryIDs:   map[model.ContentType]int64{},
-		RecycleBin:   bin,
+		Scanner:    fakeScanner{out: []model.Series{}},
+		Classifier: &fakeClassifier{decision: model.Decision{Via: classifier.ViaUnmatched}},
+		Filer:      rec,
+		Kavita:     rec,
+		Unmatched:  rec,
+		Activity:   rec,
+		Bindings:   &fakeBindingStore{},
+		RecycleBin: bin,
 	}
 
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	// GC must have run and removed the expired file.
 	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
 		t.Fatalf("expected old bin file to be GC'd after RunOnce, stat err=%v", err)
 	}
 }
 
-// TestRunOnceMissingLibraryRootIsActionError: a known type with no
-// LibraryRoots entry is a Settings misconfiguration, NOT a classification
-// ambiguity. It must produce ActionError (not Unmatched) so the operator
-// fixes Settings rather than reclassifying in a loop.
-func TestRunOnceMissingLibraryRootIsActionError(t *testing.T) {
-	rec := &recorder{}
-	p := &Poller{
-		Scanner:      fakeScanner{out: []model.Series{{Title: "Vinland Saga"}}},
-		Classifier:   fakeClassifier{t: model.TypeManga},
-		Filer:        rec, Kavita: rec, Unmatched: rec, Activity: rec,
-		LibraryRoots: map[model.ContentType]string{}, // no root configured for Manga
-		LibraryIDs:   map[model.ContentType]int64{},
-	}
-	if err := p.RunOnce(context.Background()); err != nil {
-		t.Fatalf("runonce: %v", err)
-	}
-	if got := rec.countActions(model.ActionError); got != 1 {
-		t.Fatalf("expected 1 ActionError for missing library root, got %d (activity=%+v)", got, rec.activity)
-	}
-	if len(rec.unmatched) != 0 {
-		t.Fatalf("missing library root must NOT route to Unmatched (would loop); got %v", rec.unmatched)
-	}
-	if got := rec.countActions(model.ActionUnmatched); got != 0 {
-		t.Fatalf("expected 0 ActionUnmatched for misconfig, got %d", got)
-	}
-	if len(rec.filed) != 0 {
-		t.Fatalf("expected no filing for misconfig, got %v", rec.filed)
-	}
-}
-
 // ----- metrics tests -----
 
-// TestMetricsFiledAndScan proves that a successful file+scan path increments
-// the right counters and sets SetPollerLastRun at the end of RunOnce.
 func TestMetricsFiledAndScan(t *testing.T) {
 	rec := &recorder{}
 	fm := newFakeMetrics()
+	st, dec := mangaBinding(filepath.FromSlash("/lib/Manga"), 1)
 	p := &Poller{
 		Scanner:    fakeScanner{out: []model.Series{{Title: "Berserk", SourcePath: "/dl/Berserk"}}},
-		Classifier: fakeClassifier{t: model.TypeManga},
+		Classifier: &fakeClassifier{decision: dec},
 		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
-		Metrics: fm,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManga: filepath.FromSlash("/lib/Manga"),
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 1},
+		Metrics:  fm,
+		Bindings: st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
@@ -477,17 +521,15 @@ func TestMetricsFiledAndScan(t *testing.T) {
 	}
 }
 
-// TestMetricsUnmatched proves that unmatched routing increments IncUnmatched.
 func TestMetricsUnmatched(t *testing.T) {
 	rec := &recorder{}
 	fm := newFakeMetrics()
 	p := &Poller{
-		Scanner:      fakeScanner{out: []model.Series{{Title: "???"}}},
-		Classifier:   fakeClassifier{t: model.TypeUnknown},
-		Filer:        rec, Kavita: rec, Unmatched: rec, Activity: rec,
-		Metrics:      fm,
-		LibraryRoots: map[model.ContentType]string{},
-		LibraryIDs:   map[model.ContentType]int64{},
+		Scanner:    fakeScanner{out: []model.Series{{Title: "???"}}},
+		Classifier: &fakeClassifier{decision: model.Decision{Via: classifier.ViaUnmatched}},
+		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
+		Metrics:  fm,
+		Bindings: &fakeBindingStore{},
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
@@ -500,19 +542,16 @@ func TestMetricsUnmatched(t *testing.T) {
 	}
 }
 
-// TestMetricsFilerError proves that a filer error increments IncFileError.
 func TestMetricsFilerError(t *testing.T) {
 	rec := &recorder{errFile: errors.New("no space")}
 	fm := newFakeMetrics()
+	st, dec := mangaBinding(filepath.FromSlash("/lib/Manga"), 3)
 	p := &Poller{
 		Scanner:    fakeScanner{out: []model.Series{{Title: "Vagabond"}}},
-		Classifier: fakeClassifier{t: model.TypeManga},
+		Classifier: &fakeClassifier{decision: dec},
 		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
-		Metrics: fm,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManga: filepath.FromSlash("/lib/Manga"),
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 3},
+		Metrics:  fm,
+		Bindings: st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
@@ -525,19 +564,16 @@ func TestMetricsFilerError(t *testing.T) {
 	}
 }
 
-// TestMetricsKavitaError proves that a Kavita scan failure increments IncKavitaScan("error").
 func TestMetricsKavitaError(t *testing.T) {
 	rec := &recorder{errScan: errors.New("kavita down")}
 	fm := newFakeMetrics()
+	st, dec := mangaBinding(filepath.FromSlash("/lib/Manga"), 4)
 	p := &Poller{
 		Scanner:    fakeScanner{out: []model.Series{{Title: "Vinland Saga"}}},
-		Classifier: fakeClassifier{t: model.TypeManga},
+		Classifier: &fakeClassifier{decision: dec},
 		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
-		Metrics: fm,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManga: filepath.FromSlash("/lib/Manga"),
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 4},
+		Metrics:  fm,
+		Bindings: st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce: %v", err)
@@ -550,18 +586,15 @@ func TestMetricsKavitaError(t *testing.T) {
 	}
 }
 
-// TestMetricsNilSafe proves that a nil Metrics field does not panic.
 func TestMetricsNilSafe(t *testing.T) {
 	rec := &recorder{}
+	st, dec := mangaBinding(filepath.FromSlash("/lib/Manga"), 5)
 	p := &Poller{
 		Scanner:    fakeScanner{out: []model.Series{{Title: "One Piece"}}},
-		Classifier: fakeClassifier{t: model.TypeManga},
+		Classifier: &fakeClassifier{decision: dec},
 		Filer:      rec, Kavita: rec, Unmatched: rec, Activity: rec,
-		Metrics: nil, // explicitly nil — must not panic
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManga: filepath.FromSlash("/lib/Manga"),
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 5},
+		Metrics:  nil, // explicitly nil — must not panic
+		Bindings: st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("runonce with nil metrics: %v", err)
@@ -569,48 +602,6 @@ func TestMetricsNilSafe(t *testing.T) {
 }
 
 // ---- Preview tests ----
-
-// multiClassifier maps series titles to different ContentTypes (or errors).
-type multiClassifier struct {
-	results map[string]model.ContentType
-	errors  map[string]error
-}
-
-func (m *multiClassifier) Classify(title string) (model.ContentType, error) {
-	if err, ok := m.errors[title]; ok {
-		return model.TypeUnknown, err
-	}
-	if ct, ok := m.results[title]; ok {
-		return ct, nil
-	}
-	return model.TypeUnknown, nil
-}
-
-func (m *multiClassifier) ClassifySeries(s model.Series) (model.ContentType, string, error) {
-	ct, err := m.Classify(s.Title)
-	if err != nil {
-		return model.TypeUnknown, "unmatched", err
-	}
-	if ct == model.TypeUnknown {
-		return model.TypeUnknown, "unmatched", nil
-	}
-	return ct, "anilist:" + countryForType(ct), nil
-}
-
-// cacheCountingClassifier counts how many times CacheClassification is called.
-// It wraps a fakeClassifier and tracks cache writes.
-type cacheCountingClassifier struct {
-	inner      fakeClassifier
-	cacheWrites int
-}
-
-func (c *cacheCountingClassifier) Classify(title string) (model.ContentType, error) {
-	return c.inner.Classify(title)
-}
-
-func (c *cacheCountingClassifier) ClassifySeries(s model.Series) (model.ContentType, string, error) {
-	return c.inner.ClassifySeries(s)
-}
 
 // fakePlanner records Plan calls and returns canned plan entries.
 type fakePlanner struct {
@@ -646,10 +637,10 @@ func TestPreviewWalksAllSeries(t *testing.T) {
 		{Title: "Error Series", SourcePath: "/dl/Error", Source: "suwayomi"},
 	}
 
-	clf := &multiClassifier{
-		results: map[string]model.ContentType{
-			"Berserk": model.TypeManga,
-			"Unknown": model.TypeUnknown,
+	clf := &fakeClassifierMap{
+		decisions: map[string]model.Decision{
+			"Berserk": {BindingID: 1, Via: "rule:1"},
+			"Unknown": {Via: classifier.ViaUnmatched},
 		},
 		errors: map[string]error{
 			"Error Series": errors.New("anilist timeout"),
@@ -660,6 +651,10 @@ func TestPreviewWalksAllSeries(t *testing.T) {
 		{SrcPath: "/dl/Berserk/Ch. 001.cbz", DstPath: "/lib/Manga/Berserk/Berserk - Ch.001.cbz", Action: filer.PlanFile},
 	}}
 
+	st := &fakeBindingStore{bindings: []model.Binding{
+		{ID: 1, Name: "Manga", LibraryRoot: "/lib/Manga", KavitaLibID: 0},
+	}}
+
 	p := &Poller{
 		Scanner:    fakeScanner{out: series},
 		Classifier: clf,
@@ -668,10 +663,7 @@ func TestPreviewWalksAllSeries(t *testing.T) {
 		Kavita:     &recorder{},
 		Unmatched:  &recorder{},
 		Activity:   &recorder{},
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManga: "/lib/Manga",
-		},
-		LibraryIDs: map[model.ContentType]int64{},
+		Bindings:   st,
 	}
 
 	entries, err := p.Preview(context.Background())
@@ -698,74 +690,21 @@ func TestPreviewWalksAllSeries(t *testing.T) {
 	}
 }
 
-// TestPreviewDoesNotWriteCache asserts Preview does not call CacheClassification.
-// The Classifier interface does not expose CacheClassification, so we verify
-// indirectly: our multiClassifier has no cache-write mechanism, and Preview
-// must only call Classify (read path). We assert by confirming the results
-// match regardless — if a cache write mutated state, subsequent calls would
-// differ. This test uses a cacheCountingClassifier to confirm zero writes.
-func TestPreviewDoesNotWriteCache(t *testing.T) {
-	// We verify via the classifier.Cache interface that Preview never calls
-	// CacheClassification. Because the poller.Classifier interface only has
-	// Classify(), and the real classifier.Classifier has internal caching,
-	// what we can test here is that Preview doesn't somehow diverge from
-	// calling only Classify(). We use a plain fakeClassifier (no cache) and
-	// assert the result is consistent across two Preview calls — if internal
-	// state were mutated (e.g. cache writes), the second call might return
-	// different results or fail.
-	series := []model.Series{
-		{Title: "Berserk", SourcePath: "/dl/Berserk", Source: "tranga"},
-	}
-	clf := fakeClassifier{t: model.TypeManga}
-	p := &Poller{
-		Scanner:    fakeScanner{out: series},
-		Classifier: clf,
-		Planner:    &fakePlanner{},
-		Filer:      &recorder{},
-		Kavita:     &recorder{},
-		Unmatched:  &recorder{},
-		Activity:   &recorder{},
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManga: "/lib/Manga",
-		},
-		LibraryIDs: map[model.ContentType]int64{},
-	}
-
-	r1, err1 := p.Preview(context.Background())
-	if err1 != nil {
-		t.Fatalf("first Preview: %v", err1)
-	}
-	r2, err2 := p.Preview(context.Background())
-	if err2 != nil {
-		t.Fatalf("second Preview: %v", err2)
-	}
-	// Both calls must return the same status — no state mutation.
-	if len(r1) != len(r2) {
-		t.Fatalf("Preview results differ between calls: %d vs %d", len(r1), len(r2))
-	}
-	if r1[0].Status != r2[0].Status {
-		t.Fatalf("Status differs between Preview calls: %q vs %q", r1[0].Status, r2[0].Status)
-	}
-}
-
-// TestPreviewDoesNotCallKavita verifies that Preview never triggers a Kavita scan.
 func TestPreviewDoesNotCallKavita(t *testing.T) {
 	series := []model.Series{
 		{Title: "Berserk", SourcePath: "/dl/Berserk", Source: "tranga"},
 	}
 	kav := &fakeKavitaRecorder{}
+	st, dec := mangaBinding("/lib/Manga", 1)
 	p := &Poller{
 		Scanner:    fakeScanner{out: series},
-		Classifier: fakeClassifier{t: model.TypeManga},
+		Classifier: &fakeClassifier{decision: dec},
 		Planner:    &fakePlanner{},
 		Filer:      &recorder{},
 		Kavita:     kav,
 		Unmatched:  &recorder{},
 		Activity:   &recorder{},
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManga: "/lib/Manga",
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManga: 1},
+		Bindings:   st,
 	}
 
 	if _, err := p.Preview(context.Background()); err != nil {
@@ -777,10 +716,16 @@ func TestPreviewDoesNotCallKavita(t *testing.T) {
 }
 
 // ---- FileOne tests ----
+//
+// FileOne is the manual-classify-from-Unmatched path. It does NOT go through
+// the v2 Decision/BindingID flow — the user has already supplied a
+// ContentType, so it uses the v1 LibraryRoots / LibraryIDs maps directly.
+// Task 11 will migrate FileOne to v2 bindings; until then these tests cover
+// the existing surface.
 
 // fakeSeriesStore satisfies poller.SeriesStore for FileOne tests.
 type fakeSeriesStore struct {
-	series      map[int64]model.Series
+	series       map[int64]model.Series
 	setTypeCalls []struct {
 		id int64
 		ct model.ContentType
@@ -840,7 +785,7 @@ func (f *fakeCache) CacheClassification(title string, ct model.ContentType) erro
 func newFileOnePoller(st *fakeSeriesStore, cache *fakeCache, rec *recorder, libRoots map[model.ContentType]string, libIDs map[model.ContentType]int64) *Poller {
 	return &Poller{
 		Scanner:      fakeScanner{},
-		Classifier:   fakeClassifier{t: model.TypeUnknown},
+		Classifier:   &fakeClassifier{decision: model.Decision{Via: classifier.ViaUnmatched}},
 		Filer:        rec,
 		Kavita:       rec,
 		Unmatched:    rec,
@@ -849,6 +794,7 @@ func newFileOnePoller(st *fakeSeriesStore, cache *fakeCache, rec *recorder, libR
 		Cache:        cache,
 		LibraryRoots: libRoots,
 		LibraryIDs:   libIDs,
+		Bindings:     &fakeBindingStore{},
 	}
 }
 
@@ -869,23 +815,18 @@ func TestFileOneFilesAndScans(t *testing.T) {
 		t.Fatalf("FileOne: %v", err)
 	}
 
-	// Cache must have been written.
 	if len(cache.writes) != 1 || cache.writes[0].title != "Dragon Ball Super (Color)" || cache.writes[0].ct != model.TypeManga {
 		t.Fatalf("expected cache write for Dragon Ball Super (Color)/Manga, got %+v", cache.writes)
 	}
-	// SetSeriesType must have been called.
 	if len(st.setTypeCalls) != 1 || st.setTypeCalls[0].id != 1 || st.setTypeCalls[0].ct != model.TypeManga {
 		t.Fatalf("expected SetSeriesType(1, Manga), got %+v", st.setTypeCalls)
 	}
-	// Filer must have been called.
 	if len(rec.filed) != 1 {
 		t.Fatalf("expected 1 filed, got %d", len(rec.filed))
 	}
-	// Kavita scan must have been triggered.
 	if len(rec.scanned) != 1 || rec.scanned[0] != 3 {
 		t.Fatalf("expected scan of lib 3, got %v", rec.scanned)
 	}
-	// ActionFiled and ActionScanTriggered must be recorded.
 	if got := rec.countActions(model.ActionFiled); got != 1 {
 		t.Fatalf("expected 1 ActionFiled, got %d", got)
 	}
@@ -902,7 +843,6 @@ func TestFileOneRecordsErrorWhenNoLibraryRoot(t *testing.T) {
 	}
 	cache := &fakeCache{}
 	rec := &recorder{}
-	// No LibraryRoots entry for Manga.
 	p := newFileOnePoller(st, cache, rec,
 		map[model.ContentType]string{},
 		map[model.ContentType]int64{},
@@ -912,7 +852,6 @@ func TestFileOneRecordsErrorWhenNoLibraryRoot(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing library root, got nil")
 	}
-	// Must record ActionError, must NOT call filer or Kavita.
 	if got := rec.countActions(model.ActionError); got != 1 {
 		t.Fatalf("expected 1 ActionError, got %d (activity=%+v)", got, rec.activity)
 	}
@@ -941,11 +880,9 @@ func TestFileOneRecordsErrorOnFilerFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from filer failure, got nil")
 	}
-	// ActionError must be recorded.
 	if got := rec.countActions(model.ActionError); got != 1 {
 		t.Fatalf("expected 1 ActionError, got %d (activity=%+v)", got, rec.activity)
 	}
-	// Kavita must NOT have been triggered.
 	if len(rec.scanned) != 0 {
 		t.Fatalf("Kavita must not be called on filer failure, got %v", rec.scanned)
 	}
@@ -971,7 +908,6 @@ func TestFileOneStillWritesCacheOnSuccess(t *testing.T) {
 		t.Fatalf("FileOne: %v", err)
 	}
 
-	// Cache write must have happened.
 	if len(cache.writes) != 1 {
 		t.Fatalf("expected 1 cache write, got %d: %+v", len(cache.writes), cache.writes)
 	}
@@ -982,9 +918,6 @@ func TestFileOneStillWritesCacheOnSuccess(t *testing.T) {
 
 // ---------- Library Map (Plan B) — Suwayomi refresh ----------
 
-// suwayomiStub returns an httptest.Server that serves a single empty
-// library to /api/graphql. Good enough to make PathCache.Refresh
-// succeed without exercising the full GraphQL surface.
 func suwayomiStub(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -998,8 +931,6 @@ type stubSettingsProvider struct{ s model.Settings }
 
 func (p *stubSettingsProvider) GetSettings() (model.Settings, error) { return p.s, nil }
 
-// TestRunOnceCallsSuwayomiRefreshWhenConfigured covers:
-// "The poller shall call PathCache.Refresh at the top of each tick."
 func TestRunOnceCallsSuwayomiRefreshWhenConfigured(t *testing.T) {
 	srv := suwayomiStub(t)
 	defer srv.Close()
@@ -1009,11 +940,12 @@ func TestRunOnceCallsSuwayomiRefreshWhenConfigured(t *testing.T) {
 
 	p := &Poller{
 		Scanner:    fakeScanner{out: nil},
-		Classifier: fakeClassifier{t: model.TypeUnknown},
+		Classifier: &fakeClassifier{decision: model.Decision{Via: classifier.ViaUnmatched}},
 		Filer:      &recorder{},
 		Kavita:     &recorder{},
 		Unmatched:  &recorder{},
 		Activity:   &recorder{},
+		Bindings:   &fakeBindingStore{},
 		SuwayomiCache: cache,
 		SuwayomiClient: func(set model.Settings) (*suwayomi.Client, error) {
 			atomic.AddInt32(&factoryCalls, 1)
@@ -1030,42 +962,28 @@ func TestRunOnceCallsSuwayomiRefreshWhenConfigured(t *testing.T) {
 	if got := atomic.LoadInt32(&factoryCalls); got != 1 {
 		t.Errorf("SuwayomiClient factory: want 1 call, got %d", got)
 	}
-	// Refresh succeeded → cache has been swapped in. Empty library
-	// snapshot just means zero entries — Size() will be 0 but it's
-	// "the latest refresh" rather than "never refreshed". We can't
-	// distinguish those from Size alone, so the factoryCalls assertion
-	// is what really pins down "Refresh was called". A successful
-	// Refresh leaves Size() at zero here.
 	if got := cache.Size(); got != 0 {
 		t.Errorf("cache.Size after refresh of empty library: want 0, got %d", got)
 	}
 }
 
-// TestRunOnceContinuesWhenSuwayomiRefreshFails covers:
-// "If Suwayomi is unreachable during a poller tick, the tick shall
-// continue and rely on previously-cached entries (or fall through to
-// AniList for cache misses)."
 func TestRunOnceContinuesWhenSuwayomiRefreshFails(t *testing.T) {
-	// Closed server → every request errors out.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	srv.Close()
 
 	cache := suwayomi.NewPathCache()
 	rec := &recorder{}
 
-	// Plant a series so we can prove the tick continued (Filer.File was called).
 	series := model.Series{Title: "Solo Leveling", SourcePath: "/dl/Solo Leveling"}
+	st, dec := manhwaBinding(filepath.FromSlash("/lib/Manhwa"), 2)
 	p := &Poller{
 		Scanner:    fakeScanner{out: []model.Series{series}},
-		Classifier: fakeClassifier{t: model.TypeManhwa},
+		Classifier: &fakeClassifier{decision: dec},
 		Filer:      rec,
 		Kavita:     rec,
 		Unmatched:  rec,
 		Activity:   rec,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManhwa: filepath.FromSlash("/lib/Manhwa"),
-		},
-		LibraryIDs:    map[model.ContentType]int64{model.TypeManhwa: 2},
+		Bindings:   st,
 		SuwayomiCache: cache,
 		SuwayomiClient: func(set model.Settings) (*suwayomi.Client, error) {
 			return suwayomi.New(srv.URL, suwayomi.NoAuth{}), nil
@@ -1083,18 +1001,17 @@ func TestRunOnceContinuesWhenSuwayomiRefreshFails(t *testing.T) {
 	}
 }
 
-// TestRunOnceSkipsRefreshWhenSuwayomiURLEmpty covers:
-// "Poller does not call Refresh when SuwayomiBaseURL is empty."
 func TestRunOnceSkipsRefreshWhenSuwayomiURLEmpty(t *testing.T) {
 	var factoryCalls int32
 	cache := suwayomi.NewPathCache()
 	p := &Poller{
 		Scanner:    fakeScanner{out: nil},
-		Classifier: fakeClassifier{t: model.TypeUnknown},
+		Classifier: &fakeClassifier{decision: model.Decision{Via: classifier.ViaUnmatched}},
 		Filer:      &recorder{},
 		Kavita:     &recorder{},
 		Unmatched:  &recorder{},
 		Activity:   &recorder{},
+		Bindings:   &fakeBindingStore{},
 		SuwayomiCache: cache,
 		SuwayomiClient: func(set model.Settings) (*suwayomi.Client, error) {
 			atomic.AddInt32(&factoryCalls, 1)
@@ -1112,22 +1029,21 @@ func TestRunOnceSkipsRefreshWhenSuwayomiURLEmpty(t *testing.T) {
 	}
 }
 
-// TestRunOnceWritesViaIntoActivity asserts that the via tag the
-// classifier returns ends up on the ActivityEntry.
+// TestRunOnceWritesViaIntoActivity asserts that the Via tag the classifier's
+// Decision carries ends up on the ActivityEntry.
 func TestRunOnceWritesViaIntoActivity(t *testing.T) {
 	s := model.Series{Title: "Solo Leveling", SourcePath: "/dl/Solo Leveling"}
 	rec := &recorder{}
+	st, _ := manhwaBinding(filepath.FromSlash("/lib/Manhwa"), 2)
+	dec := model.Decision{BindingID: 2, Via: "anilist:KR"}
 	p := &Poller{
 		Scanner:    fakeScanner{out: []model.Series{s}},
-		Classifier: fakeClassifier{t: model.TypeManhwa},
+		Classifier: &fakeClassifier{decision: dec},
 		Filer:      rec,
 		Kavita:     rec,
 		Unmatched:  rec,
 		Activity:   rec,
-		LibraryRoots: map[model.ContentType]string{
-			model.TypeManhwa: filepath.FromSlash("/lib/Manhwa"),
-		},
-		LibraryIDs: map[model.ContentType]int64{model.TypeManhwa: 2},
+		Bindings:   st,
 	}
 	if err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
