@@ -449,3 +449,51 @@ func TestSaveRulesMixedInsertAndUpsertInSameCall(t *testing.T) {
 		t.Errorf("insert branch lost: new rule should have non-zero ID and name 'new-row', got %+v", got[1])
 	}
 }
+
+// TestSettingsRoundTripDefaultBindingID verifies the Plan A v2 addition
+// (Settings.DefaultBindingID, the no-match fallback) survives JSON
+// round-trip through the store with both nil and explicitly-set values.
+func TestSettingsRoundTripDefaultBindingID(t *testing.T) {
+	t.Run("nil default", func(t *testing.T) {
+		s := newTestStore(t)
+		want := model.Settings{
+			FileMode:     model.ModeHardlink,
+			RenameScheme: "{series}/{series} - Ch.{chapter}.cbz",
+			PollMinutes:  15,
+		}
+		if err := s.SaveSettings(want); err != nil {
+			t.Fatalf("SaveSettings: %v", err)
+		}
+		got, err := s.GetSettings()
+		if err != nil {
+			t.Fatalf("GetSettings: %v", err)
+		}
+		if got.DefaultBindingID != nil {
+			t.Errorf("expected DefaultBindingID nil after round-trip, got %v", *got.DefaultBindingID)
+		}
+	})
+
+	t.Run("set default", func(t *testing.T) {
+		s := newTestStore(t)
+		id := int64(42)
+		want := model.Settings{
+			FileMode:         model.ModeHardlink,
+			RenameScheme:     "{series}/{series} - Ch.{chapter}.cbz",
+			PollMinutes:      15,
+			DefaultBindingID: &id,
+		}
+		if err := s.SaveSettings(want); err != nil {
+			t.Fatalf("SaveSettings: %v", err)
+		}
+		got, err := s.GetSettings()
+		if err != nil {
+			t.Fatalf("GetSettings: %v", err)
+		}
+		if got.DefaultBindingID == nil {
+			t.Fatalf("expected DefaultBindingID set after round-trip, got nil")
+		}
+		if *got.DefaultBindingID != 42 {
+			t.Errorf("expected DefaultBindingID 42, got %d", *got.DefaultBindingID)
+		}
+	})
+}

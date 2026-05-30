@@ -111,6 +111,13 @@ type Settings struct {
 	// PathCache returns CategoryIDs in that order). Empty/nil map =
 	// feature disabled = pure AniList classification.
 	SuwayomiCategoryOverrides map[int64]int64 `json:"suwayomi_category_overrides,omitempty"`
+
+	// DefaultBindingID is the optional catch-all routing target when no
+	// classification rule matches and no Suwayomi override applies. nil
+	// means "send unmatched series to the Unmatched queue" (the safe
+	// default and the pre-v2 behaviour). Set to a Binding.ID to auto-
+	// route everything else.
+	DefaultBindingID *int64 `json:"default_binding_id,omitempty"`
 }
 
 // Binding is one library destination the user has defined. Replaces the
