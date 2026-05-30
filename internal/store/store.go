@@ -37,6 +37,15 @@ func Open(path string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
+	// Run the numbered migrations framework alongside the legacy inline
+	// migrate(). Bringing this forward from Task 11 of the Library
+	// Bindings v2 plan so that the bindings + classification_rules tables
+	// exist on every boot, not just after the Task 11 cleanup lands.
+	// Idempotent — schema_versions tracks applied migrations so this is
+	// a no-op on subsequent boots.
+	if err := runMigrations(s.db); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -256,4 +265,99 @@ func (s *Store) GetCachedClassification(titleNorm string) (model.ContentType, bo
 		return model.TypeUnknown, false, nil
 	}
 	return model.ContentType(t), err == nil, err
+}
+
+// ListBindings returns all bindings ordered by name. Stable order matters
+// for UI rendering; ID would also be stable but Name reads better in lists.
+func (s *Store) ListBindings() ([]model.Binding, error) {
+	rows, err := s.db.Query(`SELECT id, name, library_root, kavita_lib_id, default_is_adult FROM bindings ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list bindings: %w", err)
+	}
+	defer rows.Close()
+
+	var out []model.Binding
+	for rows.Next() {
+		var b model.Binding
+		var isAdult int64
+		if err := rows.Scan(&b.ID, &b.Name, &b.LibraryRoot, &b.KavitaLibID, &isAdult); err != nil {
+			return nil, fmt.Errorf("scan binding: %w", err)
+		}
+		b.DefaultIsAdult = isAdult != 0
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// SaveBindings atomically replaces the entire bindings table contents.
+// Existing rows that aren't in the input are deleted. Any input row with
+// ID == 0 is treated as new and assigned an autoincremented ID; rows with
+// ID > 0 are upserted by ID. Single transaction so partial failures
+// don't leave the bindings table in a torn state.
+func (s *Store) SaveBindings(in []model.Binding) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin save bindings: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Collect input IDs (non-zero) to know which existing rows to keep.
+	keep := make(map[int64]bool)
+	for _, b := range in {
+		if b.ID > 0 {
+			keep[b.ID] = true
+		}
+	}
+
+	// Delete existing rows whose IDs are not in the input. Use a NOT IN
+	// query if there's anything to keep, or wipe the table if not.
+	if len(keep) == 0 {
+		if _, err := tx.Exec(`DELETE FROM bindings`); err != nil {
+			return fmt.Errorf("delete all bindings: %w", err)
+		}
+	} else {
+		ids := make([]any, 0, len(keep))
+		placeholders := make([]string, 0, len(keep))
+		for id := range keep {
+			ids = append(ids, id)
+			placeholders = append(placeholders, "?")
+		}
+		q := fmt.Sprintf(`DELETE FROM bindings WHERE id NOT IN (%s)`, strings.Join(placeholders, ","))
+		if _, err := tx.Exec(q, ids...); err != nil {
+			return fmt.Errorf("prune bindings: %w", err)
+		}
+	}
+
+	// Upsert each input row. SQLite supports ON CONFLICT(id) DO UPDATE.
+	for i := range in {
+		b := &in[i]
+		isAdult := int64(0)
+		if b.DefaultIsAdult {
+			isAdult = 1
+		}
+		if b.ID == 0 {
+			res, err := tx.Exec(
+				`INSERT INTO bindings (name, library_root, kavita_lib_id, default_is_adult) VALUES (?, ?, ?, ?)`,
+				b.Name, b.LibraryRoot, b.KavitaLibID, isAdult,
+			)
+			if err != nil {
+				return fmt.Errorf("insert binding %q: %w", b.Name, err)
+			}
+			id, _ := res.LastInsertId()
+			b.ID = id
+		} else {
+			_, err := tx.Exec(
+				`INSERT INTO bindings (id, name, library_root, kavita_lib_id, default_is_adult)
+				 VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT(id) DO UPDATE SET name=excluded.name, library_root=excluded.library_root,
+				   kavita_lib_id=excluded.kavita_lib_id, default_is_adult=excluded.default_is_adult`,
+				b.ID, b.Name, b.LibraryRoot, b.KavitaLibID, isAdult,
+			)
+			if err != nil {
+				return fmt.Errorf("upsert binding id=%d: %w", b.ID, err)
+			}
+		}
+	}
+
+	return tx.Commit()
 }

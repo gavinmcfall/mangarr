@@ -266,3 +266,80 @@ func TestUpsertSeriesUpdates(t *testing.T) {
 		t.Fatalf("update didn't take: %+v", got)
 	}
 }
+
+// --- Library Bindings v2: Task 4 — Store CRUD for bindings ---
+
+func TestListBindingsEmpty(t *testing.T) {
+	s := newTestStore(t)
+	got, err := s.ListBindings()
+	if err != nil {
+		t.Fatalf("ListBindings: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected 0 bindings on fresh store, got %d", len(got))
+	}
+}
+
+func TestSaveBindingsAtomicReplaceAll(t *testing.T) {
+	s := newTestStore(t)
+	first := []model.Binding{
+		{Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1, DefaultIsAdult: false},
+		{Name: "Manhwa", LibraryRoot: "/m/b", KavitaLibID: 2, DefaultIsAdult: false},
+	}
+	if err := s.SaveBindings(first); err != nil {
+		t.Fatalf("SaveBindings first: %v", err)
+	}
+	got, _ := s.ListBindings()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 bindings after first save, got %d", len(got))
+	}
+
+	// Replace with a different set; first set must be gone.
+	second := []model.Binding{
+		{Name: "Comics", LibraryRoot: "/m/c", KavitaLibID: 3, DefaultIsAdult: false},
+	}
+	if err := s.SaveBindings(second); err != nil {
+		t.Fatalf("SaveBindings second: %v", err)
+	}
+	got, _ = s.ListBindings()
+	if len(got) != 1 || got[0].Name != "Comics" {
+		t.Errorf("expected only Comics after replace, got %+v", got)
+	}
+}
+
+func TestSaveBindingsAssignsIDsToNewRows(t *testing.T) {
+	s := newTestStore(t)
+	in := []model.Binding{{Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1}}
+	if err := s.SaveBindings(in); err != nil {
+		t.Fatalf("SaveBindings: %v", err)
+	}
+	out, _ := s.ListBindings()
+	if len(out) != 1 || out[0].ID == 0 {
+		t.Errorf("expected SaveBindings to assign a non-zero ID, got %+v", out)
+	}
+}
+
+// TestSaveBindingsUpsertExistingByID exercises the ID>0 branch — an input
+// row that carries an existing ID should update that row in place rather
+// than insert a duplicate.
+func TestSaveBindingsUpsertExistingByID(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.SaveBindings([]model.Binding{{Name: "Manga", LibraryRoot: "/m/a", KavitaLibID: 1}}); err != nil {
+		t.Fatalf("seed SaveBindings: %v", err)
+	}
+	seeded, _ := s.ListBindings()
+	if len(seeded) != 1 {
+		t.Fatalf("expected 1 binding after seed, got %d", len(seeded))
+	}
+	existingID := seeded[0].ID
+
+	// Upsert: change the name + library root, keep the ID.
+	updated := []model.Binding{{ID: existingID, Name: "Manga (renamed)", LibraryRoot: "/m/a-new", KavitaLibID: 11}}
+	if err := s.SaveBindings(updated); err != nil {
+		t.Fatalf("upsert SaveBindings: %v", err)
+	}
+	got, _ := s.ListBindings()
+	if len(got) != 1 || got[0].ID != existingID || got[0].Name != "Manga (renamed)" || got[0].LibraryRoot != "/m/a-new" || got[0].KavitaLibID != 11 {
+		t.Errorf("expected upserted binding, got %+v", got)
+	}
+}
