@@ -373,6 +373,16 @@ tbody tr:hover td {
   border-bottom: 1px solid #3a3c40;
 }
 
+/* has-action: a card header that hosts an inline action button on the
+   right (e.g. "+ Add Binding", "+ Add Rule"). Promotes the repeated
+   inline style="display:flex;..." pattern used by the Plan B cards. */
+.settings-card-header.has-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .settings-card-title {
   font-size: 16px;
   font-weight: 600;

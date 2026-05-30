@@ -1,0 +1,64 @@
+{{define "rule-rows"}}
+{{$bindings := .Bindings}}
+{{range .Rules}}
+{{$country := derefStr .Condition.CountryOfOrigin}}
+{{$format := derefStr .Condition.Format}}
+{{$path := derefStr .Condition.SourcePathPrefix}}
+<div class="settings-row rule-row" data-rule-id="{{.ID}}">
+  <input type="hidden" name="rule_id_{{.ID}}" value="{{.ID}}">
+  <div class="settings-input-wrap rule-row-fields">
+    <input type="number" name="rule_priority_{{.ID}}" value="{{.Priority}}"
+      min="0" max="9999" class="rule-priority"
+      title="Lower number = higher priority">
+    <input type="text" name="rule_name_{{.ID}}" value="{{.Name}}"
+      placeholder="Rule name" class="rule-name">
+
+    <label class="rule-cond">country
+      <select name="rule_country_{{.ID}}">
+        <option value=""{{if not .Condition.CountryOfOrigin}} selected{{end}}>Any</option>
+        <option value="JP"{{if eq $country "JP"}} selected{{end}}>JP</option>
+        <option value="KR"{{if eq $country "KR"}} selected{{end}}>KR</option>
+        <option value="CN"{{if eq $country "CN"}} selected{{end}}>CN</option>
+        <option value="TW"{{if eq $country "TW"}} selected{{end}}>TW</option>
+      </select>
+    </label>
+
+    <label class="rule-cond">adult
+      <select name="rule_adult_{{.ID}}">
+        <option value=""{{if not .Condition.IsAdult}} selected{{end}}>Any</option>
+        <option value="yes"{{if and .Condition.IsAdult (deref .Condition.IsAdult)}} selected{{end}}>Yes</option>
+        <option value="no"{{if and .Condition.IsAdult (not (deref .Condition.IsAdult))}} selected{{end}}>No</option>
+      </select>
+    </label>
+
+    <label class="rule-cond">format
+      <select name="rule_format_{{.ID}}">
+        <option value=""{{if not .Condition.Format}} selected{{end}}>Any</option>
+        <option value="MANGA"{{if eq $format "MANGA"}} selected{{end}}>Manga</option>
+        <option value="NOVEL"{{if eq $format "NOVEL"}} selected{{end}}>Novel</option>
+        <option value="ONE_SHOT"{{if eq $format "ONE_SHOT"}} selected{{end}}>One-shot</option>
+      </select>
+    </label>
+
+    <label class="rule-cond">path
+      <input type="text" name="rule_path_{{.ID}}" value="{{$path}}"
+        placeholder="/media/Downloads/..." class="rule-path">
+    </label>
+
+    <label class="rule-target">&rarr; binding
+      <select name="rule_binding_{{.ID}}" class="rule-binding">
+        <option value="0">&mdash; pick &mdash;</option>
+        {{$current := .BindingID}}
+        {{if and (gt $current 0) (not (bindingExists $bindings $current))}}
+          <option value="{{$current}}" selected>Unknown binding (ID: {{$current}})</option>
+        {{end}}
+        {{range $bindings}}<option value="{{.ID}}"{{if eq .ID $current}} selected{{end}}>{{.Name}}</option>{{end}}
+      </select>
+    </label>
+
+    <button type="button" class="btn-sm rule-delete"
+      onclick="this.closest('.rule-row').remove()" title="Delete rule">&#x2715;</button>
+  </div>
+</div>
+{{end}}
+{{end}}

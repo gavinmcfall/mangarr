@@ -116,7 +116,7 @@
 
   <!-- Library Bindings (Plan B v2) -->
   <div class="settings-card">
-    <div class="settings-card-header" style="display:flex;align-items:center;justify-content:space-between;">
+    <div class="settings-card-header has-action">
       <div>
         <p class="settings-card-title">Library Bindings</p>
         <p class="settings-card-desc">Each binding is one library destination. A name (e.g. <em>Manga</em>, <em>Manhwa 18+</em>), a filesystem root, a Kavita library, and a default 18+ flag. Classification rules and Suwayomi category overrides below route series here.</p>
@@ -151,6 +151,74 @@
         </label>
         <button type="button" class="btn-sm binding-delete"
           onclick="this.closest('.binding-row').remove()" title="Delete binding">&#x2715;</button>
+      </div>
+    </div>
+  </template>
+
+  <!-- Classification Rules (Plan B v2) -->
+  <div class="settings-card">
+    <div class="settings-card-header has-action">
+      <div>
+        <p class="settings-card-title">Classification Rules</p>
+        <p class="settings-card-desc">Rules are evaluated ascending by <em>Priority</em> (lower number = higher precedence). The first matching rule routes the series to its target binding. Conditions are AND-semantics; leave any field as <em>Any</em> to skip that constraint.</p>
+      </div>
+      <button type="button" class="btn-sm" onclick="addRuleRow()">+ Add Rule</button>
+    </div>
+    <div class="settings-card-body">
+      <div id="rule-rows-body">
+        {{template "rule-rows" .}}
+      </div>
+      {{if not .Rules}}
+      <p class="empty-state" style="margin:8px 0 0 0;">No rules configured. Click <b>+ Add Rule</b> above to define how series get classified.</p>
+      {{end}}
+    </div>
+  </div>
+
+  <template id="rule-row-template">
+    <div class="settings-row rule-row" data-rule-id="0">
+      <input type="hidden" name="rule_id___NEW_IDX__" value="0">
+      <div class="settings-input-wrap rule-row-fields">
+        <input type="number" name="rule_priority___NEW_IDX__" value="1000"
+          min="0" max="9999" class="rule-priority"
+          title="Lower number = higher priority">
+        <input type="text" name="rule_name___NEW_IDX__" value=""
+          placeholder="Rule name" class="rule-name">
+        <label class="rule-cond">country
+          <select name="rule_country___NEW_IDX__">
+            <option value="" selected>Any</option>
+            <option value="JP">JP</option>
+            <option value="KR">KR</option>
+            <option value="CN">CN</option>
+            <option value="TW">TW</option>
+          </select>
+        </label>
+        <label class="rule-cond">adult
+          <select name="rule_adult___NEW_IDX__">
+            <option value="" selected>Any</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </label>
+        <label class="rule-cond">format
+          <select name="rule_format___NEW_IDX__">
+            <option value="" selected>Any</option>
+            <option value="MANGA">Manga</option>
+            <option value="NOVEL">Novel</option>
+            <option value="ONE_SHOT">One-shot</option>
+          </select>
+        </label>
+        <label class="rule-cond">path
+          <input type="text" name="rule_path___NEW_IDX__" value=""
+            placeholder="/media/Downloads/..." class="rule-path">
+        </label>
+        <label class="rule-target">&rarr; binding
+          <select name="rule_binding___NEW_IDX__" class="rule-binding">
+            <option value="0">&mdash; pick &mdash;</option>
+            {{range .Bindings}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+          </select>
+        </label>
+        <button type="button" class="btn-sm rule-delete"
+          onclick="this.closest('.rule-row').remove()" title="Delete rule">&#x2715;</button>
       </div>
     </div>
   </template>
@@ -551,6 +619,27 @@
     // DocumentFragment and walking attributes is more correct but
     // dramatically more code; replaceAll on a freshly-cloned subtree
     // can't conflict with the rest of the page.
+    var frag = document.importNode(tpl.content, true);
+    var wrapper = document.createElement('div');
+    wrapper.appendChild(frag);
+    wrapper.innerHTML = wrapper.innerHTML.replaceAll('__NEW_IDX__', idx);
+    while (wrapper.firstChild) {
+      body.appendChild(wrapper.firstChild);
+    }
+  };
+})();
+
+// Add a new empty Classification Rule row by cloning the <template>.
+// Mirrors addBindingRow above: __NEW_IDX__ → 'newN' so form fields don't
+// collide. The submit handler in Task 5 treats the suffix as ID=0 (new row).
+(function() {
+  var counter = 0;
+  window.addRuleRow = function() {
+    counter++;
+    var tpl = document.getElementById('rule-row-template');
+    var body = document.getElementById('rule-rows-body');
+    if (!tpl || !body) { return; }
+    var idx = 'new' + counter;
     var frag = document.importNode(tpl.content, true);
     var wrapper = document.createElement('div');
     wrapper.appendChild(frag);

@@ -292,6 +292,8 @@ func parsePageTemplates() map[string]*template.Template {
 	withOverrideRows := map[string]bool{"settings.html": true}
 	// Pages that need the binding-rows partial (Plan B Library Bindings card).
 	withBindingRows := map[string]bool{"settings.html": true}
+	// Pages that need the rule-rows partial (Plan B Classification Rules card).
+	withRuleRows := map[string]bool{"settings.html": true}
 	m := make(map[string]*template.Template, len(pages)+1)
 	for _, name := range pages {
 		// Parse base + the specific page. This gives each page its own
@@ -302,6 +304,9 @@ func parsePageTemplates() map[string]*template.Template {
 		}
 		if withBindingRows[name] {
 			files = append(files, "templates/binding-rows.html")
+		}
+		if withRuleRows[name] {
+			files = append(files, "templates/rule-rows.html")
 		}
 		t := template.Must(
 			template.New("").Funcs(templateFuncs()).ParseFS(assets, files...),
@@ -357,6 +362,39 @@ func templateFuncs() template.FuncMap {
 				}
 			}
 			return true
+		},
+		// deref nil-safely dereferences a *bool, returning false for nil.
+		// Used by rule-rows.html to compare a rule's IsAdult condition
+		// pointer against a yes/no <option> value without exploding on nil.
+		"deref": func(b *bool) bool {
+			if b == nil {
+				return false
+			}
+			return *b
+		},
+		// derefStr nil-safely dereferences a *string, returning "" for nil.
+		// Used by rule-rows.html to compare a rule's CountryOfOrigin /
+		// Format condition pointers against string literals in <option>
+		// values. html/template's `eq` rejects *string vs string with
+		// "incompatible types for comparison" — derefing in Go avoids
+		// the reflect-time type mismatch.
+		"derefStr": func(s *string) string {
+			if s == nil {
+				return ""
+			}
+			return *s
+		},
+		// bindingExists returns true if the given binding ID is present
+		// in the supplied bindings slice. Used by rule-rows.html to detect
+		// orphaned BindingID references and render the
+		// "Unknown binding (ID: N)" placeholder option.
+		"bindingExists": func(bindings []model.Binding, id int64) bool {
+			for _, b := range bindings {
+				if b.ID == id {
+					return true
+				}
+			}
+			return false
 		},
 	}
 }
@@ -457,6 +495,14 @@ type settingsPageData struct {
 	// affordance is always present. Reuses .KavitaLibraries (above) for
 	// the per-row Kavita dropdown so we fetch once and render twice.
 	Bindings []model.Binding
+
+	// Rules carries every persisted Classification Rule from the v2 store
+	// in ascending Priority order. Empty slice renders an empty-state hint;
+	// the "+ Add Rule" affordance is always present. The per-row target
+	// dropdown reuses .Bindings (above) for its options so a deleted
+	// binding referenced by a rule renders as "Unknown binding (ID: N)"
+	// instead of silently disappearing.
+	Rules []model.ClassificationRule
 
 	// --- Library Map: Suwayomi connection ---
 	SuwayomiBaseURL  string
@@ -866,6 +912,11 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		bindings = nil
 	}
+	// Classification rules — best-effort, same rationale as bindings above.
+	rules, err := h.store.ListRules()
+	if err != nil {
+		rules = nil
+	}
 
 	// Pre-extract values typed-keyed by model.ContentType into plain fields,
 	// so the template can use {{.RootManga}} etc. with no reflection-time
@@ -885,6 +936,7 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		KavitaLibraries:         kavitaLibs,
 		KavitaLibError:          kavitaLibErr,
 		Bindings:                bindings,
+		Rules:                   rules,
 		SuwayomiBaseURL:         settings.SuwayomiBaseURL,
 		SuwayomiAuthType:        settings.SuwayomiAuthType,
 		SuwayomiUsername:        settings.SuwayomiUsername,
