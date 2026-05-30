@@ -30,11 +30,18 @@ type MetricsSink interface {
 }
 
 // PathLookup is the subset of *suwayomi.PathCache the classifier consults
-// for Library Map overrides. *suwayomi.PathCache satisfies this directly;
-// tests can pass a hand-built stub instead of standing up a full cache.
+// for Suwayomi category overrides. *suwayomi.PathCache satisfies this
+// directly; tests can pass a hand-built stub instead of standing up a
+// full cache.
 //
-// A nil PathLookup disables override resolution — classifier behaviour is
-// then identical to the pre-Library-Map AniList path.
+// In v1 ClassifySeries: a nil PathLookup disables override resolution —
+// classifier behaviour is then identical to the pre-Library-Map AniList
+// path.
+//
+// In v2 Classify: a nil PathLookup skips steps 2-3 of the six-step flow
+// and proceeds straight to step 4 (AniList rules), then step 5/6
+// (default-binding / unmatched). Path-only rules in step 1 do NOT depend
+// on the PathLookup and still fire.
 type PathLookup interface {
 	Lookup(parentDir string) (suwayomi.CacheEntry, bool)
 }
@@ -74,14 +81,37 @@ type ScanItem struct {
 	ParentDir string
 }
 
+// Classifier operates in one of two transitional modes during the
+// v1 → v2 migration (Library Map → Library Bindings v2):
+//
+//	v1 mode: constructed by New / NewWithCache, optionally extended with
+//	  WithSuwayomi. Uses endpoint / http / cache / pathCache / settings
+//	  fields. Methods: ClassifyTitle(title) and ClassifySeries(series).
+//	  Returns (ContentType, via, error).
+//
+//	v2 mode: constructed by NewV2. Uses anilist / pathCache / store
+//	  fields. Method: Classify(ctx, ScanItem). Returns (Decision, error).
+//
+// The two modes are mutually exclusive at instance level — fields not
+// populated by the chosen constructor are nil, and calling the wrong-
+// mode method on an instance will nil-pointer-dereference. This is
+// acceptable transitional state: Task 11 of the Library Bindings v2
+// plan removes the v1 mode entirely and collapses the struct to a
+// single shape (anilist / pathCache / store only).
+//
+// Field naming preserves git-blame continuity: pathCache is shared
+// between v1 and v2 (suwayomi.PathCache implements PathLookup for both
+// flows). settings is v1-only — v2 reads bindings/rules/settings via
+// the wider `store` interface.
 type Classifier struct {
 	endpoint string
 	http     *http.Client
 	cache    Cache       // may be nil
 	Metrics  MetricsSink // optional; nil disables all metric calls
 
-	// Library Map (Plan B). Both must be non-nil for the override path
-	// to engage; either being nil short-circuits to the AniList path.
+	// Library Map (Plan B / v1). pathCache is also used by v2 Classify
+	// (steps 2-3); settings is v1-only (v2 reads its settings off the
+	// wider `store` interface).
 	pathCache PathLookup
 	settings  SettingsReader
 
@@ -131,16 +161,36 @@ type anilistResp struct {
 	} `json:"data"`
 }
 
-// Via reason strings produced by ClassifySeries. The spec example used
-// the human-readable category name ("Korean Webtoons"), but the
-// classifier here only has the category ID from the Suwayomi PathCache —
-// resolving names would require an extra Suwayomi round-trip. Plan C's
-// activity log renderer can resolve names at display time from the
-// Suwayomi categories endpoint.
+// Via reason strings produced by ClassifySeries (v1) and Classify (v2).
+// The spec example used the human-readable category name
+// ("Korean Webtoons"), but the classifier here only has the category ID
+// from the Suwayomi PathCache — resolving names would require an extra
+// Suwayomi round-trip. Plan C's activity log renderer at
+// internal/web/web.go uses these prefixes with strings.HasPrefix to
+// detect entries and resolve human-friendly labels at display time.
+//
+// IMPORTANT: ViaSuwayomiOverridePrefix is shared between v1 and v2 so
+// the renderer's HasPrefix check survives the Task 10 poller swap.
+// Diverging the prefix between flows would silently break the activity
+// log (raw "suwayomi-override:..." would render instead of the category
+// name) — that regression is what motivated exporting the v2 prefixes
+// as constants too.
 const (
 	ViaSuwayomiOverridePrefix = "suwayomi-override:category=" // + <int64 category ID>
-	ViaAniListPrefix          = "anilist:"                    // + <ISO-3166-1 alpha-2 country code>
+	ViaAniListPrefix          = "anilist:"                    // + <ISO-3166-1 alpha-2 country code> (v1 only)
 	ViaUnmatched              = "unmatched"
+
+	// ViaPathRulePrefix is the v2 activity-log Via prefix for routes via
+	// a path-only classification rule, formatted as "path-rule:<ruleID>".
+	ViaPathRulePrefix = "path-rule:"
+
+	// ViaRulePrefix is the v2 activity-log Via prefix for routes via an
+	// AniList-matching classification rule, formatted as "rule:<ruleID>".
+	ViaRulePrefix = "rule:"
+
+	// ViaDefaultBinding is the v2 literal Via value when the no-match
+	// fallback routed to Settings.DefaultBindingID.
+	ViaDefaultBinding = "default-binding"
 )
 
 // ClassifySeries is the orchestrated classification entry point used by
@@ -382,19 +432,22 @@ func (c *Classifier) Classify(ctx context.Context, item ScanItem) (model.Decisio
 		if strings.HasPrefix(item.ParentDir, *r.Condition.SourcePathPrefix) {
 			return model.Decision{
 				BindingID: r.BindingID,
-				Via:       fmt.Sprintf("path-rule:%d", r.ID),
+				Via:       fmt.Sprintf("%s%d", ViaPathRulePrefix, r.ID),
 			}, nil
 		}
 	}
 
-	// Step 2-3: Suwayomi PathCache lookup, then category overrides.
+	// Step 2-3: Suwayomi PathCache lookup, then category overrides. The
+	// Via prefix is shared with v1 (ViaSuwayomiOverridePrefix) so the
+	// activity-log renderer's HasPrefix check keeps working after the
+	// Task 10 poller swap.
 	if c.pathCache != nil {
 		if entry, ok := c.pathCache.Lookup(item.ParentDir); ok {
 			for _, catID := range entry.CategoryIDs {
 				if bindingID, mapped := settings.SuwayomiCategoryBindings[catID]; mapped {
 					return model.Decision{
 						BindingID: bindingID,
-						Via:       fmt.Sprintf("suwayomi-override:cat=%d", catID),
+						Via:       fmt.Sprintf("%s%d", ViaSuwayomiOverridePrefix, catID),
 					}, nil
 				}
 			}
@@ -412,7 +465,7 @@ func (c *Classifier) Classify(ctx context.Context, item ScanItem) (model.Decisio
 			if matchesRule(r.Condition, result, item.ParentDir) {
 				return model.Decision{
 					BindingID: r.BindingID,
-					Via:       fmt.Sprintf("rule:%d", r.ID),
+					Via:       fmt.Sprintf("%s%d", ViaRulePrefix, r.ID),
 				}, nil
 			}
 		}
@@ -422,12 +475,12 @@ func (c *Classifier) Classify(ctx context.Context, item ScanItem) (model.Decisio
 	if settings.DefaultBindingID != nil {
 		return model.Decision{
 			BindingID: *settings.DefaultBindingID,
-			Via:       "default-binding",
+			Via:       ViaDefaultBinding,
 		}, nil
 	}
 
 	// Step 6: Unmatched.
-	return model.Decision{BindingID: 0, Via: "unmatched"}, nil
+	return model.Decision{BindingID: 0, Via: ViaUnmatched}, nil
 }
 
 // matchesRule applies AND-semantics across set Condition fields. Unset

@@ -599,7 +599,7 @@ func TestClassifySuwayomiOverrideRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Classify: %v", err)
 	}
-	if d.BindingID != 5 || d.Via != "suwayomi-override:cat=42" {
+	if d.BindingID != 5 || d.Via != "suwayomi-override:category=42" {
 		t.Errorf("expected BindingID 5 + Via suwayomi-override:cat=42, got %+v", d)
 	}
 	if al.callCount != 0 {
@@ -625,7 +625,7 @@ func TestClassifySuwayomiOverrideFirstMatchWins(t *testing.T) {
 	if d.BindingID != 5 {
 		t.Errorf("first-match-wins: want BindingID 5 (cat 42), got %d", d.BindingID)
 	}
-	if d.Via != "suwayomi-override:cat=42" {
+	if d.Via != "suwayomi-override:category=42" {
 		t.Errorf("want Via suwayomi-override:cat=42, got %q", d.Via)
 	}
 }
