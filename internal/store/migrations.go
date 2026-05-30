@@ -20,6 +20,7 @@ type migration struct {
 // variable.
 var migrations = []migration{
 	{1, "init-bindings-and-rules", migrateInitBindingsAndRules},
+	{2, "v1-settings-into-bindings", migrateV1SettingsIntoBindings},
 }
 
 // runMigrations creates the schema_versions table if missing, then applies
