@@ -108,14 +108,14 @@ func main() {
 	// empty + harmless until the user configures Suwayomi via Settings.
 	suwayomiCache := suwayomi.NewPathCache()
 
-	// v2 classifier: widened AniList client (countryOfOrigin + isAdult +
+	// Classifier: widened AniList client (countryOfOrigin + isAdult +
 	// format) + Suwayomi PathCache + store-backed bindings/rules/settings
 	// reader. Note: the v1 in-process AniList cache (NewWithCache) is NOT
 	// wired here — the v2 path makes a fresh AniList call per classify.
 	// This may surface as additional GraphQL traffic on cache-cold ticks;
 	// Plan B/C may re-introduce caching on the v2 path.
 	anilistClient := anilist.New(anilistEndpoint)
-	clf := classifier.NewV2(anilistClient, suwayomiCache, st)
+	clf := classifier.New(anilistClient, suwayomiCache, st)
 	clf.Metrics = metricsReg
 
 	// ---- kavita client ----

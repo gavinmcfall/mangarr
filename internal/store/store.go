@@ -38,11 +38,11 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	// Run the numbered migrations framework alongside the legacy inline
-	// migrate(). Bringing this forward from Task 11 of the Library
-	// Bindings v2 plan so that the bindings + classification_rules tables
-	// exist on every boot, not just after the Task 11 cleanup lands.
-	// Idempotent — schema_versions tracks applied migrations so this is
-	// a no-op on subsequent boots.
+	// migrate() so the Library Bindings v2 tables (bindings,
+	// classification_rules) and Migration 2's v1 → v2 settings
+	// translation are applied on every boot. Idempotent —
+	// schema_versions tracks applied migrations so this is a no-op on
+	// subsequent boots.
 	if err := runMigrations(s.db); err != nil {
 		return nil, err
 	}

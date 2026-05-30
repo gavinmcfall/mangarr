@@ -42,9 +42,9 @@ type Scanner interface {
 	ScanAll() ([]model.Series, error)
 }
 
-// Classifier is the v2 six-step routing entry point: returns a Decision
+// Classifier is the six-step routing entry point: returns a Decision
 // the poller resolves to a Binding for filing + Kavita scan triggering.
-// *classifier.Classifier (constructed via classifier.NewV2) satisfies this.
+// *classifier.Classifier (constructed via classifier.New) satisfies this.
 type Classifier interface {
 	Classify(ctx context.Context, item classifier.ScanItem) (model.Decision, error)
 }
@@ -149,8 +149,9 @@ type Poller struct {
 	Store SeriesStore // optional; used by FileOne to load and update series
 
 	// v1 ContentType→destination maps. Used by FileOne (manual classify
-	// from Unmatched) only; RunOnce uses Bindings instead. Task 11 will
-	// migrate FileOne to v2 bindings and remove these.
+	// from Unmatched) only; RunOnce uses Bindings instead. These remain
+	// until the deprecated v1 Settings fields are dropped one release
+	// after Plan A; the manual-classify UI still routes by ContentType.
 	LibraryRoots map[model.ContentType]string
 	LibraryIDs   map[model.ContentType]int64
 
@@ -370,9 +371,13 @@ func (p *Poller) recordActivityVia(title string, action model.ActivityAction, vi
 // Unlike RunOnce, FileOne does NOT call the classifier — the type is
 // given directly by the caller (user intent from the Unmatched page).
 // It still uses the v1 LibraryRoots/LibraryIDs maps (manually-set
-// ContentType → destination). Task 11 will migrate this surface to v2
-// bindings; until then the manual-classify flow stays on the legacy
-// maps.
+// ContentType → destination); migrating this surface to v2 bindings is
+// deferred until the deprecated v1 Settings fields are dropped one
+// release after Plan A.
+//
+// Activity entries are written with Via = classifier.ViaManual so the
+// activity log column distinguishes user-driven routes from automatic
+// classifier decisions.
 func (p *Poller) FileOne(ctx context.Context, seriesID int64, ct model.ContentType) error {
 	if p.Store == nil {
 		return fmt.Errorf("FileOne: Store not configured")
@@ -390,7 +395,7 @@ func (p *Poller) FileOne(ctx context.Context, seriesID int64, ct model.ContentTy
 	}
 
 	if err := p.Store.SetSeriesType(seriesID, ct); err != nil {
-		p.recordActivity(series.Title, model.ActionError,
+		p.recordActivityVia(series.Title, model.ActionError, classifier.ViaManual,
 			fmt.Sprintf("FileOne: set series type: %v", err))
 		return fmt.Errorf("FileOne: set series type: %w", err)
 	}
@@ -399,25 +404,25 @@ func (p *Poller) FileOne(ctx context.Context, seriesID int64, ct model.ContentTy
 	root, ok := p.LibraryRoots[ct]
 	if !ok || root == "" {
 		msg := fmt.Sprintf("type %s has no configured library root — check Settings", ct)
-		p.recordActivity(series.Title, model.ActionError, msg)
+		p.recordActivityVia(series.Title, model.ActionError, classifier.ViaManual, msg)
 		return fmt.Errorf("FileOne: %s", msg)
 	}
 
 	if err := p.Filer.File(series, root); err != nil {
-		p.recordActivity(series.Title, model.ActionError,
+		p.recordActivityVia(series.Title, model.ActionError, classifier.ViaManual,
 			fmt.Sprintf("file: %v", err))
 		return fmt.Errorf("FileOne: filer: %w", err)
 	}
-	p.recordActivity(series.Title, model.ActionFiled,
+	p.recordActivityVia(series.Title, model.ActionFiled, classifier.ViaManual,
 		fmt.Sprintf("filed into %s", root))
 
 	if id, ok := p.LibraryIDs[ct]; ok && id != 0 {
 		if p.Kavita != nil {
 			if err := p.Kavita.ScanLibrary(id); err != nil {
-				p.recordActivity(series.Title, model.ActionError,
+				p.recordActivityVia(series.Title, model.ActionError, classifier.ViaManual,
 					fmt.Sprintf("kavita scan library %d: %v", id, err))
 			} else {
-				p.recordActivity(series.Title, model.ActionScanTriggered,
+				p.recordActivityVia(series.Title, model.ActionScanTriggered, classifier.ViaManual,
 					fmt.Sprintf("library %d", id))
 			}
 		}
@@ -432,6 +437,11 @@ func (p *Poller) FileOne(ctx context.Context, seriesID int64, ct model.ContentTy
 // Returns a non-nil error only if the scanner itself fails. Individual
 // series errors are surfaced as PreviewEntry.Note with Status="misconfigured".
 func (p *Poller) Preview(ctx context.Context) ([]PreviewEntry, error) {
+	// Refresh the Suwayomi path cache at the top of Preview so it matches
+	// what RunOnce would do — otherwise a cold-cache Preview would mis-route
+	// items that RunOnce would route via a Suwayomi override.
+	p.refreshSuwayomiCache(ctx)
+
 	series, err := p.Scanner.ScanAll()
 	if err != nil {
 		return nil, err

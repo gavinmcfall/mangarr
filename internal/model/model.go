@@ -2,6 +2,24 @@ package model
 
 import "time"
 
+// ContentType is the pre-Library-Bindings-v2 type tag for a series.
+//
+// Vestigial after Plan A: the classifier no longer emits ContentType
+// (it emits Decision{BindingID, Via}) and the poller routes by
+// Binding, not by ContentType. ContentType is retained because:
+//
+//  1. Migration 2 (internal/store/migrations_v1.go) seeds v2 bindings
+//     from the v1 LibraryRoots/KavitaLibIDsByType maps which are keyed
+//     by ContentType.
+//  2. Settings.LibraryRoots / Settings.KavitaLibIDsByType / Series.Type
+//     are still on the wire so a rollback to the v1 classifier finds
+//     its data.
+//  3. The poller's FileOne (manual classify-from-Unmatched) still takes
+//     a ContentType from the UI.
+//
+// Plan C is expected to drop the deprecated v1 Settings fields one
+// release after Plan A lands, at which point ContentType can be removed
+// entirely.
 type ContentType string
 
 const (
