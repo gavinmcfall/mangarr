@@ -216,33 +216,30 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	for _, s := range series {
 		// Persist the discovered series first so the Series page reflects
 		// EVERY title the scanner finds — not just the unmatched ones.
-		// MarkUnmatched already calls UpsertSeries on the failure path;
-		// this upfront upsert makes the matched/happy-path titles visible
-		// too, and is also what gives the Reclassify dropdown a row to
-		// target before any manual override has been set.
-		//
-		// Pull the persisted manual override if one exists — UpsertSeries'
-		// ON CONFLICT clause doesn't touch manual_binding_id, but the
-		// classifier needs the value below, and Scanner.ScanAll builds
-		// Series fresh from disk so s.ManualBindingID is always nil here.
+		// The upfront upsert lands the row at StatusPending; MarkUnmatched
+		// later flips status on the failure branch via a status-only
+		// UPDATE so there's no double-write.
 		s.Status = model.StatusPending
 		if _, err := p.Unmatched.UpsertSeries(s); err != nil {
-			p.recordActivityVia(s.Title, model.ActionError, classifier.ViaUnmatched,
+			// No classification has run yet, so Via is empty rather than
+			// ViaUnmatched (which would falsely imply the classifier
+			// produced an unmatched decision).
+			p.recordActivityVia(s.Title, model.ActionError, "",
 				fmt.Sprintf("upsert series: %v", err))
 			continue
 		}
-		manualOverride := s.ManualBindingID
-		if manualOverride == nil && p.Store != nil {
-			if persisted, err := p.Store.GetSeriesByPath(s.SourcePath); err == nil {
-				manualOverride = persisted.ManualBindingID
-				s.ManualBindingID = manualOverride
-			}
-		}
+
+		// Scanner.ScanAll builds Series fresh from disk and never carries
+		// DB-side fields like ManualBindingID. Pull the persisted override
+		// from the row we just upserted so the classifier's step 0 fires
+		// on poll-driven routing — without this, an operator-set override
+		// would only take effect after a UI-triggered FileOne.
+		s.ManualBindingID = p.resolveManualOverride(s)
 
 		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
 			Title:           s.Title,
 			ParentDir:       s.SourcePath,
-			ManualBindingID: manualOverride,
+			ManualBindingID: s.ManualBindingID,
 		})
 		if classifyErr != nil || d.BindingID == 0 {
 			// Classifier failed or routed to Unmatched.
@@ -330,6 +327,28 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// resolveManualOverride returns the manual binding pinned to the given
+// series. Scanner.ScanAll builds Series fresh from disk and so never
+// carries DB-side fields like ManualBindingID — both RunOnce and
+// Preview need to hydrate from the persisted row so the classifier's
+// step 0 honours operator-set overrides.
+//
+// Falls back to s.ManualBindingID if Store isn't wired (test fixtures)
+// or the row doesn't exist yet.
+func (p *Poller) resolveManualOverride(s model.Series) *int64 {
+	if s.ManualBindingID != nil {
+		return s.ManualBindingID
+	}
+	if p.Store == nil {
+		return nil
+	}
+	persisted, err := p.Store.GetSeriesByPath(s.SourcePath)
+	if err != nil {
+		return nil
+	}
+	return persisted.ManualBindingID
 }
 
 // loadBindings fetches the bindings list and indexes it by ID. Nil
@@ -499,17 +518,7 @@ func (p *Poller) Preview(ctx context.Context) ([]PreviewEntry, error) {
 			ChapterCount: s.ChapterCount,
 		}
 
-		// Scanner.ScanAll builds Series fresh from disk and so never
-		// carries DB-side fields. Enrich with the persisted manual
-		// override so the preview reflects what RunOnce would actually
-		// route via — without this, an operator who pinned a binding
-		// in the UI saw Preview still report "no binding matched".
-		manualOverride := s.ManualBindingID
-		if manualOverride == nil && p.Store != nil {
-			if persisted, err := p.Store.GetSeriesByPath(s.SourcePath); err == nil {
-				manualOverride = persisted.ManualBindingID
-			}
-		}
+		manualOverride := p.resolveManualOverride(s)
 
 		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
 			Title:           s.Title,

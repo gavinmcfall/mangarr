@@ -271,6 +271,13 @@ func TestRunOnceFilesAndScans(t *testing.T) {
 	if len(rec.upserted) != 1 || rec.upserted[0].SourcePath != "/dl/Solo Leveling" {
 		t.Errorf("expected matched series to be upserted into the series table; got %+v", rec.upserted)
 	}
+	// And the upsert lands the row at StatusPending — the matched-path
+	// ActionFiled activity entry is a separate signal; the series row
+	// itself stays Pending so the next tick can re-pick the title up
+	// idempotently.
+	if rec.upserted[0].Status != model.StatusPending {
+		t.Errorf("upsert Status: want pending, got %q", rec.upserted[0].Status)
+	}
 }
 
 func TestRunOnceUnmatchedWhenDecisionZero(t *testing.T) {

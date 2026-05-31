@@ -267,6 +267,85 @@ func TestUpsertSeriesUpdates(t *testing.T) {
 	}
 }
 
+// TestUpsertSeriesPreservesTypeAndManualBinding pins the ON CONFLICT
+// contract: an upsert with empty Type (the Scanner-built shape) must
+// NOT erase a previously-written Type. Same for ManualBindingID.
+// Without this, the poller's per-tick upfront upsert would clobber
+// the FileOne manual-classify Type and the UI-set ManualBindingID
+// on every successful tick.
+func TestUpsertSeriesPreservesTypeAndManualBinding(t *testing.T) {
+	s := newTestStore(t)
+
+	// Seed: FileOne-style row with a written Type and a UI-set override.
+	in := model.Series{
+		Title:      "Solo Leveling",
+		SourcePath: "/dl/solo",
+		Source:     "suwayomi",
+		Type:       model.TypeManhwa,
+		Status:     model.StatusFiled,
+	}
+	if _, err := s.UpsertSeries(in); err != nil {
+		t.Fatalf("seed upsert: %v", err)
+	}
+	pin := int64(7)
+	if err := s.SetSeriesManualBinding(/* by source_path lookup */ 1, &pin); err != nil {
+		t.Fatalf("SetSeriesManualBinding: %v", err)
+	}
+
+	// Scanner-style upsert: empty Type, status=Pending, no ManualBindingID.
+	if _, err := s.UpsertSeries(model.Series{
+		Title:      "Solo Leveling",
+		SourcePath: "/dl/solo",
+		Source:     "suwayomi",
+		Status:     model.StatusPending,
+	}); err != nil {
+		t.Fatalf("scanner upsert: %v", err)
+	}
+
+	got, err := s.GetSeriesByPath("/dl/solo")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Type != model.TypeManhwa {
+		t.Errorf("Type clobbered by scanner upsert: want %q, got %q", model.TypeManhwa, got.Type)
+	}
+	if got.ManualBindingID == nil || *got.ManualBindingID != 7 {
+		t.Errorf("ManualBindingID clobbered: want *7, got %v", got.ManualBindingID)
+	}
+	// Status SHOULD update — the scanner upsert is the per-tick refresh.
+	if got.Status != model.StatusPending {
+		t.Errorf("Status: want pending, got %q", got.Status)
+	}
+}
+
+// TestMarkUnmatchedStatusOnlyUpdate pins that MarkUnmatched is a
+// status-flip on an EXISTING row, not a full upsert. Poller calls
+// UpsertSeries upfront on every tick, so the row is guaranteed to
+// exist by the time MarkUnmatched fires; doing a full upsert here
+// would be a wasted second write.
+func TestMarkUnmatchedStatusOnlyUpdate(t *testing.T) {
+	s := newTestStore(t)
+	in := model.Series{
+		Title:      "Phantom",
+		SourcePath: "/dl/phantom",
+		Source:     "tranga",
+		Status:     model.StatusPending,
+	}
+	if _, err := s.UpsertSeries(in); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := s.MarkUnmatched(in); err != nil {
+		t.Fatalf("MarkUnmatched: %v", err)
+	}
+	got, err := s.GetSeriesByPath(in.SourcePath)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != model.StatusUnmatched {
+		t.Errorf("Status: want unmatched, got %q", got.Status)
+	}
+}
+
 // --- Library Bindings v2: Task 4 — Store CRUD for bindings ---
 
 func TestListBindingsEmpty(t *testing.T) {
