@@ -94,10 +94,12 @@ type recorder struct {
 	filedDst  []string
 	scanned   []int64
 	unmatched []model.Series
+	upserted  []model.Series
 	activity  []model.ActivityEntry
 
-	errFile error
-	errScan error
+	errFile   error
+	errScan   error
+	errUpsert error
 }
 
 func (r *recorder) File(s model.Series, dstRoot string) error {
@@ -120,6 +122,14 @@ func (r *recorder) ScanLibrary(libID int64) error {
 func (r *recorder) MarkUnmatched(s model.Series) error {
 	r.unmatched = append(r.unmatched, s)
 	return nil
+}
+
+func (r *recorder) UpsertSeries(s model.Series) (int64, error) {
+	if r.errUpsert != nil {
+		return 0, r.errUpsert
+	}
+	r.upserted = append(r.upserted, s)
+	return int64(len(r.upserted)), nil
 }
 
 func (r *recorder) AddActivity(e model.ActivityEntry) error {
@@ -253,6 +263,20 @@ func TestRunOnceFilesAndScans(t *testing.T) {
 	}
 	if len(rec.scanned) != 1 || rec.scanned[0] != 2 {
 		t.Fatalf("expected scan of lib 2, got %v", rec.scanned)
+	}
+	// Pins the fix for "Series page shows 3, Preview shows 6": the
+	// matched/happy-path branch MUST persist the series row, not only
+	// the unmatched branch via MarkUnmatched. Otherwise series that
+	// classify on first try silently bypass the Series page entirely.
+	if len(rec.upserted) != 1 || rec.upserted[0].SourcePath != "/dl/Solo Leveling" {
+		t.Errorf("expected matched series to be upserted into the series table; got %+v", rec.upserted)
+	}
+	// And the upsert lands the row at StatusPending — the matched-path
+	// ActionFiled activity entry is a separate signal; the series row
+	// itself stays Pending so the next tick can re-pick the title up
+	// idempotently.
+	if rec.upserted[0].Status != model.StatusPending {
+		t.Errorf("upsert Status: want pending, got %q", rec.upserted[0].Status)
 	}
 }
 

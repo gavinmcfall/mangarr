@@ -101,12 +101,23 @@ CREATE TABLE IF NOT EXISTS classification_cache (
 	return nil
 }
 
+// UpsertSeries inserts a row keyed by source_path, or updates an existing
+// row's mutable view-model columns (title, source, status, chapter_count,
+// updated_at). It deliberately does NOT touch:
+//
+//   - type — Scanner.ScanAll passes empty Type; the FileOne manual-classify
+//     path writes type via SetSeriesType, and we must not silently erase
+//     that on the next poll tick. Insert still seeds type=in.Type on fresh
+//     rows so a caller can populate it on first observation.
+//   - manual_binding_id — same rationale, written by SetSeriesManualBinding
+//     and read by the classifier at step 0. The ON CONFLICT clause leaves
+//     it untouched so a persisted override survives every poll.
 func (s *Store) UpsertSeries(in model.Series) (int64, error) {
 	res, err := s.db.Exec(`
 INSERT INTO series (title, source_path, source, type, status, chapter_count, updated_at)
 VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)
 ON CONFLICT(source_path) DO UPDATE SET
-  title=excluded.title, source=excluded.source, type=excluded.type,
+  title=excluded.title, source=excluded.source,
   status=excluded.status, chapter_count=excluded.chapter_count, updated_at=CURRENT_TIMESTAMP`,
 		in.Title, in.SourcePath, in.Source, string(in.Type), string(in.Status), in.ChapterCount)
 	if err != nil {
@@ -293,10 +304,19 @@ func (s *Store) SetSeriesManualBinding(id int64, bindingID *int64) error {
 	return err
 }
 
-// MarkUnmatched upserts a series with StatusUnmatched. Called by the poller.
+// MarkUnmatched flips the existing series row to StatusUnmatched. Called
+// by the poller after UpsertSeries (which lands the row at the top of
+// the RunOnce iteration), so the row is guaranteed to exist.
+//
+// Status-only UPDATE rather than full UPSERT avoids the double-write
+// per unmatched series per tick that the upfront UpsertSeries + a
+// MarkUnmatched-as-upsert would otherwise produce. If the row doesn't
+// exist (shouldn't happen in normal flow), the UPDATE silently no-ops.
 func (s *Store) MarkUnmatched(series model.Series) error {
-	series.Status = model.StatusUnmatched
-	_, err := s.UpsertSeries(series)
+	_, err := s.db.Exec(
+		`UPDATE series SET status=?, updated_at=CURRENT_TIMESTAMP WHERE source_path=?`,
+		string(model.StatusUnmatched), series.SourcePath,
+	)
 	return err
 }
 

@@ -68,6 +68,12 @@ type Kavita interface {
 // UnmatchedSink records series that produced Decision{BindingID:0}.
 type UnmatchedSink interface {
 	MarkUnmatched(s model.Series) error
+	// UpsertSeries lands a discovered series in the persistent table
+	// regardless of classification outcome. Without this, the matched-
+	// on-first-try happy path silently bypasses the series table —
+	// only MarkUnmatched writes — and those series never show up on
+	// the Series page or expose a Reclassify dropdown.
+	UpsertSeries(s model.Series) (int64, error)
 }
 
 // ActivityWriter records an audit entry for the UI's Activity/History view.
@@ -208,6 +214,28 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	scanned := map[int64]bool{}
 
 	for _, s := range series {
+		// Persist the discovered series first so the Series page reflects
+		// EVERY title the scanner finds — not just the unmatched ones.
+		// The upfront upsert lands the row at StatusPending; MarkUnmatched
+		// later flips status on the failure branch via a status-only
+		// UPDATE so there's no double-write.
+		s.Status = model.StatusPending
+		if _, err := p.Unmatched.UpsertSeries(s); err != nil {
+			// No classification has run yet, so Via is empty rather than
+			// ViaUnmatched (which would falsely imply the classifier
+			// produced an unmatched decision).
+			p.recordActivityVia(s.Title, model.ActionError, "",
+				fmt.Sprintf("upsert series: %v", err))
+			continue
+		}
+
+		// Scanner.ScanAll builds Series fresh from disk and never carries
+		// DB-side fields like ManualBindingID. Pull the persisted override
+		// from the row we just upserted so the classifier's step 0 fires
+		// on poll-driven routing — without this, an operator-set override
+		// would only take effect after a UI-triggered FileOne.
+		s.ManualBindingID = p.resolveManualOverride(s)
+
 		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
 			Title:           s.Title,
 			ParentDir:       s.SourcePath,
@@ -299,6 +327,28 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// resolveManualOverride returns the manual binding pinned to the given
+// series. Scanner.ScanAll builds Series fresh from disk and so never
+// carries DB-side fields like ManualBindingID — both RunOnce and
+// Preview need to hydrate from the persisted row so the classifier's
+// step 0 honours operator-set overrides.
+//
+// Falls back to s.ManualBindingID if Store isn't wired (test fixtures)
+// or the row doesn't exist yet.
+func (p *Poller) resolveManualOverride(s model.Series) *int64 {
+	if s.ManualBindingID != nil {
+		return s.ManualBindingID
+	}
+	if p.Store == nil {
+		return nil
+	}
+	persisted, err := p.Store.GetSeriesByPath(s.SourcePath)
+	if err != nil {
+		return nil
+	}
+	return persisted.ManualBindingID
 }
 
 // loadBindings fetches the bindings list and indexes it by ID. Nil
@@ -468,17 +518,7 @@ func (p *Poller) Preview(ctx context.Context) ([]PreviewEntry, error) {
 			ChapterCount: s.ChapterCount,
 		}
 
-		// Scanner.ScanAll builds Series fresh from disk and so never
-		// carries DB-side fields. Enrich with the persisted manual
-		// override so the preview reflects what RunOnce would actually
-		// route via — without this, an operator who pinned a binding
-		// in the UI saw Preview still report "no binding matched".
-		manualOverride := s.ManualBindingID
-		if manualOverride == nil && p.Store != nil {
-			if persisted, err := p.Store.GetSeriesByPath(s.SourcePath); err == nil {
-				manualOverride = persisted.ManualBindingID
-			}
-		}
+		manualOverride := p.resolveManualOverride(s)
 
 		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
 			Title:           s.Title,
