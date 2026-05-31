@@ -410,3 +410,61 @@ func (s *scriptedAniList) Lookup(ctx context.Context, title string) (anilist.Res
 	}
 	return s.responses[i].result, s.responses[i].err
 }
+
+// TestClassifyManualBindingShortCircuits pins the v2 reclassify path:
+// when ScanItem carries a ManualBindingID, the classifier returns
+// immediately with Via="manual" — before AniList, before rules, before
+// the default-binding fallback. Used by the Series-page reclassify
+// control to pin a series at a binding when AniList has no match or
+// the operator wants to override the rule chain.
+func TestClassifyManualBindingShortCircuits(t *testing.T) {
+	st := &fakeBindingsRulesStore{}
+	// Even if everything else is wired, manual override wins.
+	al := &fakeAniListV2{result: anilist.Result{CountryOfOrigin: "JP"}}
+	c := New(al, nil, st)
+
+	pin := int64(42)
+	d, err := c.Classify(context.Background(), ScanItem{
+		Title:           "Some Series",
+		ParentDir:       "/dl",
+		ManualBindingID: &pin,
+	})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if d.BindingID != 42 || d.Via != "manual" {
+		t.Errorf("expected BindingID 42 + Via manual, got %+v", d)
+	}
+	if al.callCount != 0 {
+		t.Errorf("AniList must NOT be called when manual override is set; got %d calls", al.callCount)
+	}
+}
+
+// TestClassifyManualBindingZeroIsIgnored pins that a *int64 pointing
+// at 0 (not really "set" — defensive) doesn't short-circuit. nil OR
+// *0 means "no override; classify normally".
+func TestClassifyManualBindingZeroIsIgnored(t *testing.T) {
+	jp := "JP"
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga"}},
+		rules: []model.ClassificationRule{
+			{ID: 5, Priority: 100, Name: "JP",
+				Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: 1},
+		},
+	}
+	al := &fakeAniListV2{result: anilist.Result{CountryOfOrigin: "JP"}}
+	c := New(al, nil, st)
+
+	zero := int64(0)
+	d, err := c.Classify(context.Background(), ScanItem{
+		Title:           "X",
+		ParentDir:       "/dl",
+		ManualBindingID: &zero,
+	})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if d.BindingID != 1 || d.Via != "rule:5" {
+		t.Errorf("expected rule:5 match when override is *0, got %+v", d)
+	}
+}

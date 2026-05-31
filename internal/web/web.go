@@ -88,6 +88,7 @@ type Store interface {
 	GetSettings() (model.Settings, error)
 	SaveSettings(model.Settings) error
 	SetSeriesType(id int64, ct model.ContentType) error
+	SetSeriesManualBinding(id int64, bindingID *int64) error
 	ListBindings() ([]model.Binding, error)
 	ListRules() ([]model.ClassificationRule, error)
 	SaveBindings([]model.Binding) error
@@ -429,6 +430,19 @@ type pageData struct {
 	Error string
 }
 
+// seriesPageData is passed to templates/series.html so the per-row
+// reclassify dropdown can list every Library Binding the operator has
+// configured. Before v2 the dropdown was the closed ContentType enum
+// (Manga/Manhwa/Manhua); under v2 it's user-defined bindings, so the
+// template needs the live binding list to render <option>s.
+type seriesPageData struct {
+	Page     string
+	Items    []model.Series
+	Bindings []model.Binding
+	Flash    string
+	Error    string
+}
+
 // previewPageData is passed to templates/preview.html.
 type previewPageData struct {
 	Page         string
@@ -590,7 +604,12 @@ func (h *Handler) pageSeries(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	h.render(w, "series.html", pageData{Page: "series", Items: list})
+	// Bindings drive the v2 reclassify dropdown. Best-effort: on error
+	// render an empty list so the page still loads (the operator can
+	// at least see series state); the dropdown will show only the
+	// "no override" option, which is the safe default anyway.
+	bindings, _ := h.store.ListBindings()
+	h.render(w, "series.html", seriesPageData{Page: "series", Items: list, Bindings: bindings})
 }
 
 func (h *Handler) pagePreview(w http.ResponseWriter, r *http.Request) {
@@ -1565,14 +1584,37 @@ func (h *Handler) apiReclassify(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	typeStr := r.FormValue("type")
-	ct := model.ContentType(typeStr)
-	if ct != model.TypeManga && ct != model.TypeManhwa && ct != model.TypeManhua {
-		http.Error(w, "invalid type", http.StatusBadRequest)
-		return
+
+	// v2: reclassify writes a manual binding override the classifier reads
+	// at step 0 of its six-step flow. The dropdown sends binding_id; 0 (or
+	// missing) clears the override. Validate the chosen binding actually
+	// exists so an operator can't pin a series at a deleted ID.
+	bindingIDStr := r.FormValue("binding_id")
+	bindingID, _ := strconv.ParseInt(bindingIDStr, 10, 64)
+
+	var override *int64
+	if bindingID > 0 {
+		bindings, err := h.store.ListBindings()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		found := false
+		for _, b := range bindings {
+			if b.ID == bindingID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			http.Error(w, "binding not found", http.StatusBadRequest)
+			return
+		}
+		v := bindingID
+		override = &v
 	}
 
-	if err := h.store.SetSeriesType(id, ct); err != nil {
+	if err := h.store.SetSeriesManualBinding(id, override); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1597,7 +1639,21 @@ func (h *Handler) apiReclassify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Render the row fragment inline (not a full page).
+	// Render the row fragment inline (not a full page). The binding-id
+	// <option>s are built from the same list the request validated
+	// against so the dropdown reflects current state.
+	bindingsList, _ := h.store.ListBindings()
+	var current int64
+	if updated.ManualBindingID != nil {
+		current = *updated.ManualBindingID
+	}
+	var opts strings.Builder
+	opts.WriteString(fmt.Sprintf(`<option value="0"%s>&mdash; No override &mdash;</option>`,
+		selectedIf(current == 0)))
+	for _, b := range bindingsList {
+		opts.WriteString(fmt.Sprintf(`<option value="%d"%s>%s</option>`,
+			b.ID, selectedIf(b.ID == current), html(b.Name)))
+	}
 	row := fmt.Sprintf(`<tr>
   <td>%s</td>
   <td><span class="pill pill-%s">%s</span></td>
@@ -1609,11 +1665,7 @@ func (h *Handler) apiReclassify(w http.ResponseWriter, r *http.Request) {
       hx-post="/api/series/%d/reclassify"
       hx-target="closest tr"
       hx-swap="outerHTML">
-      <select name="type" class="reclassify-select">
-        <option value="Manga"%s>Manga</option>
-        <option value="Manhwa"%s>Manhwa</option>
-        <option value="Manhua"%s>Manhua</option>
-      </select>
+      <select name="binding_id" class="reclassify-select">%s</select>
       <button type="submit" class="btn-sm">Set</button>
     </form>
   </td>
@@ -1624,9 +1676,7 @@ func (h *Handler) apiReclassify(w http.ResponseWriter, r *http.Request) {
 		updated.ChapterCount,
 		html(string(updated.Status)), html(string(updated.Status)),
 		updated.ID,
-		selectedIf(updated.Type == model.TypeManga),
-		selectedIf(updated.Type == model.TypeManhwa),
-		selectedIf(updated.Type == model.TypeManhua),
+		opts.String(),
 	)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

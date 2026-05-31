@@ -35,6 +35,8 @@ type fakeStore struct {
 	saveErr   error
 	// track SetSeriesType calls
 	setTypeCalls []setTypeCall
+	// track SetSeriesManualBinding calls (v2 reclassify)
+	setManualBindingCalls []setManualBindingCall
 	// Plan B: v2 data model
 	bindings []model.Binding
 	rules    []model.ClassificationRule
@@ -43,6 +45,11 @@ type fakeStore struct {
 type setTypeCall struct {
 	id int64
 	ct model.ContentType
+}
+
+type setManualBindingCall struct {
+	id        int64
+	bindingID *int64
 }
 
 func (f *fakeStore) ListSeries() ([]model.Series, error) { return f.series, nil }
@@ -69,6 +76,16 @@ func (f *fakeStore) SetSeriesType(id int64, ct model.ContentType) error {
 	for i := range f.series {
 		if f.series[i].ID == id {
 			f.series[i].Type = ct
+			f.series[i].Status = model.StatusPending
+		}
+	}
+	return nil
+}
+func (f *fakeStore) SetSeriesManualBinding(id int64, bindingID *int64) error {
+	f.setManualBindingCalls = append(f.setManualBindingCalls, setManualBindingCall{id, bindingID})
+	for i := range f.series {
+		if f.series[i].ID == id {
+			f.series[i].ManualBindingID = bindingID
 			f.series[i].Status = model.StatusPending
 		}
 	}
@@ -476,9 +493,12 @@ func TestAPIRescanWithoutRunnerReturns503(t *testing.T) {
 	}
 }
 
-func TestAPIReclassifySetsType(t *testing.T) {
+func TestAPIReclassifySetsManualBinding(t *testing.T) {
 	h, st, _ := newTestHandler()
-	form := url.Values{"type": {"Manga"}}
+	// Seed a binding the handler will validate against.
+	st.bindings = []model.Binding{{ID: 7, Name: "Manga", LibraryRoot: "/m", KavitaLibID: 1}}
+
+	form := url.Values{"binding_id": {"7"}}
 	req := httptest.NewRequest(http.MethodPost, "/api/series/1/reclassify",
 		strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -487,8 +507,55 @@ func TestAPIReclassifySetsType(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
 	}
-	if len(st.setTypeCalls) != 1 || st.setTypeCalls[0].id != 1 || st.setTypeCalls[0].ct != model.TypeManga {
-		t.Fatalf("expected SetSeriesType(1, Manga), got %+v", st.setTypeCalls)
+	if len(st.setManualBindingCalls) != 1 {
+		t.Fatalf("expected one SetSeriesManualBinding call, got %d: %+v",
+			len(st.setManualBindingCalls), st.setManualBindingCalls)
+	}
+	got := st.setManualBindingCalls[0]
+	if got.id != 1 || got.bindingID == nil || *got.bindingID != 7 {
+		t.Errorf("expected SetSeriesManualBinding(1, *7), got id=%d bindingID=%v",
+			got.id, got.bindingID)
+	}
+}
+
+// TestAPIReclassifyZeroClearsOverride pins that binding_id=0 (the "No
+// override" option) sends a nil pointer through, which the store
+// contract treats as "clear the override; classify normally".
+func TestAPIReclassifyZeroClearsOverride(t *testing.T) {
+	h, st, _ := newTestHandler()
+	form := url.Values{"binding_id": {"0"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/1/reclassify",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if len(st.setManualBindingCalls) != 1 || st.setManualBindingCalls[0].bindingID != nil {
+		t.Errorf("expected SetSeriesManualBinding(_, nil), got %+v", st.setManualBindingCalls)
+	}
+}
+
+// TestAPIReclassifyRejectsUnknownBinding pins that an operator
+// can't pin a series at a binding ID that doesn't exist (deleted
+// since page render, or a manually-crafted POST). Returns 400 and
+// does NOT call the store.
+func TestAPIReclassifyRejectsUnknownBinding(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.bindings = []model.Binding{{ID: 7, Name: "Manga"}}
+	form := url.Values{"binding_id": {"999"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/1/reclassify",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if len(st.setManualBindingCalls) != 0 {
+		t.Errorf("expected NO SetSeriesManualBinding call on invalid binding; got %+v",
+			st.setManualBindingCalls)
 	}
 }
 

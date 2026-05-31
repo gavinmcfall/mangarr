@@ -61,6 +61,12 @@ type Series struct {
 	Status       Status
 	ChapterCount int
 	UpdatedAt    time.Time
+	// ManualBindingID is a user-set override added by the v2 Series-page
+	// reclassify control. When non-nil, the classifier short-circuits its
+	// six-step flow at step 0 and routes straight to this binding with
+	// Via = "manual". nil means "no override; classify normally". Cleared
+	// by sending a nil pointer through SetSeriesManualBinding.
+	ManualBindingID *int64
 }
 
 type ActivityAction string

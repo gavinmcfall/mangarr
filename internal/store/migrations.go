@@ -21,6 +21,47 @@ type migration struct {
 var migrations = []migration{
 	{1, "init-bindings-and-rules", migrateInitBindingsAndRules},
 	{2, "v1-settings-into-bindings", migrateV1SettingsIntoBindings},
+	{3, "series-manual-binding", migrateSeriesManualBinding},
+}
+
+// migrateSeriesManualBinding adds the manual_binding_id column to the
+// series table so the Series-page reclassify control can persist a
+// user-chosen override that the classifier reads at step 0 of its
+// six-step flow.
+//
+// Idempotent under SQLite via the schema_versions gate; the inline
+// duplicate-column-name check is belt-and-braces against an operator
+// who manually cleared schema_versions to replay history.
+//
+// Tolerant of a missing series table: production's Store.Open() calls
+// the legacy migrate() (CREATE TABLE series) before runMigrations(),
+// so the table is always present in prod. Migration-only test fixtures
+// open a fresh DB and call runMigrations directly without the legacy
+// schema, so the table genuinely isn't there — treat that as a no-op
+// rather than failing every unrelated migration test.
+func migrateSeriesManualBinding(tx *sql.Tx) error {
+	var seriesTable string
+	err := tx.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='series'`).Scan(&seriesTable)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("probe series table: %w", err)
+	}
+	// Series table exists. Detect the column before ALTER — SQLite's
+	// ADD COLUMN returns a hard error on duplicate, not a benign signal.
+	var name string
+	err = tx.QueryRow(`SELECT name FROM pragma_table_info('series') WHERE name = 'manual_binding_id'`).Scan(&name)
+	if err == nil {
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("probe series.manual_binding_id: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE series ADD COLUMN manual_binding_id INTEGER`); err != nil {
+		return fmt.Errorf("add series.manual_binding_id: %w", err)
+	}
+	return nil
 }
 
 // runMigrations creates the schema_versions table if missing, then applies

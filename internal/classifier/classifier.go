@@ -56,6 +56,12 @@ type AniListClient interface {
 type ScanItem struct {
 	Title     string
 	ParentDir string
+	// ManualBindingID, when non-nil, short-circuits the six-step flow at
+	// step 0 and routes straight to that binding with Via = "manual".
+	// Set by the poller from Series.ManualBindingID, which is in turn
+	// written by the Series-page reclassify control. nil means "no
+	// override; classify normally".
+	ManualBindingID *int64
 }
 
 // Classifier resolves a ScanItem to a routing Decision via the six-step
@@ -149,6 +155,17 @@ func New(a AniListClient, p PathLookup, s SettingsReader) *Classifier {
 // field stays untouched on the settings row so a rollback to the v1
 // classifier still finds its data.
 func (c *Classifier) Classify(ctx context.Context, item ScanItem) (model.Decision, error) {
+	// Step 0: manual override. The Series-page reclassify control sets
+	// this on the series; the poller copies it into ScanItem. When
+	// present it wins over every other routing path so the operator
+	// can pin a series that AniList simply doesn't have catalogued.
+	if item.ManualBindingID != nil && *item.ManualBindingID != 0 {
+		return model.Decision{
+			BindingID: *item.ManualBindingID,
+			Via:       ViaManual,
+		}, nil
+	}
+
 	settings, err := c.store.GetSettings()
 	if err != nil {
 		return model.Decision{}, fmt.Errorf("load settings: %w", err)
