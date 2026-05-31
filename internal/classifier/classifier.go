@@ -56,6 +56,12 @@ type AniListClient interface {
 type ScanItem struct {
 	Title     string
 	ParentDir string
+	// ManualBindingID, when non-nil, short-circuits the six-step flow at
+	// step 0 and routes straight to that binding with Via = "manual".
+	// Set by the poller from Series.ManualBindingID, which is in turn
+	// written by the Series-page reclassify control. nil means "no
+	// override; classify normally".
+	ManualBindingID *int64
 }
 
 // Classifier resolves a ScanItem to a routing Decision via the six-step
@@ -149,6 +155,17 @@ func New(a AniListClient, p PathLookup, s SettingsReader) *Classifier {
 // field stays untouched on the settings row so a rollback to the v1
 // classifier still finds its data.
 func (c *Classifier) Classify(ctx context.Context, item ScanItem) (model.Decision, error) {
+	// Step 0: manual override. The Series-page reclassify control sets
+	// this on the series; the poller copies it into ScanItem. When
+	// present it wins over every other routing path so the operator
+	// can pin a series that AniList simply doesn't have catalogued.
+	if item.ManualBindingID != nil && *item.ManualBindingID != 0 {
+		return model.Decision{
+			BindingID: *item.ManualBindingID,
+			Via:       ViaManual,
+		}, nil
+	}
+
 	settings, err := c.store.GetSettings()
 	if err != nil {
 		return model.Decision{}, fmt.Errorf("load settings: %w", err)
@@ -188,7 +205,22 @@ func (c *Classifier) Classify(ctx context.Context, item ScanItem) (model.Decisio
 
 	// Step 4: AniList rules. Errors are swallowed so a transient outage
 	// degrades gracefully to step 5/6 rather than failing the poll tick.
+	//
+	// Titles with a trailing parenthetical / bracketed variant tag (e.g.
+	// "Dragon Ball Super (Color)", "Made in Abyss [Official Edition]")
+	// commonly fail AniList's search because the canonical entry is the
+	// bare title. On a not-found, retry once with the trailing tag
+	// stripped. Only one retry; the helper returns the original string
+	// unchanged when there's nothing to strip, so we don't double-hit
+	// AniList for already-bare titles.
 	result, anilistErr := c.anilist.Lookup(ctx, item.Title)
+	if anilistErr != nil {
+		if bare := stripTrailingTag(item.Title); bare != "" && bare != item.Title {
+			if r2, err2 := c.anilist.Lookup(ctx, bare); err2 == nil {
+				result, anilistErr = r2, nil
+			}
+		}
+	}
 	if anilistErr == nil {
 		for _, r := range rules {
 			if r.Condition.IsPathOnly() {
@@ -233,4 +265,50 @@ func matchesRule(cond model.RuleCondition, result anilist.Result, parentDir stri
 		return false
 	}
 	return true
+}
+
+// stripTrailingTag drops a single trailing parenthetical or bracketed
+// tag from the title plus any whitespace that immediately precedes it.
+// Used by the AniList retry path so titles like
+//
+//	"Dragon Ball Super (Color)"
+//	"Made in Abyss [Official Edition]"
+//	"Series Name (2024)"
+//
+// also classify when only the bare title is present in AniList's
+// catalogue. Returns the input unchanged when no trailing tag is
+// present so callers can compare original vs result to decide whether
+// to retry. Only strips ONE trailing group — chained tags are rare
+// enough that the second pass would risk losing real title content.
+func stripTrailingTag(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	last := s[len(s)-1]
+	var open byte
+	switch last {
+	case ')':
+		open = '('
+	case ']':
+		open = '['
+	default:
+		return s
+	}
+	// Walk back to the matching opener, respecting nested groups so
+	// "Foo (Bar (1)) " produces "Foo".
+	depth := 1
+	for i := len(s) - 2; i >= 0; i-- {
+		switch s[i] {
+		case last:
+			depth++
+		case open:
+			depth--
+			if depth == 0 {
+				return strings.TrimRight(s[:i], " \t")
+			}
+		}
+	}
+	// Unbalanced — leave the input alone.
+	return s
 }

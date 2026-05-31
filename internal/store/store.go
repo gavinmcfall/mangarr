@@ -123,9 +123,14 @@ ON CONFLICT(source_path) DO UPDATE SET
 func (s *Store) GetSeriesByPath(path string) (model.Series, error) {
 	var m model.Series
 	var typ, status string
-	err := s.db.QueryRow(`SELECT id,title,source,type,status,chapter_count FROM series WHERE source_path=?`, path).
-		Scan(&m.ID, &m.Title, &m.Source, &typ, &status, &m.ChapterCount)
+	var manual sql.NullInt64
+	err := s.db.QueryRow(`SELECT id,title,source,type,status,chapter_count,manual_binding_id FROM series WHERE source_path=?`, path).
+		Scan(&m.ID, &m.Title, &m.Source, &typ, &status, &m.ChapterCount, &manual)
 	m.SourcePath, m.Type, m.Status = path, model.ContentType(typ), model.Status(status)
+	if manual.Valid {
+		v := manual.Int64
+		m.ManualBindingID = &v
+	}
 	return m, err
 }
 
@@ -134,14 +139,19 @@ func (s *Store) GetSeriesByPath(path string) (model.Series, error) {
 func (s *Store) GetSeriesByID(id int64) (model.Series, error) {
 	var m model.Series
 	var typ, status string
-	err := s.db.QueryRow(`SELECT id,title,source_path,source,type,status,chapter_count FROM series WHERE id=?`, id).
-		Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount)
+	var manual sql.NullInt64
+	err := s.db.QueryRow(`SELECT id,title,source_path,source,type,status,chapter_count,manual_binding_id FROM series WHERE id=?`, id).
+		Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount, &manual)
 	m.Type, m.Status = model.ContentType(typ), model.Status(status)
+	if manual.Valid {
+		v := manual.Int64
+		m.ManualBindingID = &v
+	}
 	return m, err
 }
 
 func (s *Store) ListSeries() ([]model.Series, error) {
-	rows, err := s.db.Query(`SELECT id,title,source_path,source,type,status,chapter_count FROM series ORDER BY title`)
+	rows, err := s.db.Query(`SELECT id,title,source_path,source,type,status,chapter_count,manual_binding_id FROM series ORDER BY title`)
 	if err != nil {
 		return nil, err
 	}
@@ -150,10 +160,15 @@ func (s *Store) ListSeries() ([]model.Series, error) {
 	for rows.Next() {
 		var m model.Series
 		var typ, status string
-		if err := rows.Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount); err != nil {
+		var manual sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount, &manual); err != nil {
 			return nil, err
 		}
 		m.Type, m.Status = model.ContentType(typ), model.Status(status)
+		if manual.Valid {
+			v := manual.Int64
+			m.ManualBindingID = &v
+		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
@@ -198,7 +213,7 @@ func defaultSettings() model.Settings {
 
 // ListUnmatched returns all series with StatusUnmatched.
 func (s *Store) ListUnmatched() ([]model.Series, error) {
-	rows, err := s.db.Query(`SELECT id,title,source_path,source,type,status,chapter_count FROM series WHERE status=? ORDER BY title`, string(model.StatusUnmatched))
+	rows, err := s.db.Query(`SELECT id,title,source_path,source,type,status,chapter_count,manual_binding_id FROM series WHERE status=? ORDER BY title`, string(model.StatusUnmatched))
 	if err != nil {
 		return nil, err
 	}
@@ -207,10 +222,15 @@ func (s *Store) ListUnmatched() ([]model.Series, error) {
 	for rows.Next() {
 		var m model.Series
 		var typ, status string
-		if err := rows.Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount); err != nil {
+		var manual sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount, &manual); err != nil {
 			return nil, err
 		}
 		m.Type, m.Status = model.ContentType(typ), model.Status(status)
+		if manual.Valid {
+			v := manual.Int64
+			m.ManualBindingID = &v
+		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
@@ -239,9 +259,37 @@ func (s *Store) ListActivity(limit int) ([]model.ActivityEntry, error) {
 // SetSeriesType updates the type and status for a series, used when a user
 // manually assigns a type via the web UI. Status is set to StatusPending so
 // the next RunOnce will attempt to file it.
+//
+// Deprecated under v2 Library Bindings — the classifier no longer reads
+// series.type. Kept only for the poller's FileOne path which still
+// writes a ContentType on successful manual file. Web reclassify now
+// goes through SetSeriesManualBinding.
 func (s *Store) SetSeriesType(id int64, ct model.ContentType) error {
 	_, err := s.db.Exec(`UPDATE series SET type=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		string(ct), string(model.StatusPending), id)
+	return err
+}
+
+// SetSeriesManualBinding writes (or clears, when bindingID is nil) the
+// user-set override the v2 classifier reads at step 0 of its six-step
+// flow. Status is reset to StatusPending so the next RunOnce picks the
+// series up and routes via the manual binding.
+//
+// A non-nil bindingID = 0 is rejected — the "no override" sentinel is
+// nil, not zero, so the wire is unambiguous. (The web handler maps the
+// "— clear override —" option to nil before calling.)
+func (s *Store) SetSeriesManualBinding(id int64, bindingID *int64) error {
+	var arg interface{}
+	if bindingID == nil {
+		arg = nil
+	} else {
+		if *bindingID == 0 {
+			return fmt.Errorf("SetSeriesManualBinding: bindingID 0 is not a valid override; pass nil to clear")
+		}
+		arg = *bindingID
+	}
+	_, err := s.db.Exec(`UPDATE series SET manual_binding_id=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		arg, string(model.StatusPending), id)
 	return err
 }
 

@@ -204,8 +204,9 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 
 	for _, s := range series {
 		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
-			Title:     s.Title,
-			ParentDir: s.SourcePath,
+			Title:           s.Title,
+			ParentDir:       s.SourcePath,
+			ManualBindingID: s.ManualBindingID,
 		})
 		if classifyErr != nil || d.BindingID == 0 {
 			// Classifier failed or routed to Unmatched.
@@ -462,8 +463,9 @@ func (p *Poller) Preview(ctx context.Context) ([]PreviewEntry, error) {
 		}
 
 		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
-			Title:     s.Title,
-			ParentDir: s.SourcePath,
+			Title:           s.Title,
+			ParentDir:       s.SourcePath,
+			ManualBindingID: s.ManualBindingID,
 		})
 		if classifyErr != nil {
 			entry.Status = "unmatched"

@@ -31,6 +31,7 @@
     <th class="td-right">Reclassify</th>
   </tr></thead>
   <tbody>
+  {{$bindings := .Bindings}}
   {{range .Items}}
   <tr>
     <td>{{.Title}}</td>
@@ -45,10 +46,10 @@
         hx-post="/api/series/{{.ID}}/reclassify"
         hx-target="closest tr"
         hx-swap="outerHTML">
-        <select name="type" class="reclassify-select">
-          <option value="Manga"{{if eq .Type "Manga"}} selected{{end}}>Manga</option>
-          <option value="Manhwa"{{if eq .Type "Manhwa"}} selected{{end}}>Manhwa</option>
-          <option value="Manhua"{{if eq .Type "Manhua"}} selected{{end}}>Manhua</option>
+        {{$current := int64Or .ManualBindingID 0}}
+        <select name="binding_id" class="reclassify-select">
+          <option value="0"{{if eq $current 0}} selected{{end}}>&mdash; No override &mdash;</option>
+          {{range $bindings}}<option value="{{.ID}}"{{if eq .ID $current}} selected{{end}}>{{.Name}}</option>{{end}}
         </select>
         <button type="submit" class="btn-sm">Set</button>
       </form>

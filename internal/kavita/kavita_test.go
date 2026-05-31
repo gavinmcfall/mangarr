@@ -10,16 +10,20 @@ import (
 
 func TestScanAuthenticatesThenScans(t *testing.T) {
 	var hitAuth, hitScan bool
+	var sawLibraryIDInQuery string
+	var sawBodyLen int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.Contains(r.URL.Path, "/api/plugin/authenticate"):
 			hitAuth = true
 			w.Write([]byte(`{"token":"jwt123"}`))
-		case strings.Contains(r.URL.Path, "/api/library/scan"):
+		case strings.Contains(strings.ToLower(r.URL.Path), "/api/library/scan"):
 			hitScan = true
 			if r.Header.Get("Authorization") != "Bearer jwt123" {
 				t.Errorf("missing bearer token")
 			}
+			sawLibraryIDInQuery = r.URL.Query().Get("libraryId")
+			sawBodyLen = r.ContentLength
 			w.WriteHeader(http.StatusOK)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -34,6 +38,16 @@ func TestScanAuthenticatesThenScans(t *testing.T) {
 	if !hitAuth || !hitScan {
 		t.Fatalf("auth=%v scan=%v", hitAuth, hitScan)
 	}
+	// Kavita's /api/Library/scan binds libraryId from the QUERY string,
+	// not the request body. Sending {"libraryId":N} as JSON body yields
+	// HTTP 400 "libraryId must be greater than 0" because the body-bound
+	// parameter defaults to 0. This test pins the wire format.
+	if sawLibraryIDInQuery != "2" {
+		t.Errorf("libraryId must be in query string; got query=%q", sawLibraryIDInQuery)
+	}
+	if sawBodyLen > 0 {
+		t.Errorf("scan request must have empty body; got %d bytes", sawBodyLen)
+	}
 }
 
 func TestScanNon2xxReturnsError(t *testing.T) {
@@ -41,7 +55,7 @@ func TestScanNon2xxReturnsError(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/api/plugin/authenticate"):
 			w.Write([]byte(`{"token":"jwt123"}`))
-		case strings.Contains(r.URL.Path, "/api/library/scan"):
+		case strings.Contains(strings.ToLower(r.URL.Path), "/api/library/scan"):
 			w.WriteHeader(http.StatusInternalServerError)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -154,7 +168,7 @@ func TestAuthEmptyTokenReturnsError(t *testing.T) {
 		case strings.Contains(r.URL.Path, "/api/plugin/authenticate"):
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":""}`))
-		case strings.Contains(r.URL.Path, "/api/library/scan"):
+		case strings.Contains(strings.ToLower(r.URL.Path), "/api/library/scan"):
 			hitScan = true
 			w.WriteHeader(http.StatusOK)
 		default:

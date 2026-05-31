@@ -1,7 +1,6 @@
 package kavita
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -120,23 +119,25 @@ func (c *Client) ListLibraries(ctx context.Context) ([]Library, error) {
 }
 
 // ScanLibrary triggers a full library scan for the given library ID.
-// It authenticates first, then POST /api/library/scan with the bearer token.
-// libraryID is int64 to match model.Settings.KavitaLibIDs []int64.
+// It authenticates first, then POST /api/Library/scan with the bearer
+// token and libraryId as a query parameter. libraryID is int64 to
+// match model.Settings.KavitaLibIDs []int64.
+//
+// libraryId is passed as a query parameter, NOT a JSON body — Kavita's
+// model binding for this endpoint reads from query/form only; sending
+// a body produces HTTP 400 "libraryId must be greater than 0" because
+// the body-bound parameter defaults to 0.
 func (c *Client) ScanLibrary(libraryID int64) error {
 	token, err := c.authenticate(context.Background())
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]int64{"libraryId": libraryID})
-	if err != nil {
-		return fmt.Errorf("kavita scan marshal: %w", err)
-	}
-	req, err := http.NewRequest(http.MethodPost, c.base+"/api/library/scan", bytes.NewReader(body))
+	u := fmt.Sprintf("%s/api/Library/scan?libraryId=%d", c.base, libraryID)
+	req, err := http.NewRequest(http.MethodPost, u, nil)
 	if err != nil {
 		return fmt.Errorf("kavita scan request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("kavita scan: %w", err)
