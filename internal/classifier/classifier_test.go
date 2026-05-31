@@ -291,3 +291,122 @@ func TestClassifyNilSuwayomiSkipsOverrideStep(t *testing.T) {
 		t.Errorf("expected rule:5 match with nil suwayomi, got %+v", d)
 	}
 }
+
+// TestStripTrailingTag pins the behaviour of the helper used by the
+// AniList retry path. Documents all the shapes we expect to handle and
+// the cases left intentionally alone.
+func TestStripTrailingTag(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"Dragon Ball Super (Color)", "Dragon Ball Super"},
+		{"Made in Abyss [Official Colored Edition]", "Made in Abyss"},
+		{"Series Name (2024)", "Series Name"},
+		{"Foo (Bar (1))", "Foo"},        // nested groups
+		{"  Trim Spaces (Color)  ", "Trim Spaces"},
+		{"No Tag Here", "No Tag Here"},  // unchanged
+		{"K-On!", "K-On!"},              // punctuation but no paren
+		{"Tokyo Ghoul:re", "Tokyo Ghoul:re"},
+		{"", ""},
+		{"Unbalanced (", "Unbalanced ("}, // leave as-is
+		{"Mid-string (paren) tail", "Mid-string (paren) tail"}, // only trailing tags strip
+	}
+	for _, c := range cases {
+		if got := stripTrailingTag(c.in); got != c.want {
+			t.Errorf("stripTrailingTag(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestClassifyRetriesAniListWithBareTitleOnNotFound pins the retry
+// path: when the first AniList lookup fails (ErrNotFound, network
+// blip, etc.) AND the title has a trailing tag, the classifier
+// retries once with the bare title. If the bare title matches, the
+// resulting Result drives the rule walk just like a fresh lookup.
+func TestClassifyRetriesAniListWithBareTitleOnNotFound(t *testing.T) {
+	jp := "JP"
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga", LibraryRoot: "/m/jp", KavitaLibID: 11}},
+		rules: []model.ClassificationRule{
+			{ID: 7, Priority: 100, Name: "JP",
+				Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: 1},
+		},
+	}
+	calls := []string{}
+	// scriptedAniList replays a queued sequence of (Result, error) pairs
+	// so we can simulate first-fail / second-succeed without state mgmt
+	// in the test body.
+	al := &scriptedAniList{
+		responses: []scriptedResponse{
+			{err: anilist.ErrNotFound},
+			{result: anilist.Result{CountryOfOrigin: "JP"}},
+		},
+		onLookup: func(title string) { calls = append(calls, title) },
+	}
+	c := New(al, nil, st)
+
+	d, err := c.Classify(context.Background(),
+		ScanItem{Title: "Dragon Ball Super (Color)", ParentDir: "/dl"})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if d.BindingID != 1 || d.Via != "rule:7" {
+		t.Errorf("expected rule:7 match after retry, got %+v", d)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 AniList calls (original + retry), got %d: %v", len(calls), calls)
+	}
+	if calls[0] != "Dragon Ball Super (Color)" {
+		t.Errorf("first call should use original title; got %q", calls[0])
+	}
+	if calls[1] != "Dragon Ball Super" {
+		t.Errorf("retry should use bare title; got %q", calls[1])
+	}
+}
+
+// TestClassifyDoesNotRetryWhenNoTrailingTag pins that titles without a
+// parenthetical/bracketed tail don't trigger a second AniList call —
+// no point burning AniList budget when the helper would return the
+// same string.
+func TestClassifyDoesNotRetryWhenNoTrailingTag(t *testing.T) {
+	st := &fakeBindingsRulesStore{}
+	al := &scriptedAniList{
+		responses: []scriptedResponse{{err: anilist.ErrNotFound}},
+	}
+	c := New(al, nil, st)
+
+	_, err := c.Classify(context.Background(),
+		ScanItem{Title: "Plain Title", ParentDir: "/dl"})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if al.callCount != 1 {
+		t.Errorf("expected exactly 1 AniList call when no trailing tag; got %d", al.callCount)
+	}
+}
+
+// scriptedAniList satisfies AniListClient by returning queued responses
+// in order. Used by retry-path tests to simulate first-call failure +
+// second-call success without test-body state management.
+type scriptedAniList struct {
+	responses []scriptedResponse
+	callCount int
+	onLookup  func(title string)
+}
+
+type scriptedResponse struct {
+	result anilist.Result
+	err    error
+}
+
+func (s *scriptedAniList) Lookup(ctx context.Context, title string) (anilist.Result, error) {
+	if s.onLookup != nil {
+		s.onLookup(title)
+	}
+	i := s.callCount
+	s.callCount++
+	if i >= len(s.responses) {
+		return anilist.Result{}, anilist.ErrNotFound
+	}
+	return s.responses[i].result, s.responses[i].err
+}

@@ -188,7 +188,22 @@ func (c *Classifier) Classify(ctx context.Context, item ScanItem) (model.Decisio
 
 	// Step 4: AniList rules. Errors are swallowed so a transient outage
 	// degrades gracefully to step 5/6 rather than failing the poll tick.
+	//
+	// Titles with a trailing parenthetical / bracketed variant tag (e.g.
+	// "Dragon Ball Super (Color)", "Made in Abyss [Official Edition]")
+	// commonly fail AniList's search because the canonical entry is the
+	// bare title. On a not-found, retry once with the trailing tag
+	// stripped. Only one retry; the helper returns the original string
+	// unchanged when there's nothing to strip, so we don't double-hit
+	// AniList for already-bare titles.
 	result, anilistErr := c.anilist.Lookup(ctx, item.Title)
+	if anilistErr != nil {
+		if bare := stripTrailingTag(item.Title); bare != "" && bare != item.Title {
+			if r2, err2 := c.anilist.Lookup(ctx, bare); err2 == nil {
+				result, anilistErr = r2, nil
+			}
+		}
+	}
 	if anilistErr == nil {
 		for _, r := range rules {
 			if r.Condition.IsPathOnly() {
@@ -233,4 +248,50 @@ func matchesRule(cond model.RuleCondition, result anilist.Result, parentDir stri
 		return false
 	}
 	return true
+}
+
+// stripTrailingTag drops a single trailing parenthetical or bracketed
+// tag from the title plus any whitespace that immediately precedes it.
+// Used by the AniList retry path so titles like
+//
+//	"Dragon Ball Super (Color)"
+//	"Made in Abyss [Official Edition]"
+//	"Series Name (2024)"
+//
+// also classify when only the bare title is present in AniList's
+// catalogue. Returns the input unchanged when no trailing tag is
+// present so callers can compare original vs result to decide whether
+// to retry. Only strips ONE trailing group — chained tags are rare
+// enough that the second pass would risk losing real title content.
+func stripTrailingTag(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	last := s[len(s)-1]
+	var open byte
+	switch last {
+	case ')':
+		open = '('
+	case ']':
+		open = '['
+	default:
+		return s
+	}
+	// Walk back to the matching opener, respecting nested groups so
+	// "Foo (Bar (1)) " produces "Foo".
+	depth := 1
+	for i := len(s) - 2; i >= 0; i-- {
+		switch s[i] {
+		case last:
+			depth++
+		case open:
+			depth--
+			if depth == 0 {
+				return strings.TrimRight(s[:i], " \t")
+			}
+		}
+	}
+	// Unbalanced — leave the input alone.
+	return s
 }
