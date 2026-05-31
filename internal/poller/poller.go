@@ -68,6 +68,12 @@ type Kavita interface {
 // UnmatchedSink records series that produced Decision{BindingID:0}.
 type UnmatchedSink interface {
 	MarkUnmatched(s model.Series) error
+	// UpsertSeries lands a discovered series in the persistent table
+	// regardless of classification outcome. Without this, the matched-
+	// on-first-try happy path silently bypasses the series table —
+	// only MarkUnmatched writes — and those series never show up on
+	// the Series page or expose a Reclassify dropdown.
+	UpsertSeries(s model.Series) (int64, error)
 }
 
 // ActivityWriter records an audit entry for the UI's Activity/History view.
@@ -208,10 +214,35 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	scanned := map[int64]bool{}
 
 	for _, s := range series {
+		// Persist the discovered series first so the Series page reflects
+		// EVERY title the scanner finds — not just the unmatched ones.
+		// MarkUnmatched already calls UpsertSeries on the failure path;
+		// this upfront upsert makes the matched/happy-path titles visible
+		// too, and is also what gives the Reclassify dropdown a row to
+		// target before any manual override has been set.
+		//
+		// Pull the persisted manual override if one exists — UpsertSeries'
+		// ON CONFLICT clause doesn't touch manual_binding_id, but the
+		// classifier needs the value below, and Scanner.ScanAll builds
+		// Series fresh from disk so s.ManualBindingID is always nil here.
+		s.Status = model.StatusPending
+		if _, err := p.Unmatched.UpsertSeries(s); err != nil {
+			p.recordActivityVia(s.Title, model.ActionError, classifier.ViaUnmatched,
+				fmt.Sprintf("upsert series: %v", err))
+			continue
+		}
+		manualOverride := s.ManualBindingID
+		if manualOverride == nil && p.Store != nil {
+			if persisted, err := p.Store.GetSeriesByPath(s.SourcePath); err == nil {
+				manualOverride = persisted.ManualBindingID
+				s.ManualBindingID = manualOverride
+			}
+		}
+
 		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
 			Title:           s.Title,
 			ParentDir:       s.SourcePath,
-			ManualBindingID: s.ManualBindingID,
+			ManualBindingID: manualOverride,
 		})
 		if classifyErr != nil || d.BindingID == 0 {
 			// Classifier failed or routed to Unmatched.
