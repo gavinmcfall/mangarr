@@ -2086,3 +2086,71 @@ func TestAPIKavitaLibrariesWhenUnconfiguredReturns503(t *testing.T) {
 		t.Fatalf("want 503 when Kavita not configured, got %d; body: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// TestSeriesPageShowsManualBindingNameInsteadOfUnknown pins the UX fix
+// for the post-reclassify confusion: when a series has ManualBindingID
+// set, the Type column shows the binding's name with a "manual" badge
+// instead of "unknown" (which it would otherwise show until a poll
+// successfully classifies via the manual override). The dropdown
+// alone wasn't enough signal — operators reported the page looked
+// like the reclassify "didn't stick" because the Type column hadn't
+// updated.
+func TestSeriesPageShowsManualBindingNameInsteadOfUnknown(t *testing.T) {
+	pinned := int64(5)
+	st := &fakeStore{
+		bindings: []model.Binding{
+			{ID: 1, Name: "Manga"},
+			{ID: 5, Name: "Manhwa"},
+		},
+		series: []model.Series{
+			{ID: 1, Title: "Plain", Type: model.TypeUnknown, Status: model.StatusUnmatched},
+			{ID: 2, Title: "TBATE", Type: model.TypeUnknown, Status: model.StatusPending,
+				ManualBindingID: &pinned},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/series", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	// The row WITHOUT a manual override still shows "unknown".
+	if !strings.Contains(body, "pill-unknown") {
+		t.Errorf("expected 'unknown' pill for the unpinned row")
+	}
+	// The row WITH a manual override shows the binding name and a
+	// manual-styled pill.
+	if !strings.Contains(body, "pill-manual") {
+		t.Errorf("expected .pill-manual class on the row with ManualBindingID; body:\n%s",
+			excerpt(body, "TBATE", 400))
+	}
+	if !strings.Contains(body, ">Manhwa<") {
+		t.Errorf("expected 'Manhwa' (the bound binding's name) in the pinned row's Type cell")
+	}
+}
+
+// TestSeriesPageManualBindingAtDeletedIDRendersFallback pins the
+// graceful-degradation path: if an operator pinned a binding then
+// deleted it from Settings, the series row should still render —
+// with a "deleted binding" pill — rather than crash the template or
+// show the cryptic "unknown" (which would mask the misconfiguration).
+func TestSeriesPageManualBindingAtDeletedIDRendersFallback(t *testing.T) {
+	deleted := int64(999)
+	st := &fakeStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga"}},
+		series: []model.Series{
+			{ID: 1, Title: "Orphaned", Type: model.TypeUnknown, Status: model.StatusPending,
+				ManualBindingID: &deleted},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/series", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "deleted binding") {
+		t.Errorf("expected 'deleted binding' fallback for manual override at unknown ID; body:\n%s",
+			excerpt(body, "Orphaned", 400))
+	}
+}

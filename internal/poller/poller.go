@@ -91,9 +91,13 @@ type Cache interface {
 }
 
 // SeriesStore is the subset of store.Store that FileOne needs for series
-// lookup and type update.
+// lookup and type update. The Preview path also queries by source_path so
+// it can enrich Scanner output (which builds fresh in-memory rows from
+// disk and so never carries DB-side fields like ManualBindingID) with the
+// persisted manual-override the operator set via the Series-page UI.
 type SeriesStore interface {
 	GetSeriesByID(id int64) (model.Series, error)
+	GetSeriesByPath(path string) (model.Series, error)
 	SetSeriesType(id int64, ct model.ContentType) error
 }
 
@@ -108,6 +112,7 @@ type PreviewEntry struct {
 	Title        string            `json:"title"`
 	SourcePath   string            `json:"source_path"`
 	Source       string            `json:"source"`
+	ChapterCount int               `json:"chapter_count"` // from the scanner — count of .cbz files on disk; surfaces even for unmatched rows
 	Classified   model.ContentType `json:"classified"`    // empty under v2 — preview now routes by Binding, not ContentType
 	BindingName  string            `json:"binding_name"`  // v2: human-readable binding label, empty when unmatched
 	Reason       string            `json:"reason"`        // why the row is unmatched / errored
@@ -457,15 +462,28 @@ func (p *Poller) Preview(ctx context.Context) ([]PreviewEntry, error) {
 		}
 
 		entry := PreviewEntry{
-			Title:      s.Title,
-			SourcePath: s.SourcePath,
-			Source:     s.Source,
+			Title:        s.Title,
+			SourcePath:   s.SourcePath,
+			Source:       s.Source,
+			ChapterCount: s.ChapterCount,
+		}
+
+		// Scanner.ScanAll builds Series fresh from disk and so never
+		// carries DB-side fields. Enrich with the persisted manual
+		// override so the preview reflects what RunOnce would actually
+		// route via — without this, an operator who pinned a binding
+		// in the UI saw Preview still report "no binding matched".
+		manualOverride := s.ManualBindingID
+		if manualOverride == nil && p.Store != nil {
+			if persisted, err := p.Store.GetSeriesByPath(s.SourcePath); err == nil {
+				manualOverride = persisted.ManualBindingID
+			}
 		}
 
 		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
 			Title:           s.Title,
 			ParentDir:       s.SourcePath,
-			ManualBindingID: s.ManualBindingID,
+			ManualBindingID: manualOverride,
 		})
 		if classifyErr != nil {
 			entry.Status = "unmatched"

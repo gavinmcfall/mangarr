@@ -745,6 +745,18 @@ func (f *fakeSeriesStore) GetSeriesByID(id int64) (model.Series, error) {
 	return s, nil
 }
 
+func (f *fakeSeriesStore) GetSeriesByPath(path string) (model.Series, error) {
+	if f.getErr != nil {
+		return model.Series{}, f.getErr
+	}
+	for _, s := range f.series {
+		if s.SourcePath == path {
+			return s, nil
+		}
+	}
+	return model.Series{}, sql.ErrNoRows
+}
+
 func (f *fakeSeriesStore) SetSeriesType(id int64, ct model.ContentType) error {
 	if f.setErr != nil {
 		return f.setErr

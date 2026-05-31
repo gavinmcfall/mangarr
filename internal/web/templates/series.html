@@ -36,7 +36,14 @@
   <tr>
     <td>{{.Title}}</td>
     <td>
-      {{if .Type}}<span class="pill pill-{{.Type | lower}}">{{.Type}}</span>{{else}}<span class="pill pill-unknown">unknown</span>{{end}}
+      {{$series := .}}
+      {{if .ManualBindingID}}
+        {{$pinned := bindingByID $bindings (deref64 .ManualBindingID 0)}}
+        {{if $pinned.Name}}<span class="pill pill-manual" title="Manual override — set via Reclassify">{{$pinned.Name}}</span>
+        {{else}}<span class="pill pill-unknown" title="Manual binding ID {{deref64 .ManualBindingID 0}} not found">deleted binding</span>{{end}}
+      {{else if .Type}}<span class="pill pill-{{.Type | lower}}">{{.Type}}</span>
+      {{else}}<span class="pill pill-unknown">unknown</span>
+      {{end}}
     </td>
     <td class="td-dim">{{.Source}}</td>
     <td class="td-dim">{{.ChapterCount}}</td>

@@ -375,6 +375,30 @@ func templateFuncs() template.FuncMap {
 			}
 			return lib.Folders[0]
 		},
+		// bindingByID returns the Binding from the slice matching the
+		// given ID, or a zero-value Binding (Name=="") when no match —
+		// the Series page uses Name=="" as the "deleted binding" sentinel
+		// so an operator-set override at a since-removed binding ID
+		// still renders meaningfully rather than vanishing.
+		"bindingByID": func(bindings []model.Binding, id int64) model.Binding {
+			for _, b := range bindings {
+				if b.ID == id {
+					return b
+				}
+			}
+			return model.Binding{}
+		},
+		// deref64 nil-safely dereferences a *int64, returning the
+		// supplied fallback for nil. Companion to deref/derefStr — used
+		// by Series page to dereference Series.ManualBindingID inside
+		// the {{if}}/{{else}} branches where the ManualBindingID
+		// pointer itself is already known non-nil.
+		"deref64": func(p *int64, fallback int64) int64 {
+			if p == nil {
+				return fallback
+			}
+			return *p
+		},
 		// deref nil-safely dereferences a *bool, returning false for nil.
 		// Used by rule-rows.html to compare a rule's IsAdult condition
 		// pointer against a yes/no <option> value without exploding on nil.
@@ -666,7 +690,14 @@ func buildPreviewPageData(entries []poller.PreviewEntry) previewPageData {
 				nSkip++
 			}
 		}
-		row.ChapterCount = len(e.ChapterPlans)
+		// ChapterCount: prefer the scanner's on-disk count so unmatched
+		// rows still surface a meaningful number; matched rows fall back
+		// to the chapter-plan length when the scanner count is zero (a
+		// legacy path from before PreviewEntry.ChapterCount existed).
+		row.ChapterCount = e.ChapterCount
+		if row.ChapterCount == 0 {
+			row.ChapterCount = len(e.ChapterPlans)
+		}
 		if len(e.ChapterPlans) > 0 {
 			row.FileSummary = buildFileSummary(nFile, nSkip, len(e.ChapterPlans)-nFile-nSkip)
 		}
