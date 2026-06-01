@@ -60,6 +60,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/kavita"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/poller"
+	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
 )
 
@@ -93,6 +94,30 @@ type Store interface {
 	ListRules() ([]model.ClassificationRule, error)
 	SaveBindings([]model.Binding) error
 	SaveRules([]model.ClassificationRule) error
+
+	// --- Bulk-download surfaces (Plan A T13) ---
+	// ListBulkJobs returns every bulk_jobs row matching the given status, or
+	// every row when status is the empty string. Used by GET /api/bulk/jobs.
+	ListBulkJobs(status model.BulkJobStatus) ([]model.BulkJob, error)
+	// SaveBulkJob inserts a new BulkJob row and returns the assigned ID.
+	// Used by POST /api/bulk for each manga the operator confirmed.
+	SaveBulkJob(in model.BulkJob) (int64, error)
+	// BatchInsertBulkJobChapters inserts every chapter ID under the given
+	// job at state='pending'. Used by POST /api/bulk after SaveBulkJob.
+	BatchInsertBulkJobChapters(jobID int64, chapterIDs []int64) error
+	// GetLibraryCacheEntry returns the cache entry for the given manga ID
+	// or sql.ErrNoRows (wrapped) when the manga isn't in the library cache —
+	// POST /api/bulk uses that "missing entry" signal to reject unknown
+	// manga IDs with HTTP 400.
+	GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry, error)
+}
+
+// SuwayomiClient is the subset of *suwayomi.Client the web package needs.
+// Currently only ListChapters (for POST /api/bulk's per-manga chapter
+// fetch). Plan B will extend with category-list calls for the bulk
+// confirmation modal.
+type SuwayomiClient interface {
+	ListChapters(ctx context.Context, mangaID int64) ([]suwayomi.Chapter, error)
 }
 
 // Runner can execute one poll pass on demand.
@@ -154,6 +179,10 @@ type HandlerOpts struct {
 	HealthReg   HealthRegistry // optional; health routes show a placeholder
 	Metrics     MetricsSink    // optional; /metrics returns 503 when nil
 	Previewer   Previewer      // optional; /preview returns placeholder when nil
+	// Suwayomi is required for POST /api/bulk's ListChapters call. Optional
+	// so existing test setups can leave it nil; the bulk-create handler
+	// returns 503 when it's missing.
+	Suwayomi SuwayomiClient
 
 	BrowseRoots             []string // allowlist for /api/browse; defaults to ["/media", "/config"]
 	RecycleBinPath          string
@@ -184,6 +213,7 @@ type Handler struct {
 	taskReg                 TaskRegistry                   // injected for Tasks page + /api/tasks
 	healthReg               HealthRegistry                 // injected for Health page + /api/health
 	metricsHandler          http.Handler                   // nil → /metrics returns 503
+	suwayomi                SuwayomiClient                 // optional; POST /api/bulk returns 503 when nil
 }
 
 // NewHandler wires up all routes and parses embedded templates from a HandlerOpts struct.
@@ -213,6 +243,7 @@ func NewHandler(opts HandlerOpts) *Handler {
 		taskReg:                 opts.TaskReg,
 		healthReg:               opts.HealthReg,
 		metricsHandler:          mh,
+		suwayomi:                opts.Suwayomi,
 	}
 
 	// Static assets
@@ -259,6 +290,13 @@ func NewHandler(opts HandlerOpts) *Handler {
 	// Library Bindings v2 read-only JSON endpoints (Plan B)
 	h.mux.HandleFunc("GET /api/bindings", h.apiBindings)
 	h.mux.HandleFunc("GET /api/rules", h.apiRules)
+
+	// Bulk-download API (Plan A T13). POST /api/bulk accepts repeated
+	// manga_id form values + confirm=0|1; GET /api/bulk/jobs returns the
+	// running/paused/completed/errored job list optionally filtered by
+	// ?status=.
+	h.mux.HandleFunc("GET /api/bulk/jobs", h.apiBulkJobs)
+	h.mux.HandleFunc("POST /api/bulk", h.apiBulkCreate)
 
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)

@@ -19,6 +19,7 @@ type fakeStore struct {
 	chapterUpdates      []chapterUpdateCall
 	backoffHistory      []backoffCall
 	clearBackoffHistory []int64
+	completedBumps      []int64
 }
 
 type feedCall struct {
@@ -83,6 +84,11 @@ func (f *fakeStore) UpdateBulkJobBackoff(jobID int64, until time.Time, consecFai
 
 func (f *fakeStore) ClearBulkJobBackoff(jobID int64) error {
 	f.clearBackoffHistory = append(f.clearBackoffHistory, jobID)
+	return nil
+}
+
+func (f *fakeStore) IncrementBulkJobCompletedChapters(jobID int64) error {
+	f.completedBumps = append(f.completedBumps, jobID)
 	return nil
 }
 
@@ -239,6 +245,13 @@ func TestTickReconcilesFedToDoneOnIsDownloaded(t *testing.T) {
 	}
 	if !sawDone {
 		t.Errorf("expected chapter 100 to flip to 'done' on isDownloaded=true; got updates: %+v", st.chapterUpdates)
+	}
+	// T12 carry-forward: exactly one completed_chapters bump for the single
+	// chapter that flipped to 'done'. Guards against the regression where
+	// reconcile only updated chapter state and left the job-level counter
+	// stale (so GET /api/bulk/jobs reported 0 forever).
+	if len(st.completedBumps) != 1 || st.completedBumps[0] != 1 {
+		t.Errorf("expected exactly one IncrementBulkJobCompletedChapters(1) call; got %+v", st.completedBumps)
 	}
 }
 

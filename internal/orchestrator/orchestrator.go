@@ -25,6 +25,12 @@ type Store interface {
 	UpdateBulkJobStatus(id int64, status model.BulkJobStatus) error
 	UpdateBulkJobBackoff(jobID int64, until time.Time, consecFailures int, lastError string) error
 	ClearBulkJobBackoff(jobID int64) error
+	// IncrementBulkJobCompletedChapters is invoked once per chapter as the
+	// reconcile phase flips its state from 'fed' to 'done'. Keeps the
+	// BulkJob.CompletedChapters counter in lockstep with the per-chapter
+	// state so GET /api/bulk/jobs returns live progress (the value written
+	// by SaveBulkJob at creation is 0; without this bump it stays 0).
+	IncrementBulkJobCompletedChapters(jobID int64) error
 	GetSettings() (model.Settings, error)
 }
 
@@ -126,6 +132,13 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 				for _, c := range fed {
 					if downloaded[c.ChapterID] {
 						_ = o.store.UpdateBulkJobChapterState(job.ID, c.ChapterID, model.BulkChapterDone)
+						// Bump the job-level completed counter in lockstep so the
+						// JSON API reports live progress rather than the value
+						// SaveBulkJob wrote at creation (usually 0). Discard the
+						// error per the surrounding skip-on-error pattern: a
+						// transient SQLite failure here causes one tick's counter
+						// drift, not a stuck job.
+						_ = o.store.IncrementBulkJobCompletedChapters(job.ID)
 					}
 				}
 			}

@@ -206,6 +206,22 @@ func (s *Store) UpdateBulkJobBackoff(jobID int64, until time.Time, consecFailure
 	return nil
 }
 
+// IncrementBulkJobCompletedChapters atomically bumps the job's
+// completed_chapters counter. Called by the orchestrator each time it
+// flips a chapter from 'fed' to 'done' during reconcile, so the
+// JSON API's BulkJob.CompletedChapters reflects real progress rather
+// than the stale value SaveBulkJob wrote at job creation (usually 0).
+func (s *Store) IncrementBulkJobCompletedChapters(jobID int64) error {
+	_, err := s.db.Exec(`UPDATE bulk_jobs SET
+		completed_chapters = completed_chapters + 1,
+		updated_at = strftime('%s','now')
+	WHERE id = ?`, jobID)
+	if err != nil {
+		return fmt.Errorf("IncrementBulkJobCompletedChapters: %w", err)
+	}
+	return nil
+}
+
 // ClearBulkJobBackoff resets backoff_until + consecutive_failures + last_error
 // on a successful feed.
 func (s *Store) ClearBulkJobBackoff(jobID int64) error {
