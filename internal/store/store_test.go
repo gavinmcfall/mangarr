@@ -576,3 +576,20 @@ func TestSettingsRoundTripDefaultBindingID(t *testing.T) {
 		}
 	})
 }
+
+func TestDefaultSettingsHasBulkPacingDefaults(t *testing.T) {
+	s := newTestStore(t)
+	set, err := s.GetSettings()
+	if err != nil {
+		t.Fatalf("GetSettings on fresh store: %v", err)
+	}
+	if set.BulkMaxInFlight != 5 {
+		t.Errorf("BulkMaxInFlight default: want 5, got %d", set.BulkMaxInFlight)
+	}
+	if set.BulkRefillThreshold != 2 {
+		t.Errorf("BulkRefillThreshold default: want 2, got %d", set.BulkRefillThreshold)
+	}
+	if set.BulkInterBatchDelaySec != 1 {
+		t.Errorf("BulkInterBatchDelaySec default: want 1, got %d", set.BulkInterBatchDelaySec)
+	}
+}

@@ -385,6 +385,62 @@ func TestListLibraryWithCategoriesSurfacesGraphQLErrors(t *testing.T) {
 	}
 }
 
+// ----- ListChapters -----
+
+func TestListChaptersForManga(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/graphql" {
+			handlerErr(t, w, "want /api/graphql, got %s", r.URL.Path)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"mangaId":42`) {
+			t.Errorf("query didn't carry mangaId=42; body: %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"data":{"chapters":{"nodes":[
+			{"id":100,"name":"Chapter 1","chapterNumber":1,"isDownloaded":true,"sourceOrder":1},
+			{"id":101,"name":"Chapter 2","chapterNumber":2,"isDownloaded":false,"sourceOrder":2},
+			{"id":102,"name":"Chapter 3","chapterNumber":3,"isDownloaded":false,"sourceOrder":3}
+		]}}}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	chapters, err := c.ListChapters(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("ListChapters: %v", err)
+	}
+	if len(chapters) != 3 {
+		t.Fatalf("want 3 chapters, got %d", len(chapters))
+	}
+	if chapters[0].ID != 100 || !chapters[0].IsDownloaded {
+		t.Errorf("chapter 0 mismatch: %+v", chapters[0])
+	}
+	if chapters[0].Name != "Chapter 1" || chapters[0].ChapterNumber != 1 || chapters[0].SourceOrder != 1 {
+		t.Errorf("chapter 0 fields not populated: %+v", chapters[0])
+	}
+	if chapters[1].IsDownloaded {
+		t.Errorf("chapter 1 should not be downloaded: %+v", chapters[1])
+	}
+	if chapters[2].IsDownloaded {
+		t.Errorf("chapter 2 should not be downloaded: %+v", chapters[2])
+	}
+}
+
+func TestListChaptersSurfacesGraphQLErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"data":{"chapters":{"nodes":[]}},"errors":[{"message":"manga not found"}]}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	_, err := c.ListChapters(context.Background(), 99)
+	if err == nil || !strings.Contains(err.Error(), "manga not found") {
+		t.Fatalf("want graphql error surfaced, got %v", err)
+	}
+}
+
 // ----- sanitiseSegment edge cases -----
 
 func TestSanitiseSegmentEmptyInputReturnsFallback(t *testing.T) {
@@ -412,5 +468,130 @@ func TestSanitiseSegmentPreservesValidNames(t *testing.T) {
 	got := sanitiseSegment("Solo Leveling", "fallback")
 	if got != "Solo Leveling" {
 		t.Fatalf("valid input: want %q, got %q", "Solo Leveling", got)
+	}
+}
+
+// ----- EnqueueChapterDownloads -----
+
+func TestEnqueueChapterDownloads(t *testing.T) {
+	var capturedBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/graphql" {
+			handlerErr(t, w, "want /api/graphql, got %s", r.URL.Path)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		capturedBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"data":{"enqueueChapterDownloads":{"clientMutationId":null}}}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	err := c.EnqueueChapterDownloads(context.Background(), []int64{100, 101, 102})
+	if err != nil {
+		t.Fatalf("EnqueueChapterDownloads: %v", err)
+	}
+	if !strings.Contains(capturedBody, `"ids":[100,101,102]`) {
+		t.Errorf("mutation body didn't carry ids array; got: %s", capturedBody)
+	}
+}
+
+func TestEnqueueChapterDownloadsEmptyIsNoOp(t *testing.T) {
+	// Empty batch must not even hit the network — pointless roundtrip.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("server should not be called for empty batch; got %s", r.URL.Path)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, NoAuth{})
+	if err := c.EnqueueChapterDownloads(context.Background(), nil); err != nil {
+		t.Errorf("empty batch should not error: %v", err)
+	}
+}
+
+// ----- downloadStatus / InFlightCountForSource / 429 -----
+
+func TestGetDownloadStatusGroupsBySource(t *testing.T) {
+	// Stub returns 4 queue entries: 3 on source "42" (2 QUEUED + 1
+	// DOWNLOADING, all in-flight) + 1 on source "99" (DOWNLOADING).
+	// InFlightCountForSource must count by source AND in-flight state,
+	// and must return 0 for a source not present in the queue.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/graphql" {
+			handlerErr(t, w, "want /api/graphql, got %s", r.URL.Path)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"data": {
+				"downloadStatus": {
+					"state": "STARTED",
+					"queue": [
+						{"chapter":{"id":1,"mangaId":10},"manga":{"source":{"id":"42"}},"state":"QUEUED","progress":0.0,"tries":0},
+						{"chapter":{"id":2,"mangaId":10},"manga":{"source":{"id":"42"}},"state":"QUEUED","progress":0.0,"tries":0},
+						{"chapter":{"id":3,"mangaId":11},"manga":{"source":{"id":"42"}},"state":"DOWNLOADING","progress":0.5,"tries":1},
+						{"chapter":{"id":4,"mangaId":20},"manga":{"source":{"id":"99"}},"state":"DOWNLOADING","progress":0.25,"tries":0}
+					]
+				}
+			}
+		}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	ctx := context.Background()
+
+	if got, err := c.InFlightCountForSource(ctx, "42"); err != nil || got != 3 {
+		t.Errorf("InFlightCountForSource(42) = (%d, %v); want (3, nil)", got, err)
+	}
+	if got, err := c.InFlightCountForSource(ctx, "99"); err != nil || got != 1 {
+		t.Errorf("InFlightCountForSource(99) = (%d, %v); want (1, nil)", got, err)
+	}
+	if got, err := c.InFlightCountForSource(ctx, "404"); err != nil || got != 0 {
+		t.Errorf("InFlightCountForSource(404) = (%d, %v); want (0, nil)", got, err)
+	}
+
+	// Also confirm GetDownloadStatus surfaces the full queue with all
+	// fields decoded — the orchestrator may grow finer-grained checks
+	// later and we don't want the decoder to silently drop fields.
+	status, err := c.GetDownloadStatus(ctx)
+	if err != nil {
+		t.Fatalf("GetDownloadStatus: %v", err)
+	}
+	if status.State != "STARTED" {
+		t.Errorf("State = %q; want STARTED", status.State)
+	}
+	if len(status.Queue) != 4 {
+		t.Fatalf("Queue len = %d; want 4", len(status.Queue))
+	}
+	// Spot-check the DOWNLOADING entry on source 42 for full decode.
+	var dl DownloadQueueEntry
+	for _, e := range status.Queue {
+		if e.ChapterID == 3 {
+			dl = e
+		}
+	}
+	if dl.MangaID != 11 || dl.SourceID != "42" || dl.State != "DOWNLOADING" || dl.Progress != 0.5 || dl.Tries != 1 {
+		t.Errorf("queue[chapterId=3] = %+v; want MangaID=11 SourceID=42 State=DOWNLOADING Progress=0.5 Tries=1", dl)
+	}
+}
+
+func TestSuwayomiHTTP429ReturnsTypedError(t *testing.T) {
+	// Stub returns HTTP 429 for every request. The doJSON helper must
+	// translate this into ErrHTTP429 so callers using
+	// errors.Is(err, ErrHTTP429) — notably the bulk-download backoff
+	// ladder — can branch on it without parsing error strings.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	_, err := c.GetDownloadStatus(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrHTTP429) {
+		t.Errorf("errors.Is(err, ErrHTTP429) = false; err = %v", err)
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/kavita"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/poller"
+	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
 	_ "modernc.org/sqlite"
 )
@@ -40,6 +41,24 @@ type fakeStore struct {
 	// Plan B: v2 data model
 	bindings []model.Binding
 	rules    []model.ClassificationRule
+	// Plan A T13: bulk-download surfaces
+	bulkJobs        []model.BulkJob
+	savedBulkJobs   []model.BulkJob
+	savedChapterIDs []int64
+	libraryCache    map[int64]model.LibraryCacheEntry
+	// Plan A T14: pause/resume/delete tracking
+	bulkStatusUpdates []bulkStatusCall
+	bulkClearBackoff  []int64
+	bulkDeletes       []int64
+	// callOrder records the sequence of Store mutations for tests that
+	// pin ordering invariants (e.g. "ClearBulkJobBackoff must run BEFORE
+	// UpdateBulkJobStatus on resume from errored"). Append-only.
+	callOrder []string
+}
+
+type bulkStatusCall struct {
+	id     int64
+	status model.BulkJobStatus
 }
 
 type setTypeCall struct {
@@ -131,6 +150,79 @@ func (f *fakeStore) SaveRules(in []model.ClassificationRule) error {
 	}
 	f.rules = out
 	return nil
+}
+
+// --- Plan A T13: bulk-download Store surfaces ---
+
+func (f *fakeStore) ListBulkJobs(s model.BulkJobStatus) ([]model.BulkJob, error) {
+	if s == "" {
+		return f.bulkJobs, nil
+	}
+	var out []model.BulkJob
+	for _, j := range f.bulkJobs {
+		if j.Status == s {
+			out = append(out, j)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) SaveBulkJob(in model.BulkJob) (int64, error) {
+	in.ID = int64(len(f.savedBulkJobs) + 1)
+	f.savedBulkJobs = append(f.savedBulkJobs, in)
+	return in.ID, nil
+}
+
+func (f *fakeStore) BatchInsertBulkJobChapters(jobID int64, ids []int64) error {
+	f.savedChapterIDs = append(f.savedChapterIDs, ids...)
+	return nil
+}
+
+func (f *fakeStore) GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry, error) {
+	if e, ok := f.libraryCache[mangaID]; ok {
+		return e, nil
+	}
+	return model.LibraryCacheEntry{}, sql.ErrNoRows
+}
+
+// --- Plan A T14: pause/resume/delete mutation surfaces ---
+
+func (f *fakeStore) UpdateBulkJobStatus(id int64, s model.BulkJobStatus) error {
+	f.bulkStatusUpdates = append(f.bulkStatusUpdates, bulkStatusCall{id, s})
+	f.callOrder = append(f.callOrder, fmt.Sprintf("status:%d:%s", id, s))
+	return nil
+}
+
+func (f *fakeStore) ClearBulkJobBackoff(id int64) error {
+	f.bulkClearBackoff = append(f.bulkClearBackoff, id)
+	f.callOrder = append(f.callOrder, fmt.Sprintf("clear:%d", id))
+	return nil
+}
+
+func (f *fakeStore) DeleteBulkJob(id int64) error {
+	f.bulkDeletes = append(f.bulkDeletes, id)
+	f.callOrder = append(f.callOrder, fmt.Sprintf("delete:%d", id))
+	return nil
+}
+
+// fakeSuwayomi implements web.SuwayomiClient for tests. Per-manga chapter
+// IDs are configured via chaptersForManga; ListChapters returns each as
+// a Chapter{IsDownloaded:false}. A nil/empty slice for a manga ID models
+// the "no missing chapters" edge case POST /api/bulk uses to skip job
+// creation.
+type fakeSuwayomi struct {
+	chaptersForManga map[int64][]int64
+}
+
+func (f *fakeSuwayomi) ListChapters(_ context.Context, mangaID int64) ([]suwayomi.Chapter, error) {
+	if f == nil {
+		return nil, nil
+	}
+	out := make([]suwayomi.Chapter, 0)
+	for _, id := range f.chaptersForManga[mangaID] {
+		out = append(out, suwayomi.Chapter{ID: id, IsDownloaded: false})
+	}
+	return out, nil
 }
 
 // fakeRunner records RunOnce calls.
@@ -238,7 +330,28 @@ func newEmptyHandler() *Handler {
 }
 
 // newTestHandler builds a Handler with test fixtures.
-func newTestHandler() (*Handler, *fakeStore, *fakeRunner) {
+//
+// The 3rd return value is the Suwayomi fake, not the Runner — bulk_test.go
+// uses `h, st, sw := newTestHandler()` to seed per-manga chapter lists for
+// the POST /api/bulk path. Tests that need the runner use
+// newTestHandlerWithRunner (one of the two remaining callsites).
+func newTestHandler() (*Handler, *fakeStore, *fakeSuwayomi) {
+	h, st, sw, _ := newTestHandlerFull()
+	return h, st, sw
+}
+
+// newTestHandlerWithRunner is the legacy 3-tuple shape that exposes the
+// Runner instead of Suwayomi. Used by TestAPIRescanCallsRunOnce which
+// needs to assert RunOnce got called exactly once.
+func newTestHandlerWithRunner() (*Handler, *fakeStore, *fakeRunner) {
+	h, st, _, runner := newTestHandlerFull()
+	return h, st, runner
+}
+
+// newTestHandlerFull is the canonical builder: every fixture is exposed so
+// helpers above can pick the slice they need. Kept internal so test files
+// stay terse — they always go through one of the two public helpers.
+func newTestHandlerFull() (*Handler, *fakeStore, *fakeSuwayomi, *fakeRunner) {
 	st := &fakeStore{
 		series: []model.Series{
 			{ID: 1, Title: "Solo Leveling", Type: model.TypeManhwa, Status: model.StatusFiled, Source: "suwayomi", ChapterCount: 10},
@@ -257,18 +370,20 @@ func newTestHandler() (*Handler, *fakeStore, *fakeRunner) {
 		},
 	}
 	runner := &fakeRunner{}
+	sw := &fakeSuwayomi{}
 	h := NewHandler(HandlerOpts{
 		Store:                   st,
 		Runner:                  runner,
+		Suwayomi:                sw,
 		RecycleBinPath:          "/config/recycle-bin",
 		RecycleBinRetentionDays: 7,
 	})
-	return h, st, runner
+	return h, st, sw, runner
 }
 
 // newTestHandlerWithRegistry builds a Handler with a seeded task registry.
 func newTestHandlerWithRegistry() (*Handler, *fakeStore, *fakeRunner, *fakeTaskRegistry) {
-	_, st, runner := newTestHandler()
+	_, st, runner := newTestHandlerWithRunner()
 	reg := newFakeTaskRegistry()
 	reg.register("poll-scan", "Poll Scan", func(ctx context.Context) error {
 		runner.called++
@@ -463,7 +578,7 @@ func TestAPIPutSettingsUpdates(t *testing.T) {
 }
 
 func TestAPIRescanCallsRunOnce(t *testing.T) {
-	h, _, runner := newTestHandler()
+	h, _, runner := newTestHandlerWithRunner()
 	req := httptest.NewRequest(http.MethodPost, "/api/rescan", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)

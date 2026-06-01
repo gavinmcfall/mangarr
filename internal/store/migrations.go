@@ -22,6 +22,7 @@ var migrations = []migration{
 	{1, "init-bindings-and-rules", migrateInitBindingsAndRules},
 	{2, "v1-settings-into-bindings", migrateV1SettingsIntoBindings},
 	{3, "series-manual-binding", migrateSeriesManualBinding},
+	{4, "bulk-downloads-tables", migrateBulkDownloadsTables},
 }
 
 // migrateSeriesManualBinding adds the manual_binding_id column to the

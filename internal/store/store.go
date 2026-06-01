@@ -29,7 +29,12 @@ const sqliteDupColumnMarker = "duplicate column"
 type Store struct{ db *sql.DB }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// `?_pragma=foreign_keys(1)` is the modernc.org/sqlite DSN form for
+	// enabling SQLite's foreign-key enforcement at connection time. Without
+	// it, `REFERENCES … ON DELETE CASCADE` clauses (e.g. on
+	// bulk_job_chapters.job_id → bulk_jobs.id) are documentary-only and the
+	// cascade never fires. Once-per-process; benefits every table with FKs.
+	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
@@ -45,6 +50,14 @@ func Open(path string) (*Store, error) {
 	// subsequent boots.
 	if err := runMigrations(s.db); err != nil {
 		return nil, err
+	}
+	// Boot recovery (spec section "Orchestrator state machine"): any
+	// bulk_job_chapters rows left in state='fed' from a previous mangarr
+	// process that died mid-tick (OOM, SIGKILL, k8s eviction) get demoted
+	// to 'pending' so the orchestrator re-feeds them. Suwayomi's enqueue
+	// is idempotent, so re-feeding an already-queued chapter is a no-op.
+	if _, err := s.db.Exec(`UPDATE bulk_job_chapters SET state='pending' WHERE state='fed'`); err != nil {
+		return nil, fmt.Errorf("boot recovery: demote fed→pending: %w", err)
 	}
 	return s, nil
 }
@@ -215,10 +228,13 @@ func (s *Store) GetSettings() (model.Settings, error) {
 
 func defaultSettings() model.Settings {
 	return model.Settings{
-		FileMode:     model.ModeHardlink,
-		RenameScheme: "{series}/{series} - Ch.{chapter}.cbz",
-		PollMinutes:  15,
-		LibraryRoots: map[model.ContentType]string{},
+		FileMode:               model.ModeHardlink,
+		RenameScheme:           "{series}/{series} - Ch.{chapter}.cbz",
+		PollMinutes:            15,
+		LibraryRoots:           map[model.ContentType]string{},
+		BulkMaxInFlight:        5,
+		BulkRefillThreshold:    2,
+		BulkInterBatchDelaySec: 1,
 	}
 }
 
