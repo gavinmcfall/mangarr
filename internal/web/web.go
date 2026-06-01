@@ -289,6 +289,7 @@ func NewHandler(opts HandlerOpts) *Handler {
 	h.mux.HandleFunc("GET /health", h.pageHealth)
 	h.mux.HandleFunc("GET /tasks", h.pageTasks)
 	h.mux.HandleFunc("GET /library", h.pageLibrary)
+	h.mux.HandleFunc("GET /downloads", h.pageDownloads)
 	h.mux.HandleFunc("GET /settings", h.pageSettings)
 	h.mux.HandleFunc("POST /settings", h.saveSettings)
 
@@ -339,6 +340,10 @@ func NewHandler(opts HandlerOpts) *Handler {
 	// pause, resume, delete; resume additionally clears backoff state
 	// so an errored job's next orchestrator tick starts unencumbered.
 	h.mux.HandleFunc("POST /api/downloads/{id}/{action}", h.apiDownloadsAction)
+	// Plan B T6: HTMX 3s-poll fragment for /downloads. Returns just the
+	// <tbody> for outerHTML swap. filter=active (default, excludes
+	// completed) | all (includes everything).
+	h.mux.HandleFunc("GET /api/downloads/list", h.apiDownloadsList)
 
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
@@ -366,7 +371,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // overlaid, ensuring that {{block "content"}} resolves to THAT page's
 // definition rather than whichever happened to be parsed last globally.
 func parsePageTemplates() map[string]*template.Template {
-	pages := []string{"series.html", "preview.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "library.html", "settings.html"}
+	pages := []string{"series.html", "preview.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "library.html", "downloads.html", "settings.html"}
 	// Pages that need the override-rows partial. Listed explicitly so
 	// adding the partial to a new page is a one-line change here, not a
 	// fan-out across the codebase.
@@ -375,6 +380,9 @@ func parsePageTemplates() map[string]*template.Template {
 	withBindingRows := map[string]bool{"settings.html": true}
 	// Pages that need the rule-rows partial (Plan B Classification Rules card).
 	withRuleRows := map[string]bool{"settings.html": true}
+	// Pages that need the bulk-row partial (Plan B T6 Downloads dashboard
+	// renders one <tr> per BulkJob via the shared bulk-row partial).
+	withBulkRow := map[string]bool{"downloads.html": true}
 	m := make(map[string]*template.Template, len(pages)+1)
 	for _, name := range pages {
 		// Parse base + the specific page. This gives each page its own
@@ -388,6 +396,9 @@ func parsePageTemplates() map[string]*template.Template {
 		}
 		if withRuleRows[name] {
 			files = append(files, "templates/rule-rows.html")
+		}
+		if withBulkRow[name] {
+			files = append(files, "templates/bulk-row.html")
 		}
 		t := template.Must(
 			template.New("").Funcs(templateFuncs()).ParseFS(assets, files...),
@@ -425,6 +436,18 @@ func parsePageTemplates() map[string]*template.Template {
 	// fragment for the /downloads dashboard.
 	m["bulk-row"] = template.Must(
 		template.New("").Funcs(templateFuncs()).ParseFS(assets,
+			"templates/bulk-row.html",
+		),
+	)
+	// Plan B T6: standalone <tbody>-fragment template for the /downloads
+	// 3s HTMX poll. Parses downloads.html (which defines "downloads-rows")
+	// together with bulk-row.html so the per-row partial is reachable.
+	// The fragment endpoint calls ExecuteTemplate(w, "downloads-rows", ...)
+	// to emit just the tbody — the page render still uses the page set
+	// above to wrap the same tbody in base.html chrome.
+	m["downloads-rows"] = template.Must(
+		template.New("").Funcs(templateFuncs()).ParseFS(assets,
+			"templates/downloads.html",
 			"templates/bulk-row.html",
 		),
 	)
@@ -1112,6 +1135,87 @@ func (h *Handler) mostRecentBulkJobStatus(mangaID int64) string {
 		return ""
 	}
 	return string(newest.Status)
+}
+
+// downloadsPageData drives the /downloads dashboard. Page is consumed by
+// base.html's sidebar active-link highlight (T9). Filter is "active"
+// (default — excludes completed) or "all". Jobs holds one bulkRowViewT
+// per BulkJob the filter accepted.
+type downloadsPageData struct {
+	Page   string
+	Filter string
+	Jobs   []bulkRowViewT
+}
+
+// pageDownloads renders /downloads. The page paints the full chrome
+// once; the <tbody> then self-polls /api/downloads/list every 3s via
+// HTMX outerHTML swap, which keeps the polling attributes alive on
+// each tick because apiDownloadsList re-emits the same <tbody>.
+func (h *Handler) pageDownloads(w http.ResponseWriter, r *http.Request) {
+	filter := r.URL.Query().Get("filter")
+	if filter != "all" {
+		filter = "active"
+	}
+	jobs, err := h.collectBulkJobsForFilter(filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.render(w, "downloads.html", downloadsPageData{
+		Page:   "downloads",
+		Filter: filter,
+		Jobs:   jobs,
+	})
+}
+
+// apiDownloadsList is the 3s-poll fragment endpoint. Renders just the
+// <tbody> (via the "downloads-rows" block) so the HTMX outerHTML swap
+// replaces the existing tbody in-place. The block re-emits the same
+// hx-get/hx-trigger attributes so subsequent ticks keep polling.
+func (h *Handler) apiDownloadsList(w http.ResponseWriter, r *http.Request) {
+	filter := r.URL.Query().Get("filter")
+	if filter != "all" {
+		filter = "active"
+	}
+	jobs, err := h.collectBulkJobsForFilter(filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := h.renderTemplate(w, "downloads-rows", "downloads-rows", downloadsPageData{
+		Page:   "downloads",
+		Filter: filter,
+		Jobs:   jobs,
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// collectBulkJobsForFilter pulls every BulkJob from the store, applies
+// the active|all filter, and maps to the bulkRowViewT shared with T4's
+// per-row HTMX swap so both code paths render identical row markup.
+// Active = running|paused|pending|errored (anything an operator might
+// want to intervene on). All = every row including completed.
+func (h *Handler) collectBulkJobsForFilter(filter string) ([]bulkRowViewT, error) {
+	jobs, err := h.store.ListBulkJobs("")
+	if err != nil {
+		return nil, err
+	}
+	active := map[model.BulkJobStatus]bool{
+		model.BulkJobRunning: true,
+		model.BulkJobPaused:  true,
+		model.BulkJobPending: true,
+		model.BulkJobErrored: true,
+	}
+	rows := make([]bulkRowViewT, 0, len(jobs))
+	for _, j := range jobs {
+		if filter == "active" && !active[j.Status] {
+			continue
+		}
+		rows = append(rows, bulkRowView(j))
+	}
+	return rows, nil
 }
 
 func (h *Handler) pageHealth(w http.ResponseWriter, r *http.Request) {
