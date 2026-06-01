@@ -50,6 +50,12 @@ import (
 // credentials after a re-authenticate + retry cycle.
 var ErrAuth = errors.New("suwayomi: authentication failed")
 
+// ErrHTTP429 is returned when Suwayomi (or an upstream rate-limiter in
+// front of it) returns HTTP 429 Too Many Requests. The bulk-download
+// orchestrator uses errors.Is(err, ErrHTTP429) to drive its backoff
+// ladder, so this sentinel is part of the public contract.
+var ErrHTTP429 = errors.New("suwayomi returned HTTP 429")
+
 // maxAuthAttempts caps the doJSON retry loop: one initial attempt plus
 // one re-auth-and-retry on a 401. Two consecutive 401s surface as
 // ErrAuth.
@@ -564,6 +570,134 @@ func (c *Client) EnqueueChapterDownloads(ctx context.Context, chapterIDs []int64
 	return nil
 }
 
+// DownloadQueueEntry is one row in Suwayomi's download queue, as
+// returned by the GraphQL `downloadStatus { queue { ... } }` selection.
+//
+// State is the upstream queue-entry state and is one of (case-sensitive,
+// per Suwayomi's DownloaderState enum): QUEUED, DOWNLOADING, FINISHED,
+// ERROR. The bulk-download orchestrator only treats QUEUED and
+// DOWNLOADING as in-flight; everything else is considered terminal.
+type DownloadQueueEntry struct {
+	ChapterID int64
+	MangaID   int64
+	SourceID  string
+	State     string
+	Progress  float64
+	Tries     int
+}
+
+// DownloadStatus mirrors Suwayomi's GraphQL `downloadStatus` payload.
+// State is the global downloader state ("STARTED" or "STOPPED"); Queue
+// holds one entry per in-flight or recently-terminal chapter download.
+type DownloadStatus struct {
+	State string
+	Queue []DownloadQueueEntry
+}
+
+// GetDownloadStatus fetches Suwayomi's current downloader state and full
+// queue snapshot. It executes a single GraphQL query against /api/graphql
+// and translates the response into the typed shapes above so callers
+// don't repeat the same selection-set boilerplate.
+//
+// Callers wanting just a per-source in-flight count should use
+// InFlightCountForSource, which folds this query and the count in one
+// place.
+func (c *Client) GetDownloadStatus(ctx context.Context) (DownloadStatus, error) {
+	const query = `query DownloadStatus {
+		downloadStatus {
+			state
+			queue {
+				chapter { id mangaId }
+				manga { source { id } }
+				state
+				progress
+				tries
+			}
+		}
+	}`
+	body, err := json.Marshal(map[string]any{"query": query})
+	if err != nil {
+		return DownloadStatus{}, fmt.Errorf("suwayomi downloadStatus marshal: %w", err)
+	}
+	raw, err := c.doGraphQL(ctx, body)
+	if err != nil {
+		return DownloadStatus{}, err
+	}
+	var out struct {
+		Data struct {
+			DownloadStatus struct {
+				State string `json:"state"`
+				Queue []struct {
+					Chapter struct {
+						ID      int64 `json:"id"`
+						MangaID int64 `json:"mangaId"`
+					} `json:"chapter"`
+					Manga struct {
+						Source *struct {
+							ID string `json:"id"`
+						} `json:"source"`
+					} `json:"manga"`
+					State    string  `json:"state"`
+					Progress float64 `json:"progress"`
+					Tries    int     `json:"tries"`
+				} `json:"queue"`
+			} `json:"downloadStatus"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return DownloadStatus{}, fmt.Errorf("suwayomi downloadStatus decode: %w", err)
+	}
+	if len(out.Errors) > 0 {
+		return DownloadStatus{}, fmt.Errorf("suwayomi downloadStatus graphql: %s", out.Errors[0].Message)
+	}
+
+	status := DownloadStatus{
+		State: out.Data.DownloadStatus.State,
+		Queue: make([]DownloadQueueEntry, 0, len(out.Data.DownloadStatus.Queue)),
+	}
+	for _, q := range out.Data.DownloadStatus.Queue {
+		sourceID := ""
+		if q.Manga.Source != nil {
+			sourceID = q.Manga.Source.ID
+		}
+		status.Queue = append(status.Queue, DownloadQueueEntry{
+			ChapterID: q.Chapter.ID,
+			MangaID:   q.Chapter.MangaID,
+			SourceID:  sourceID,
+			State:     q.State,
+			Progress:  q.Progress,
+			Tries:     q.Tries,
+		})
+	}
+	return status, nil
+}
+
+// InFlightCountForSource returns the number of download-queue entries
+// belonging to the given Suwayomi source that are still in-flight
+// (state ∈ {QUEUED, DOWNLOADING}). The orchestrator uses this to gate
+// per-source concurrency without re-implementing the queue walk.
+//
+// Returns 0 (no error) when the source has no in-flight entries.
+func (c *Client) InFlightCountForSource(ctx context.Context, sourceID string) (int, error) {
+	status, err := c.GetDownloadStatus(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, e := range status.Queue {
+		if e.SourceID != sourceID {
+			continue
+		}
+		if e.State == "QUEUED" || e.State == "DOWNLOADING" {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // doGraphQL POSTs a pre-marshalled GraphQL request body to /api/graphql
 // and returns the raw response bytes. It runs through doJSON so auth,
 // 401-retry, and error wrapping are handled the same as REST endpoints.
@@ -693,6 +827,14 @@ func (c *Client) tryOnce(req *http.Request, method, path string, out any) (bool,
 		io.Copy(io.Discard, resp.Body)
 		c.auth.Invalidate()
 		return false, nil
+	}
+	// HTTP 429 is surfaced as a typed sentinel so the bulk-download
+	// orchestrator can errors.Is(err, ErrHTTP429) to drive the backoff
+	// ladder. Must precede the generic non-2xx path or it would be
+	// swallowed by the generic "status %d" wrap.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		io.Copy(io.Discard, resp.Body)
+		return true, fmt.Errorf("%w", ErrHTTP429)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		io.Copy(io.Discard, resp.Body)

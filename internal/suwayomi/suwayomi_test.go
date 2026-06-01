@@ -508,3 +508,90 @@ func TestEnqueueChapterDownloadsEmptyIsNoOp(t *testing.T) {
 		t.Errorf("empty batch should not error: %v", err)
 	}
 }
+
+// ----- downloadStatus / InFlightCountForSource / 429 -----
+
+func TestGetDownloadStatusGroupsBySource(t *testing.T) {
+	// Stub returns 4 queue entries: 3 on source "42" (2 QUEUED + 1
+	// DOWNLOADING, all in-flight) + 1 on source "99" (DOWNLOADING).
+	// InFlightCountForSource must count by source AND in-flight state,
+	// and must return 0 for a source not present in the queue.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/graphql" {
+			handlerErr(t, w, "want /api/graphql, got %s", r.URL.Path)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"data": {
+				"downloadStatus": {
+					"state": "STARTED",
+					"queue": [
+						{"chapter":{"id":1,"mangaId":10},"manga":{"source":{"id":"42"}},"state":"QUEUED","progress":0.0,"tries":0},
+						{"chapter":{"id":2,"mangaId":10},"manga":{"source":{"id":"42"}},"state":"QUEUED","progress":0.0,"tries":0},
+						{"chapter":{"id":3,"mangaId":11},"manga":{"source":{"id":"42"}},"state":"DOWNLOADING","progress":0.5,"tries":1},
+						{"chapter":{"id":4,"mangaId":20},"manga":{"source":{"id":"99"}},"state":"DOWNLOADING","progress":0.25,"tries":0}
+					]
+				}
+			}
+		}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	ctx := context.Background()
+
+	if got, err := c.InFlightCountForSource(ctx, "42"); err != nil || got != 3 {
+		t.Errorf("InFlightCountForSource(42) = (%d, %v); want (3, nil)", got, err)
+	}
+	if got, err := c.InFlightCountForSource(ctx, "99"); err != nil || got != 1 {
+		t.Errorf("InFlightCountForSource(99) = (%d, %v); want (1, nil)", got, err)
+	}
+	if got, err := c.InFlightCountForSource(ctx, "404"); err != nil || got != 0 {
+		t.Errorf("InFlightCountForSource(404) = (%d, %v); want (0, nil)", got, err)
+	}
+
+	// Also confirm GetDownloadStatus surfaces the full queue with all
+	// fields decoded — the orchestrator may grow finer-grained checks
+	// later and we don't want the decoder to silently drop fields.
+	status, err := c.GetDownloadStatus(ctx)
+	if err != nil {
+		t.Fatalf("GetDownloadStatus: %v", err)
+	}
+	if status.State != "STARTED" {
+		t.Errorf("State = %q; want STARTED", status.State)
+	}
+	if len(status.Queue) != 4 {
+		t.Fatalf("Queue len = %d; want 4", len(status.Queue))
+	}
+	// Spot-check the DOWNLOADING entry on source 42 for full decode.
+	var dl DownloadQueueEntry
+	for _, e := range status.Queue {
+		if e.ChapterID == 3 {
+			dl = e
+		}
+	}
+	if dl.MangaID != 11 || dl.SourceID != "42" || dl.State != "DOWNLOADING" || dl.Progress != 0.5 || dl.Tries != 1 {
+		t.Errorf("queue[chapterId=3] = %+v; want MangaID=11 SourceID=42 State=DOWNLOADING Progress=0.5 Tries=1", dl)
+	}
+}
+
+func TestSuwayomiHTTP429ReturnsTypedError(t *testing.T) {
+	// Stub returns HTTP 429 for every request. The doJSON helper must
+	// translate this into ErrHTTP429 so callers using
+	// errors.Is(err, ErrHTTP429) — notably the bulk-download backoff
+	// ladder — can branch on it without parsing error strings.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	_, err := c.GetDownloadStatus(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrHTTP429) {
+		t.Errorf("errors.Is(err, ErrHTTP429) = false; err = %v", err)
+	}
+}
