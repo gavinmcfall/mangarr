@@ -150,6 +150,18 @@ type Settings struct {
 	// is left untouched on the settings row so a pre-v2 rollback can still
 	// read it.
 	SuwayomiCategoryBindings map[int64]int64 `json:"suwayomi_category_bindings,omitempty"`
+
+	// BulkMaxInFlight is the per-provider cap on chapters concurrently in
+	// flight via Suwayomi's queue. The bulk-downloader orchestrator never
+	// feeds new chapters when the in-flight count exceeds this. Default 5.
+	BulkMaxInFlight int `json:"bulk_max_in_flight"`
+	// BulkRefillThreshold is the in-flight count at or below which the
+	// orchestrator feeds the next batch. Default 2.
+	BulkRefillThreshold int `json:"bulk_refill_threshold"`
+	// BulkInterBatchDelaySec is a courtesy sleep (in seconds) the
+	// orchestrator inserts between feeding batches, on top of Suwayomi's
+	// own per-chapter delay. Default 1.
+	BulkInterBatchDelaySec int `json:"bulk_inter_batch_delay_sec"`
 }
 
 // Binding is one library destination the user has defined. Replaces the
