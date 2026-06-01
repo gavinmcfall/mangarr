@@ -4,10 +4,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
 )
+
+// bulkPreview is the per-manga preview row returned by apiBulkCreate
+// when confirm=0. The JSON shape is preserved from Plan A T13 (scripted
+// callers without HX-Request still receive it verbatim); promoting it
+// from an inline struct to file scope lets renderBulkConfirmModal
+// aggregate it for the HTMX confirmation modal (Plan B T3).
+type bulkPreview struct {
+	MangaID    int64  `json:"manga_id"`
+	Title      string `json:"title"`
+	SourceID   string `json:"source_id"`
+	SourceName string `json:"source_name"`
+	Missing    int    `json:"missing"`
+}
 
 // apiBulkJobs handles GET /api/bulk/jobs. Returns a JSON array of all
 // bulk jobs, optionally filtered by ?status=<running|paused|...>.
@@ -171,14 +185,7 @@ func (h *Handler) apiBulkCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	confirm := r.FormValue("confirm") == "1"
 
-	type preview struct {
-		MangaID    int64  `json:"manga_id"`
-		Title      string `json:"title"`
-		SourceID   string `json:"source_id"`
-		SourceName string `json:"source_name"`
-		Missing    int    `json:"missing"`
-	}
-	var previews []preview
+	var previews []bulkPreview
 
 	for _, mIDStr := range mangaIDStrs {
 		mID, err := strconv.ParseInt(mIDStr, 10, 64)
@@ -202,7 +209,7 @@ func (h *Handler) apiBulkCreate(w http.ResponseWriter, r *http.Request) {
 				missingIDs = append(missingIDs, c.ID)
 			}
 		}
-		previews = append(previews, preview{
+		previews = append(previews, bulkPreview{
 			MangaID:    mID,
 			Title:      entry.Title,
 			SourceID:   entry.SourceID,
@@ -237,8 +244,85 @@ func (h *Handler) apiBulkCreate(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/downloads", http.StatusSeeOther)
 		return
 	}
+	// Plan B T3: HTMX-driven submits from /library's form get the
+	// confirmation modal as HTML. Scripted (non-HTMX) callers still get
+	// the JSON preview from Plan A T13 — the HX-Request header is the
+	// branch point and is added automatically by HTMX.
+	if r.Header.Get("HX-Request") == "true" {
+		h.renderBulkConfirmModal(w, previews)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(previews)
+}
+
+// renderBulkConfirmModal collapses the preview slice into the shape
+// expected by bulk-confirm.html: per-provider aggregation (series +
+// chapter counts grouped by SourceName, falling back to SourceID when
+// the displayName is empty), running totals, and an .Empty flag so the
+// template can branch to empty-state copy when every selected series
+// is already fully downloaded.
+//
+// Providers are sorted by Name for stable rendering — pin-style tests
+// rely on deterministic order, and the operator-facing list reads
+// better alphabetised than in arbitrary map-iteration order.
+func (h *Handler) renderBulkConfirmModal(w http.ResponseWriter, previews []bulkPreview) {
+	type providerRow struct {
+		Name         string
+		SeriesCount  int
+		ChapterCount int
+	}
+	byProvider := map[string]*providerRow{}
+	totalChapters := 0
+	seriesCount := 0
+	mangaIDs := make([]int64, 0, len(previews))
+	for _, p := range previews {
+		mangaIDs = append(mangaIDs, p.MangaID)
+		if p.Missing == 0 {
+			// Don't include zero-missing series in the per-provider
+			// breakdown; if every selection is zero-missing the .Empty
+			// branch below renders the "fully downloaded" copy.
+			continue
+		}
+		seriesCount++
+		totalChapters += p.Missing
+		key := p.SourceName
+		if key == "" {
+			key = p.SourceID
+		}
+		if pr, ok := byProvider[key]; ok {
+			pr.SeriesCount++
+			pr.ChapterCount += p.Missing
+		} else {
+			byProvider[key] = &providerRow{Name: key, SeriesCount: 1, ChapterCount: p.Missing}
+		}
+	}
+	providers := make([]providerRow, 0, len(byProvider))
+	for _, pr := range byProvider {
+		providers = append(providers, *pr)
+	}
+	sort.Slice(providers, func(i, j int) bool { return providers[i].Name < providers[j].Name })
+
+	data := struct {
+		Empty         bool
+		TotalChapters int
+		SeriesCount   int
+		ProviderCount int
+		Providers     []providerRow
+		MangaIDs      []int64
+	}{
+		Empty:         seriesCount == 0,
+		TotalChapters: totalChapters,
+		SeriesCount:   seriesCount,
+		ProviderCount: len(providers),
+		Providers:     providers,
+		MangaIDs:      mangaIDs,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := h.renderTemplate(w, "bulk-confirm", "bulk-confirm", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
 // apiDownloadsAction handles POST /api/downloads/{id}/{action} where

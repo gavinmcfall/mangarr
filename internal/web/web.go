@@ -401,6 +401,15 @@ func parsePageTemplates() map[string]*template.Template {
 			"templates/library-row-count.html",
 		),
 	)
+	// Plan B T3: standalone confirmation-modal fragment returned by
+	// POST /api/bulk when HX-Request: true. HTMX-driven submits from
+	// /library swap this HTML into #confirm-modal; scripted callers
+	// still get the JSON preview from Plan A T13.
+	m["bulk-confirm"] = template.Must(
+		template.New("").Funcs(templateFuncs()).ParseFS(assets,
+			"templates/bulk-confirm.html",
+		),
+	)
 	return m
 }
 

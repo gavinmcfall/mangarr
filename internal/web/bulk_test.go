@@ -238,3 +238,82 @@ func TestAPIDownloadsDeleteRemovesJob(t *testing.T) {
 		t.Errorf("expected DeleteBulkJob(1); got %+v", st.bulkDeletes)
 	}
 }
+
+// TestAPIBulkCreatePreviewReturnsHTMLModalOnHXRequest: when the form
+// arrives with HX-Request: true and confirm=0, the handler renders the
+// confirmation modal HTML instead of JSON. Pin: per-provider grouping
+// (both series share sourceId 42 → 1 provider, 2 series, 8 chapters),
+// hidden inputs preserve the manga_ids for the confirm POST, and no
+// job is created during the preview.
+func TestAPIBulkCreatePreviewReturnsHTMLModalOnHXRequest(t *testing.T) {
+	h, st, sw := newTestHandler()
+	st.libraryCache = map[int64]model.LibraryCacheEntry{
+		7: {MangaID: 7, Title: "One Piece", SourceID: "42", SourceName: "MangaDex EN"},
+		8: {MangaID: 8, Title: "SOLO LEVELING", SourceID: "42", SourceName: "MangaDex EN"},
+	}
+	sw.chaptersForManga = map[int64][]int64{
+		7: {100, 101, 102},
+		8: {200, 201, 202, 203, 204},
+	}
+
+	form := url.Values{}
+	form.Add("manga_id", "7")
+	form.Add("manga_id", "8")
+	form.Set("confirm", "0")
+	req := httptest.NewRequest(http.MethodPost, "/api/bulk", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"You're about to queue <b>8 chapters</b>",
+		"<b>2 series</b>",
+		"<b>1 provider</b>",
+		"MangaDex EN",
+		`name="manga_id" value="7"`,
+		`name="manga_id" value="8"`,
+		`name="confirm" value="1"`,
+		"Queue downloads",
+		"Cancel",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("modal HTML missing %q. Body:\n%s", want, body)
+		}
+	}
+	if len(st.savedBulkJobs) != 0 {
+		t.Errorf("modal preview must NOT create jobs; got %d", len(st.savedBulkJobs))
+	}
+}
+
+// TestAPIBulkCreatePreviewModalSkipsZeroMissingSeries: when every
+// selected manga is already fully downloaded, the modal renders the
+// empty-state copy from the spec's "Empty states" section instead of
+// the queue-confirmation copy.
+func TestAPIBulkCreatePreviewModalSkipsZeroMissingSeries(t *testing.T) {
+	h, st, sw := newTestHandler()
+	st.libraryCache = map[int64]model.LibraryCacheEntry{
+		7: {MangaID: 7, Title: "Naruto", SourceID: "42", SourceName: "MangaDex EN"},
+	}
+	sw.chaptersForManga = map[int64][]int64{7: nil}
+
+	form := url.Values{}
+	form.Add("manga_id", "7")
+	form.Set("confirm", "0")
+	req := httptest.NewRequest(http.MethodPost, "/api/bulk", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "All selected series are fully downloaded") {
+		t.Errorf("expected empty-state modal copy; got:\n%s", rec.Body.String())
+	}
+}
