@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
 )
@@ -336,7 +337,11 @@ func (h *Handler) renderBulkConfirmModal(w http.ResponseWriter, previews []bulkP
 // from Migration 4 (store.Open enables PRAGMA foreign_keys=ON so it fires).
 //
 // Returns:
-//   - 200 on success (no body — clients reload the list via GET /api/bulk/jobs)
+//   - On HX-Request: true (Plan B T4) — 200 with one <tr> (pause/resume re-read
+//     the job and render bulk-row.html; delete returns "<tr></tr>" so HTMX's
+//     outerHTML swap removes the row visually).
+//   - Otherwise — 200 no-body (Plan A T14: scripted callers reload via
+//     GET /api/bulk/jobs).
 //   - 400 on unparseable {id} or unknown {action}
 //   - 500 on store errors
 func (h *Handler) apiDownloadsAction(w http.ResponseWriter, r *http.Request) {
@@ -373,5 +378,77 @@ func (h *Handler) apiDownloadsAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown action: "+action, http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	// Plan A T14 branch — scripted (non-HTMX) callers get 200-no-body and
+	// reload via GET /api/bulk/jobs.
+	if r.Header.Get("HX-Request") != "true" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	// Plan B T4 branch — HTMX swap. Delete has no row to render; return an
+	// empty <tr> so the outerHTML swap removes the row visually.
+	if action == "delete" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<tr></tr>"))
+		return
+	}
+	// pause/resume — re-read the job (the in-place status flip is visible
+	// here) and render the updated <tr>.
+	job, err := h.store.GetBulkJob(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.renderBulkRow(w, job)
+}
+
+// renderBulkRow renders a single <tr> for the /downloads queue dashboard.
+// Used by both the per-action HTMX swaps (pause/resume) and — once T6
+// lands — the 3s HTMX poll that refreshes every row in the table.
+func (h *Handler) renderBulkRow(w http.ResponseWriter, job model.BulkJob) {
+	view := bulkRowView(job)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := h.renderTemplate(w, "bulk-row", "bulk-row", view); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+// bulkRowViewT wraps a BulkJob with computed display fields (ProgressPct,
+// LastUpdateHuman) so the template stays logic-free.
+type bulkRowViewT struct {
+	ID                int64
+	Title             string
+	SourceName        string
+	Status            model.BulkJobStatus
+	TotalChapters     int
+	CompletedChapters int
+	ProgressPct       int
+	LastUpdateHuman   string
+}
+
+// bulkRowView computes the per-row display fields from a BulkJob.
+//
+// ProgressPct is clamped to [0,100] — TotalChapters can legitimately be 0
+// for a freshly-saved job whose chapter rows haven't been counted yet, and
+// CompletedChapters > TotalChapters can briefly happen if completion races
+// the total recount; both cases stay safe by short-circuiting / clamping
+// rather than returning a nonsense percentage.
+func bulkRowView(j model.BulkJob) bulkRowViewT {
+	pct := 0
+	if j.TotalChapters > 0 {
+		pct = (j.CompletedChapters * 100) / j.TotalChapters
+		if pct > 100 {
+			pct = 100
+		}
+	}
+	return bulkRowViewT{
+		ID:                j.ID,
+		Title:             j.Title,
+		SourceName:        j.SourceName,
+		Status:            j.Status,
+		TotalChapters:     j.TotalChapters,
+		CompletedChapters: j.CompletedChapters,
+		ProgressPct:       pct,
+		LastUpdateHuman:   formatAge(time.Now(), j.UpdatedAt),
+	}
 }

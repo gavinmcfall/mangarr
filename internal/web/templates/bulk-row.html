@@ -1,0 +1,30 @@
+{{define "bulk-row"}}
+<tr id="bulk-row-{{.ID}}">
+  <td>{{.Title}}</td>
+  <td class="td-dim">{{.SourceName}}</td>
+  <td><span class="pill pill-{{.Status}}">{{.Status}}</span></td>
+  <td>
+    <div class="bulk-progress">
+      <div class="bulk-progress-bar bulk-progress-{{.Status}}"
+           style="width:{{.ProgressPct}}%"></div>
+      <span class="bulk-progress-text">{{.CompletedChapters}}/{{.TotalChapters}}</span>
+    </div>
+  </td>
+  <td class="td-dim">{{.LastUpdateHuman}}</td>
+  <td class="td-right">
+    {{if eq (printf "%s" .Status) "running"}}
+      <button class="btn-sm btn-secondary" hx-post="/api/downloads/{{.ID}}/pause"
+              hx-target="#bulk-row-{{.ID}}" hx-swap="outerHTML">Pause</button>
+    {{else if eq (printf "%s" .Status) "paused"}}
+      <button class="btn-sm btn-primary" hx-post="/api/downloads/{{.ID}}/resume"
+              hx-target="#bulk-row-{{.ID}}" hx-swap="outerHTML">Resume</button>
+    {{else if eq (printf "%s" .Status) "errored"}}
+      <button class="btn-sm btn-primary" hx-post="/api/downloads/{{.ID}}/resume"
+              hx-target="#bulk-row-{{.ID}}" hx-swap="outerHTML">Resume</button>
+    {{end}}
+    <button class="btn-sm btn-danger" hx-post="/api/downloads/{{.ID}}/delete"
+            hx-target="#bulk-row-{{.ID}}" hx-swap="outerHTML"
+            hx-confirm="Delete this bulk download? Chapters already in Suwayomi's queue will continue but won't be tracked here.">Delete</button>
+  </td>
+</tr>
+{{end}}

@@ -120,6 +120,10 @@ type Store interface {
 	// UpdateBulkJobStatus flips a job's status — used by the
 	// POST /api/downloads/{id}/{pause,resume} actions.
 	UpdateBulkJobStatus(id int64, status model.BulkJobStatus) error
+	// GetBulkJob re-reads a single job by ID — used by Plan B T4's
+	// HX-Request branch in apiDownloadsAction to render the updated
+	// <tr> after pause/resume mutates status.
+	GetBulkJob(id int64) (model.BulkJob, error)
 	// ClearBulkJobBackoff resets backoff_until + consecutive_failures —
 	// invoked from POST /api/downloads/{id}/resume so an errored job
 	// gets a clean slate before the next orchestrator tick.
@@ -408,6 +412,15 @@ func parsePageTemplates() map[string]*template.Template {
 	m["bulk-confirm"] = template.Must(
 		template.New("").Funcs(templateFuncs()).ParseFS(assets,
 			"templates/bulk-confirm.html",
+		),
+	)
+	// Plan B T4: per-row partial returned by POST /api/downloads/{id}/{action}
+	// on HX-Request so HTMX outerHTML-swaps just the affected <tr> after
+	// pause/resume. T6 will reuse this same partial inside the 3s poll
+	// fragment for the /downloads dashboard.
+	m["bulk-row"] = template.Must(
+		template.New("").Funcs(templateFuncs()).ParseFS(assets,
+			"templates/bulk-row.html",
 		),
 	)
 	return m

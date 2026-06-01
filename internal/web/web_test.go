@@ -206,7 +206,28 @@ func (f *fakeStore) SaveLibraryCacheEntry(in model.LibraryCacheEntry) error {
 func (f *fakeStore) UpdateBulkJobStatus(id int64, s model.BulkJobStatus) error {
 	f.bulkStatusUpdates = append(f.bulkStatusUpdates, bulkStatusCall{id, s})
 	f.callOrder = append(f.callOrder, fmt.Sprintf("status:%d:%s", id, s))
+	// Plan B T4: also mutate bulkJobs in-place so a subsequent
+	// GetBulkJob re-read reflects the new status. The append-only
+	// trackers above remain for Plan A T14's assertions; this update
+	// is additive.
+	for i := range f.bulkJobs {
+		if f.bulkJobs[i].ID == id {
+			f.bulkJobs[i].Status = s
+		}
+	}
 	return nil
+}
+
+// GetBulkJob returns a single job by ID — Plan B T4's HX-Request branch
+// in apiDownloadsAction re-reads the row after the status flip so the
+// rendered <tr> reflects the mutation.
+func (f *fakeStore) GetBulkJob(id int64) (model.BulkJob, error) {
+	for _, j := range f.bulkJobs {
+		if j.ID == id {
+			return j, nil
+		}
+	}
+	return model.BulkJob{}, sql.ErrNoRows
 }
 
 func (f *fakeStore) ClearBulkJobBackoff(id int64) error {
