@@ -3,8 +3,10 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
 
@@ -63,5 +65,87 @@ func TestAPILibrarySyncReturns503WhenSuwayomiUnconfigured(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("want 503 when suwayomi nil, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAPILibraryRowMissingReturnsFragment pins the happy path: GET
+// /api/library/{mangaId}/missing returns the 3-cell HTMX fragment with
+// total/downloaded/missing counts and refreshes library_cache so the
+// next read is warm.
+func TestAPILibraryRowMissingReturnsFragment(t *testing.T) {
+	h, st, sw := newTestHandler()
+	st.libraryCache = map[int64]model.LibraryCacheEntry{
+		7: {MangaID: 7, Title: "One Piece", SourceID: "42", SourceName: "MangaDex EN"},
+	}
+	// 3 chapters, 1 downloaded → Missing = 2
+	sw.chaptersForManga = map[int64][]int64{7: {100, 101, 102}}
+	sw.chaptersDownloaded = map[int64]bool{100: true}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/7/missing", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// Asserts the fragment contains the 3 numeric values in cell shape.
+	for _, want := range []string{">3<", ">1<", ">2<"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in fragment body; got:\n%s", want, body)
+		}
+	}
+	// Confirm the cache write happened — counts must persist for the
+	// next page load.
+	got, err := st.GetLibraryCacheEntry(7)
+	if err != nil {
+		t.Fatalf("post-fragment GetLibraryCacheEntry(7) failed: %v", err)
+	}
+	if got.TotalChapters != 3 || got.Downloaded != 1 {
+		t.Errorf("cache not refreshed: total=%d downloaded=%d", got.TotalChapters, got.Downloaded)
+	}
+}
+
+// TestAPILibraryRowMissingReturns404WhenNotInCache pins the orphaned-row
+// branch: a row whose manga isn't in library_cache returns 404 so HTMX
+// swaps a visible "not in cache" indicator rather than blank cells.
+func TestAPILibraryRowMissingReturns404WhenNotInCache(t *testing.T) {
+	h, _, _ := newTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/api/library/999/missing", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d", rec.Code)
+	}
+}
+
+// TestAPILibraryRowMissingReturns400OnBadID pins the invalid-input
+// branch: a non-numeric manga ID returns 400 before any store/Suwayomi
+// roundtrip.
+func TestAPILibraryRowMissingReturns400OnBadID(t *testing.T) {
+	h, _, _ := newTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/api/library/abc/missing", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", rec.Code)
+	}
+}
+
+// TestAPILibraryRowMissingReturns503WhenSuwayomiUnconfigured pins the
+// "Suwayomi not wired" branch — even with a cached library entry, the
+// handler can't fetch counts so it surfaces a clean 503.
+func TestAPILibraryRowMissingReturns503WhenSuwayomiUnconfigured(t *testing.T) {
+	st := &fakeStore{
+		libraryCache: map[int64]model.LibraryCacheEntry{
+			7: {MangaID: 7, Title: "One Piece"},
+		},
+	}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+	req := httptest.NewRequest(http.MethodGet, "/api/library/7/missing", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

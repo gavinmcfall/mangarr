@@ -322,6 +322,10 @@ func NewHandler(opts HandlerOpts) *Handler {
 	// gap where library_cache was never written, causing POST /api/bulk
 	// to 400 on every request with "manga_id not in library cache".
 	h.mux.HandleFunc("POST /api/library/sync", h.apiLibrarySync)
+	// Plan B T2: per-row count fragment for the Library page. Triggered
+	// lazily by HTMX on each row render so the page paints fast and the
+	// per-manga Suwayomi roundtrip is parallelised across N rows.
+	h.mux.HandleFunc("GET /api/library/{mangaId}/missing", h.apiLibraryRowMissing)
 	// Plan A T14: pause/resume/delete a bulk job. action is one of
 	// pause, resume, delete; resume additionally clears backoff state
 	// so an errored job's next orchestrator tick starts unencumbered.
@@ -387,6 +391,14 @@ func parsePageTemplates() map[string]*template.Template {
 	m["override-fragment"] = template.Must(
 		template.New("").Funcs(templateFuncs()).ParseFS(assets,
 			"templates/override-rows.html",
+		),
+	)
+	// Plan B T2: standalone per-row count fragment for the Library page.
+	// HTMX-loaded lazily on each row render so the page paints fast and
+	// per-manga Suwayomi roundtrips are parallelised across the rows.
+	m["library-row-count"] = template.Must(
+		template.New("").Funcs(templateFuncs()).ParseFS(assets,
+			"templates/library-row-count.html",
 		),
 	)
 	return m

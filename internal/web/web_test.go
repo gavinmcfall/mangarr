@@ -228,6 +228,11 @@ func (f *fakeStore) DeleteBulkJob(id int64) error {
 // creation.
 type fakeSuwayomi struct {
 	chaptersForManga map[int64][]int64
+	// Plan B T2: per-chapter isDownloaded flag returned by ListChapters.
+	// Looked up by chapter ID; missing/false entries leave IsDownloaded
+	// at its zero value, which preserves the Plan A T13 behaviour where
+	// every chapter looked undownloaded.
+	chaptersDownloaded map[int64]bool
 	// Plan B T1: library entries returned by ListLibraryWithCategories
 	// (used by POST /api/library/sync). A nil/empty slice models the
 	// "operator has no series in Suwayomi yet" edge case.
@@ -240,7 +245,7 @@ func (f *fakeSuwayomi) ListChapters(_ context.Context, mangaID int64) ([]suwayom
 	}
 	out := make([]suwayomi.Chapter, 0)
 	for _, id := range f.chaptersForManga[mangaID] {
-		out = append(out, suwayomi.Chapter{ID: id, IsDownloaded: false})
+		out = append(out, suwayomi.Chapter{ID: id, IsDownloaded: f.chaptersDownloaded[id]})
 	}
 	return out, nil
 }

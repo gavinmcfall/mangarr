@@ -75,6 +75,74 @@ func (h *Handler) apiLibrarySync(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, `{"synced":%d}`, len(entries))
 }
 
+// apiLibraryRowMissing handles GET /api/library/{mangaId}/missing.
+// Returns an HTMX-swappable 3-cell <td> fragment with Total / Downloaded /
+// Missing counts. Triggered lazily per-row from the Library page so the
+// page paints fast and the per-manga Suwayomi roundtrip is amortised
+// across N parallel HTMX requests.
+//
+// On a successful render the cache is best-effort refreshed with the
+// new counts so subsequent reads are warm. A cache-write error is
+// swallowed: the fragment still rendered correctly, and the next
+// request will simply re-roundtrip.
+//
+// Returns:
+//   - 400 on an unparseable mangaId path segment
+//   - 404 when the manga isn't in library_cache (HTMX swaps a visible
+//     "not in cache" indicator rather than blank cells)
+//   - 503 when Suwayomi isn't configured
+//   - 502 on a Suwayomi error
+//   - 200 with the rendered fragment on success
+func (h *Handler) apiLibraryRowMissing(w http.ResponseWriter, r *http.Request) {
+	mIDStr := r.PathValue("mangaId")
+	mID, err := strconv.ParseInt(mIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid mangaId", http.StatusBadRequest)
+		return
+	}
+	entry, err := h.store.GetLibraryCacheEntry(mID)
+	if err != nil {
+		http.Error(w, "not in library cache", http.StatusNotFound)
+		return
+	}
+	if h.suwayomi == nil {
+		http.Error(w, "suwayomi client not configured", http.StatusServiceUnavailable)
+		return
+	}
+	chapters, err := h.suwayomi.ListChapters(r.Context(), mID)
+	if err != nil {
+		http.Error(w, "suwayomi list chapters: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	total := len(chapters)
+	downloaded := 0
+	for _, c := range chapters {
+		if c.IsDownloaded {
+			downloaded++
+		}
+	}
+	missing := total - downloaded
+
+	// Best-effort cache refresh — preserve Title/SourceID/SourceName from
+	// the existing entry, overwrite only the count fields. A write error
+	// is swallowed: the fragment rendered fine, the next request will
+	// simply re-roundtrip and try again.
+	entry.TotalChapters = total
+	entry.Downloaded = downloaded
+	_ = h.store.SaveLibraryCacheEntry(entry)
+
+	data := struct {
+		Total      int
+		Downloaded int
+		Missing    int
+	}{total, downloaded, missing}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := h.renderTemplate(w, "library-row-count", "library-row-count", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
 // apiBulkCreate handles POST /api/bulk. Creates one BulkJob per manga_id
 // from the multi-select form, populating chapter rows from Suwayomi's
 // ListChapters filtered to isDownloaded=false. Series with zero missing
