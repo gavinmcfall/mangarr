@@ -193,6 +193,32 @@ func (s *Store) UpdateBulkJobChapterState(jobID, chapterID int64, state model.Bu
 	return nil
 }
 
+// UpdateBulkJobBackoff sets backoff_until + consecutive_failures + last_error
+// in one statement. Used by the orchestrator on each ladder rung.
+func (s *Store) UpdateBulkJobBackoff(jobID int64, until time.Time, consecFailures int, lastError string) error {
+	_, err := s.db.Exec(`UPDATE bulk_jobs SET
+		backoff_until = ?, consecutive_failures = ?, last_error = ?,
+		updated_at = strftime('%s','now')
+	WHERE id = ?`, until.Unix(), consecFailures, lastError, jobID)
+	if err != nil {
+		return fmt.Errorf("UpdateBulkJobBackoff: %w", err)
+	}
+	return nil
+}
+
+// ClearBulkJobBackoff resets backoff_until + consecutive_failures + last_error
+// on a successful feed.
+func (s *Store) ClearBulkJobBackoff(jobID int64) error {
+	_, err := s.db.Exec(`UPDATE bulk_jobs SET
+		backoff_until = NULL, consecutive_failures = 0, last_error = '',
+		updated_at = strftime('%s','now')
+	WHERE id = ?`, jobID)
+	if err != nil {
+		return fmt.Errorf("ClearBulkJobBackoff: %w", err)
+	}
+	return nil
+}
+
 // DeleteBulkJob removes a job. Chapter rows cascade via the FK; the
 // store's Open() enables `PRAGMA foreign_keys = ON` so the ON DELETE
 // CASCADE clause from Migration 4 actually fires.

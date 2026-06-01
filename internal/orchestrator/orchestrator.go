@@ -8,6 +8,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"time"
 
@@ -22,6 +23,8 @@ type Store interface {
 	ListBulkJobChapters(jobID int64, state model.BulkChapterState) ([]model.BulkJobChapter, error)
 	UpdateBulkJobChapterState(jobID, chapterID int64, state model.BulkChapterState) error
 	UpdateBulkJobStatus(id int64, status model.BulkJobStatus) error
+	UpdateBulkJobBackoff(jobID int64, until time.Time, consecFailures int, lastError string) error
+	ClearBulkJobBackoff(jobID int64) error
 	GetSettings() (model.Settings, error)
 }
 
@@ -150,11 +153,49 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 			ids[i] = pending[i].ChapterID
 		}
 		if err := o.suwayomi.EnqueueChapterDownloads(ctx, ids); err != nil {
-			continue // backoff handling lands in Task 11
+			if errors.Is(err, suwayomi.ErrHTTP429) {
+				next := job.ConsecutiveFailures + 1
+				until, terminal := backoffFor(next, now)
+				if terminal {
+					// Task 12 handles this — for now, set last_error
+					// and let consecutive_failures climb.
+				}
+				_ = o.store.UpdateBulkJobBackoff(job.ID, until, next, "suwayomi 429")
+			}
+			continue
+		}
+		// Success path: clear any prior backoff state.
+		if job.ConsecutiveFailures > 0 {
+			_ = o.store.ClearBulkJobBackoff(job.ID)
 		}
 		for _, cid := range ids {
 			_ = o.store.UpdateBulkJobChapterState(job.ID, cid, model.BulkChapterFed)
 		}
 	}
 	return nil
+}
+
+// backoffFor returns (next backoff_until, terminal). The ladder is:
+//
+//	1st failure → 5s
+//	2nd failure → 15s
+//	3rd failure → 60s
+//	4th failure → 5min
+//	5th failure → terminal (caller marks job errored)
+//
+// Spec section "Backoff ladder" (Plan A).
+func backoffFor(consecFailures int, now time.Time) (time.Time, bool) {
+	switch consecFailures {
+	case 1:
+		return now.Add(5 * time.Second), false
+	case 2:
+		return now.Add(15 * time.Second), false
+	case 3:
+		return now.Add(60 * time.Second), false
+	case 4:
+		return now.Add(5 * time.Minute), false
+	default:
+		// 5th and beyond: terminal.
+		return now, true
+	}
 }

@@ -11,12 +11,14 @@ import (
 
 // fakeStore is the minimum surface Tick needs in this task.
 type fakeStore struct {
-	jobs           []model.BulkJob
-	chaptersByJob  map[int64][]model.BulkJobChapter
-	settings       model.Settings
-	feedHistory    []feedCall
-	statusHistory  []statusCall
-	chapterUpdates []chapterUpdateCall
+	jobs                []model.BulkJob
+	chaptersByJob       map[int64][]model.BulkJobChapter
+	settings            model.Settings
+	feedHistory         []feedCall
+	statusHistory       []statusCall
+	chapterUpdates      []chapterUpdateCall
+	backoffHistory      []backoffCall
+	clearBackoffHistory []int64
 }
 
 type feedCall struct {
@@ -30,6 +32,11 @@ type statusCall struct {
 type chapterUpdateCall struct {
 	jobID, chapterID int64
 	state            model.BulkChapterState
+}
+type backoffCall struct {
+	jobID          int64
+	until          time.Time
+	consecFailures int
 }
 
 func (f *fakeStore) ListBulkJobs(s model.BulkJobStatus) ([]model.BulkJob, error) {
@@ -66,6 +73,16 @@ func (f *fakeStore) UpdateBulkJobChapterState(jobID, chapterID int64, state mode
 
 func (f *fakeStore) UpdateBulkJobStatus(id int64, s model.BulkJobStatus) error {
 	f.statusHistory = append(f.statusHistory, statusCall{id, s})
+	return nil
+}
+
+func (f *fakeStore) UpdateBulkJobBackoff(jobID int64, until time.Time, consecFailures int, lastError string) error {
+	f.backoffHistory = append(f.backoffHistory, backoffCall{jobID, until, consecFailures})
+	return nil
+}
+
+func (f *fakeStore) ClearBulkJobBackoff(jobID int64) error {
+	f.clearBackoffHistory = append(f.clearBackoffHistory, jobID)
 	return nil
 }
 
@@ -244,5 +261,80 @@ func TestTickHonoursBackoffUntil(t *testing.T) {
 	}
 	if len(sw.enqueueHistory) != 0 {
 		t.Errorf("expected NO enqueue while backoff_until is in the future, got %d", len(sw.enqueueHistory))
+	}
+}
+
+type fakeSuwayomi429 struct {
+	fakeSuwayomi
+	failNTimes int
+	called     int
+}
+
+func (f *fakeSuwayomi429) EnqueueChapterDownloads(ctx context.Context, ids []int64) error {
+	f.called++
+	if f.called <= f.failNTimes {
+		return suwayomi.ErrHTTP429
+	}
+	f.enqueueHistory = append(f.enqueueHistory, enqueueCall{chapterIDs: ids})
+	return nil
+}
+func (f *fakeSuwayomi429) ListChapters(ctx context.Context, mangaID int64) ([]suwayomi.Chapter, error) {
+	return nil, nil
+}
+
+func TestTickBackoffLadderProgresses(t *testing.T) {
+	now := time.Now()
+	st := &fakeStore{
+		settings: model.Settings{BulkMaxInFlight: 5, BulkRefillThreshold: 2},
+		jobs: []model.BulkJob{
+			{ID: 1, SourceID: "42", Status: model.BulkJobRunning, CreatedAt: now},
+		},
+		chaptersByJob: map[int64][]model.BulkJobChapter{
+			1: {{JobID: 1, ChapterID: 100, State: model.BulkChapterPending}},
+		},
+	}
+	sw := &fakeSuwayomi429{
+		fakeSuwayomi: fakeSuwayomi{inFlight: map[string]int{}},
+		failNTimes:   1,
+	}
+	o := New(st, sw)
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	// The 429 should have set a backoff_until ~5s in the future.
+	if len(st.backoffHistory) != 1 {
+		t.Fatalf("expected 1 backoff update; got %d", len(st.backoffHistory))
+	}
+	bo := st.backoffHistory[0]
+	if bo.consecFailures != 1 {
+		t.Errorf("consecutive_failures: want 1, got %d", bo.consecFailures)
+	}
+	delta := time.Until(bo.until)
+	if delta < 4*time.Second || delta > 6*time.Second {
+		t.Errorf("backoff ladder 1st rung: want ~5s, got %v", delta)
+	}
+}
+
+func TestTickResetsConsecFailuresOnSuccess(t *testing.T) {
+	now := time.Now()
+	st := &fakeStore{
+		settings: model.Settings{BulkMaxInFlight: 5, BulkRefillThreshold: 2},
+		jobs: []model.BulkJob{
+			{ID: 1, SourceID: "42", Status: model.BulkJobRunning, CreatedAt: now, ConsecutiveFailures: 3},
+		},
+		chaptersByJob: map[int64][]model.BulkJobChapter{
+			1: {{JobID: 1, ChapterID: 100, State: model.BulkChapterPending}},
+		},
+	}
+	sw := &fakeSuwayomi429{
+		fakeSuwayomi: fakeSuwayomi{inFlight: map[string]int{}},
+		failNTimes:   0, // never fail
+	}
+	o := New(st, sw)
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if len(st.clearBackoffHistory) != 1 || st.clearBackoffHistory[0] != 1 {
+		t.Errorf("expected ClearBulkJobBackoff(1) call; got %+v", st.clearBackoffHistory)
 	}
 }
