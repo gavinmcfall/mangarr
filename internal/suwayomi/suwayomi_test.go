@@ -385,6 +385,62 @@ func TestListLibraryWithCategoriesSurfacesGraphQLErrors(t *testing.T) {
 	}
 }
 
+// ----- ListChapters -----
+
+func TestListChaptersForManga(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/graphql" {
+			handlerErr(t, w, "want /api/graphql, got %s", r.URL.Path)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"mangaId":42`) {
+			t.Errorf("query didn't carry mangaId=42; body: %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"data":{"chapters":{"nodes":[
+			{"id":100,"name":"Chapter 1","chapterNumber":1,"isDownloaded":true,"sourceOrder":1},
+			{"id":101,"name":"Chapter 2","chapterNumber":2,"isDownloaded":false,"sourceOrder":2},
+			{"id":102,"name":"Chapter 3","chapterNumber":3,"isDownloaded":false,"sourceOrder":3}
+		]}}}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	chapters, err := c.ListChapters(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("ListChapters: %v", err)
+	}
+	if len(chapters) != 3 {
+		t.Fatalf("want 3 chapters, got %d", len(chapters))
+	}
+	if chapters[0].ID != 100 || !chapters[0].IsDownloaded {
+		t.Errorf("chapter 0 mismatch: %+v", chapters[0])
+	}
+	if chapters[0].Name != "Chapter 1" || chapters[0].ChapterNumber != 1 || chapters[0].SourceOrder != 1 {
+		t.Errorf("chapter 0 fields not populated: %+v", chapters[0])
+	}
+	if chapters[1].IsDownloaded {
+		t.Errorf("chapter 1 should not be downloaded: %+v", chapters[1])
+	}
+	if chapters[2].IsDownloaded {
+		t.Errorf("chapter 2 should not be downloaded: %+v", chapters[2])
+	}
+}
+
+func TestListChaptersSurfacesGraphQLErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"data":{"chapters":{"nodes":[]}},"errors":[{"message":"manga not found"}]}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	_, err := c.ListChapters(context.Background(), 99)
+	if err == nil || !strings.Contains(err.Error(), "manga not found") {
+		t.Fatalf("want graphql error surfaced, got %v", err)
+	}
+}
+
 // ----- sanitiseSegment edge cases -----
 
 func TestSanitiseSegmentEmptyInputReturnsFallback(t *testing.T) {

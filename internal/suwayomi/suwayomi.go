@@ -293,6 +293,16 @@ type Category struct {
 	Order int    `json:"order"`
 }
 
+// Chapter is one chapter row from Suwayomi's GraphQL chapters() query.
+// The fields mirror the upstream selection set used by ListChapters.
+type Chapter struct {
+	ID            int64
+	Name          string
+	ChapterNumber float64
+	IsDownloaded  bool
+	SourceOrder   int
+}
+
 // Manga is one entry in the user's Suwayomi library.
 //
 // SourceID is Suwayomi's numeric source ID encoded as a string (e.g. the
@@ -408,9 +418,13 @@ func (c *Client) ListLibraryWithCategories(ctx context.Context) ([]Manga, error)
 		return nil, fmt.Errorf("suwayomi library marshal: %w", err)
 	}
 
-	var out gqlResp
-	if err := c.doJSON(ctx, http.MethodPost, "/api/graphql", body, &out); err != nil {
+	raw, err := c.doGraphQL(ctx, body)
+	if err != nil {
 		return nil, err
+	}
+	var out gqlResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("suwayomi library decode: %w", err)
 	}
 	if len(out.Errors) > 0 {
 		return nil, fmt.Errorf("suwayomi library graphql: %s", out.Errors[0].Message)
@@ -450,6 +464,90 @@ func (c *Client) ListLibraryWithCategories(ctx context.Context) ([]Manga, error)
 		return strings.ToLower(mangas[i].Title) < strings.ToLower(mangas[j].Title)
 	})
 	return mangas, nil
+}
+
+// ListChapters returns every chapter Suwayomi knows about for the given
+// manga. The result mixes downloaded and not-yet-downloaded chapters;
+// callers filter on Chapter.IsDownloaded as needed.
+//
+// Schema-drift caveat: the query uses `condition: {mangaId: $mangaId}`,
+// matching Suwayomi 1.x. Older or newer instances may use `filter:` with
+// a different shape; adapt the const below if introspection disagrees.
+func (c *Client) ListChapters(ctx context.Context, mangaID int64) ([]Chapter, error) {
+	const query = `query ChaptersForManga($mangaId: Int!) {
+		chapters(condition: {mangaId: $mangaId}) {
+			nodes {
+				id
+				name
+				chapterNumber
+				isDownloaded
+				sourceOrder
+			}
+		}
+	}`
+	body, err := json.Marshal(map[string]any{
+		"query":     query,
+		"variables": map[string]any{"mangaId": mangaID},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("suwayomi chapters marshal: %w", err)
+	}
+
+	raw, err := c.doGraphQL(ctx, body)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Data struct {
+			Chapters struct {
+				Nodes []struct {
+					ID            int64   `json:"id"`
+					Name          string  `json:"name"`
+					ChapterNumber float64 `json:"chapterNumber"`
+					IsDownloaded  bool    `json:"isDownloaded"`
+					SourceOrder   int     `json:"sourceOrder"`
+				} `json:"nodes"`
+			} `json:"chapters"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("suwayomi chapters decode: %w", err)
+	}
+	if len(out.Errors) > 0 {
+		return nil, fmt.Errorf("suwayomi chapters graphql: %s", out.Errors[0].Message)
+	}
+
+	chapters := make([]Chapter, len(out.Data.Chapters.Nodes))
+	for i, n := range out.Data.Chapters.Nodes {
+		chapters[i] = Chapter{
+			ID:            n.ID,
+			Name:          n.Name,
+			ChapterNumber: n.ChapterNumber,
+			IsDownloaded:  n.IsDownloaded,
+			SourceOrder:   n.SourceOrder,
+		}
+	}
+	return chapters, nil
+}
+
+// doGraphQL POSTs a pre-marshalled GraphQL request body to /api/graphql
+// and returns the raw response bytes. It runs through doJSON so auth,
+// 401-retry, and error wrapping are handled the same as REST endpoints.
+//
+// Callers unmarshal the returned bytes themselves so they can declare
+// per-query struct shapes without leaking concrete types into this
+// helper. This is the single GraphQL entry point used by
+// ListLibraryWithCategories, ListChapters, and the bulk-download
+// EnqueueChapterDownloads / GetDownloadStatus methods.
+func (c *Client) doGraphQL(ctx context.Context, body []byte) ([]byte, error) {
+	var raw json.RawMessage
+	if err := c.doJSON(ctx, http.MethodPost, "/api/graphql", body, &raw); err != nil {
+		return nil, err
+	}
+	return []byte(raw), nil
 }
 
 // deriveDownloadDir matches Suwayomi's default downloads layout:
