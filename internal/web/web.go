@@ -110,6 +110,11 @@ type Store interface {
 	// POST /api/bulk uses that "missing entry" signal to reject unknown
 	// manga IDs with HTTP 400.
 	GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry, error)
+	// SaveLibraryCacheEntry upserts (by manga_id) one row in library_cache.
+	// Used by POST /api/library/sync (Plan B T1) to populate the cache from
+	// Suwayomi's library; without this the bulk-create handler 400s with
+	// "manga_id not in library cache" because nothing ever writes the table.
+	SaveLibraryCacheEntry(in model.LibraryCacheEntry) error
 
 	// --- Bulk-download mutation surfaces (Plan A T14) ---
 	// UpdateBulkJobStatus flips a job's status — used by the
@@ -125,11 +130,15 @@ type Store interface {
 }
 
 // SuwayomiClient is the subset of *suwayomi.Client the web package needs.
-// Currently only ListChapters (for POST /api/bulk's per-manga chapter
-// fetch). Plan B will extend with category-list calls for the bulk
-// confirmation modal.
+//
+// ListChapters drives POST /api/bulk's per-manga chapter fetch.
+// ListLibraryWithCategories drives POST /api/library/sync's full-library
+// upsert into library_cache (Plan B T1). The name mirrors *suwayomi.Client's
+// existing method so the production client satisfies the interface
+// implicitly.
 type SuwayomiClient interface {
 	ListChapters(ctx context.Context, mangaID int64) ([]suwayomi.Chapter, error)
+	ListLibraryWithCategories(ctx context.Context) ([]suwayomi.Manga, error)
 }
 
 // Runner can execute one poll pass on demand.
@@ -309,6 +318,10 @@ func NewHandler(opts HandlerOpts) *Handler {
 	// ?status=.
 	h.mux.HandleFunc("GET /api/bulk/jobs", h.apiBulkJobs)
 	h.mux.HandleFunc("POST /api/bulk", h.apiBulkCreate)
+	// Plan B T1: re-sync library_cache from Suwayomi. Closes the Plan A→B
+	// gap where library_cache was never written, causing POST /api/bulk
+	// to 400 on every request with "manga_id not in library cache".
+	h.mux.HandleFunc("POST /api/library/sync", h.apiLibrarySync)
 	// Plan A T14: pause/resume/delete a bulk job. action is one of
 	// pause, resume, delete; resume additionally clears backoff state
 	// so an errored job's next orchestrator tick starts unencumbered.

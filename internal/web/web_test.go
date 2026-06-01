@@ -50,6 +50,10 @@ type fakeStore struct {
 	bulkStatusUpdates []bulkStatusCall
 	bulkClearBackoff  []int64
 	bulkDeletes       []int64
+	// Plan B T1: library_cache writes (POST /api/library/sync). Append-only
+	// so tests can assert ordering matches the slice the Suwayomi client
+	// returned.
+	savedLibraryEntries []model.LibraryCacheEntry
 	// callOrder records the sequence of Store mutations for tests that
 	// pin ordering invariants (e.g. "ClearBulkJobBackoff must run BEFORE
 	// UpdateBulkJobStatus on resume from errored"). Append-only.
@@ -185,6 +189,18 @@ func (f *fakeStore) GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry
 	return model.LibraryCacheEntry{}, sql.ErrNoRows
 }
 
+// SaveLibraryCacheEntry appends the entry to savedLibraryEntries (for
+// ordering assertions) and upserts into libraryCache (so subsequent
+// GetLibraryCacheEntry calls see the write).
+func (f *fakeStore) SaveLibraryCacheEntry(in model.LibraryCacheEntry) error {
+	f.savedLibraryEntries = append(f.savedLibraryEntries, in)
+	if f.libraryCache == nil {
+		f.libraryCache = map[int64]model.LibraryCacheEntry{}
+	}
+	f.libraryCache[in.MangaID] = in
+	return nil
+}
+
 // --- Plan A T14: pause/resume/delete mutation surfaces ---
 
 func (f *fakeStore) UpdateBulkJobStatus(id int64, s model.BulkJobStatus) error {
@@ -212,6 +228,10 @@ func (f *fakeStore) DeleteBulkJob(id int64) error {
 // creation.
 type fakeSuwayomi struct {
 	chaptersForManga map[int64][]int64
+	// Plan B T1: library entries returned by ListLibraryWithCategories
+	// (used by POST /api/library/sync). A nil/empty slice models the
+	// "operator has no series in Suwayomi yet" edge case.
+	libraryEntries []suwayomi.Manga
 }
 
 func (f *fakeSuwayomi) ListChapters(_ context.Context, mangaID int64) ([]suwayomi.Chapter, error) {
@@ -223,6 +243,15 @@ func (f *fakeSuwayomi) ListChapters(_ context.Context, mangaID int64) ([]suwayom
 		out = append(out, suwayomi.Chapter{ID: id, IsDownloaded: false})
 	}
 	return out, nil
+}
+
+// ListLibraryWithCategories returns the seeded libraryEntries slice
+// unchanged so tests can assert against the same order the handler iterates.
+func (f *fakeSuwayomi) ListLibraryWithCategories(_ context.Context) ([]suwayomi.Manga, error) {
+	if f == nil {
+		return nil, nil
+	}
+	return f.libraryEntries, nil
 }
 
 // fakeRunner records RunOnce calls.

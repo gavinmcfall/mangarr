@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -27,6 +28,51 @@ func (h *Handler) apiBulkJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(jobs)
+}
+
+// apiLibrarySync handles POST /api/library/sync. Fetches every manga the
+// operator has in Suwayomi's library via the existing
+// ListLibraryWithCategories GraphQL query and upserts one row per manga
+// into library_cache.
+//
+// Chapter counts (total / downloaded) are left at 0 here — the Library
+// page's per-row HTMX fragment endpoint (Plan B T2) fills them in lazily
+// so the sync call returns quickly even for libraries of 100+ series.
+//
+// Closes the Plan A→B gap flagged in the design review: library_cache
+// existed in the schema but was never written, so POST /api/bulk 400'd on
+// every request with "manga_id not in library cache".
+//
+// Returns:
+//   - 503 when Suwayomi isn't configured
+//   - 502 on a Suwayomi error
+//   - 500 on a store write error
+//   - 200 with {"synced":N} JSON on success
+func (h *Handler) apiLibrarySync(w http.ResponseWriter, r *http.Request) {
+	if h.suwayomi == nil {
+		http.Error(w, "suwayomi client not configured", http.StatusServiceUnavailable)
+		return
+	}
+	entries, err := h.suwayomi.ListLibraryWithCategories(r.Context())
+	if err != nil {
+		http.Error(w, "suwayomi library fetch: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	for _, e := range entries {
+		if err := h.store.SaveLibraryCacheEntry(model.LibraryCacheEntry{
+			MangaID:    e.ID,
+			Title:      e.Title,
+			SourceID:   e.SourceID,
+			SourceName: e.Source,
+			// TotalChapters and Downloaded stay 0; T2's fragment endpoint
+			// fills them in on first Library page render.
+		}); err != nil {
+			http.Error(w, "library_cache write: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = fmt.Fprintf(w, `{"synced":%d}`, len(entries))
 }
 
 // apiBulkCreate handles POST /api/bulk. Creates one BulkJob per manga_id
