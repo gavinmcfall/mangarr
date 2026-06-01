@@ -110,6 +110,18 @@ type Store interface {
 	// POST /api/bulk uses that "missing entry" signal to reject unknown
 	// manga IDs with HTTP 400.
 	GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry, error)
+
+	// --- Bulk-download mutation surfaces (Plan A T14) ---
+	// UpdateBulkJobStatus flips a job's status — used by the
+	// POST /api/downloads/{id}/{pause,resume} actions.
+	UpdateBulkJobStatus(id int64, status model.BulkJobStatus) error
+	// ClearBulkJobBackoff resets backoff_until + consecutive_failures —
+	// invoked from POST /api/downloads/{id}/resume so an errored job
+	// gets a clean slate before the next orchestrator tick.
+	ClearBulkJobBackoff(id int64) error
+	// DeleteBulkJob removes a job + cascades its chapter rows — used by
+	// POST /api/downloads/{id}/delete.
+	DeleteBulkJob(id int64) error
 }
 
 // SuwayomiClient is the subset of *suwayomi.Client the web package needs.
@@ -297,6 +309,10 @@ func NewHandler(opts HandlerOpts) *Handler {
 	// ?status=.
 	h.mux.HandleFunc("GET /api/bulk/jobs", h.apiBulkJobs)
 	h.mux.HandleFunc("POST /api/bulk", h.apiBulkCreate)
+	// Plan A T14: pause/resume/delete a bulk job. action is one of
+	// pause, resume, delete; resume additionally clears backoff state
+	// so an errored job's next orchestrator tick starts unencumbered.
+	h.mux.HandleFunc("POST /api/downloads/{id}/{action}", h.apiDownloadsAction)
 
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)

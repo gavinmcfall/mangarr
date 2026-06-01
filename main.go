@@ -42,6 +42,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/kavita"
 	"github.com/gavinmcfall/mangarr/internal/metrics"
 	"github.com/gavinmcfall/mangarr/internal/model"
+	"github.com/gavinmcfall/mangarr/internal/orchestrator"
 	"github.com/gavinmcfall/mangarr/internal/poller"
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
 	"github.com/gavinmcfall/mangarr/internal/scanner"
@@ -406,6 +407,28 @@ func main() {
 		}
 	}()
 
+	// ---- bulk-download orchestrator ----
+	// Ticks every 2 seconds, feeds chapters into Suwayomi's queue with
+	// per-source serialisation. The adapter rebuilds the Suwayomi client
+	// off current Settings on each call so UI edits take effect without
+	// a restart (matches the poller's fresh-per-call pattern).
+	bulkOrch := orchestrator.New(st, &suwayomiOrchAdapter{settings: st})
+	go func() {
+		bulkTicker := time.NewTicker(2 * time.Second)
+		defer bulkTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("bulk orchestrator: shutting down")
+				return
+			case <-bulkTicker.C:
+				if err := bulkOrch.Tick(ctx); err != nil {
+					log.Printf("bulk orchestrator tick error: %v", err)
+				}
+			}
+		}
+	}()
+
 	// ---- backup scheduler ----
 	backupTicker := time.NewTicker(time.Duration(cfg.BackupIntervalHours) * time.Hour)
 	retention := time.Duration(cfg.BackupRetentionDays) * 24 * time.Hour
@@ -510,6 +533,72 @@ type filerAdapter struct {
 
 func (a *filerAdapter) File(s model.Series, dstRoot string) error {
 	return a.inner.File(s.Title, s.SourcePath, dstRoot)
+}
+
+// suwayomiOrchAdapter satisfies orchestrator.SuwayomiClient by building a
+// fresh *suwayomi.Client off the current Settings on every call. This
+// mirrors the poller's fresh-per-call pattern (newSuwayomiClient) so a
+// user who edits Suwayomi base URL / credentials in the UI has the change
+// take effect on the next orchestrator tick — no pod restart needed.
+//
+// Returns the orchestrator-friendly errors directly:
+//   - settings unreachable    → returned as-is (caller skips the tick)
+//   - Suwayomi not configured → returns a wrapped error per method;
+//     the orchestrator's per-source error path absorbs it (skip source
+//     for this tick, don't crash)
+type suwayomiOrchAdapter struct {
+	settings interface {
+		GetSettings() (model.Settings, error)
+	}
+}
+
+// errSuwayomiUnconfigured is returned from the adapter methods when the
+// user hasn't configured Suwayomi yet. The orchestrator's per-source
+// error path treats it as "skip this source for this tick" — identical
+// to a transient network error.
+var errSuwayomiUnconfigured = errSuwayomiUnconfiguredT{}
+
+type errSuwayomiUnconfiguredT struct{}
+
+func (errSuwayomiUnconfiguredT) Error() string { return "suwayomi not configured" }
+
+func (a *suwayomiOrchAdapter) client() (*suwayomi.Client, error) {
+	set, err := a.settings.GetSettings()
+	if err != nil {
+		return nil, err
+	}
+	c, err := newSuwayomiClient(set)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, errSuwayomiUnconfigured
+	}
+	return c, nil
+}
+
+func (a *suwayomiOrchAdapter) InFlightCountForSource(ctx context.Context, sourceID string) (int, error) {
+	c, err := a.client()
+	if err != nil {
+		return 0, err
+	}
+	return c.InFlightCountForSource(ctx, sourceID)
+}
+
+func (a *suwayomiOrchAdapter) EnqueueChapterDownloads(ctx context.Context, chapterIDs []int64) error {
+	c, err := a.client()
+	if err != nil {
+		return err
+	}
+	return c.EnqueueChapterDownloads(ctx, chapterIDs)
+}
+
+func (a *suwayomiOrchAdapter) ListChapters(ctx context.Context, mangaID int64) ([]suwayomi.Chapter, error) {
+	c, err := a.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListChapters(ctx, mangaID)
 }
 
 // newSuwayomiClient is the SuwayomiClientFactory the poller invokes at

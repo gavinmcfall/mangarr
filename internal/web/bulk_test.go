@@ -130,3 +130,66 @@ func TestAPIBulkCreateSkipsSeriesWithNoMissingChapters(t *testing.T) {
 		t.Errorf("expected NO job created when 0 missing chapters; got %d", len(st.savedBulkJobs))
 	}
 }
+
+// TestAPIDownloadsPauseFlipsStatus: POST /api/downloads/{id}/pause calls
+// UpdateBulkJobStatus(id, paused) and returns 200.
+func TestAPIDownloadsPauseFlipsStatus(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.bulkJobs = []model.BulkJob{{ID: 1, Status: model.BulkJobRunning}}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/downloads/1/pause", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(st.bulkStatusUpdates) != 1 || st.bulkStatusUpdates[0].status != model.BulkJobPaused {
+		t.Errorf("expected UpdateBulkJobStatus(1, paused); got %+v", st.bulkStatusUpdates)
+	}
+}
+
+// TestAPIDownloadsResumeClearsBackoffOnErrored: an errored job's resume
+// must clear backoff state AND flip status to running. Order matters —
+// the resume handler clears first, then flips, so the next orchestrator
+// tick sees consec_failures=0 + status=running together.
+func TestAPIDownloadsResumeClearsBackoffOnErrored(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.bulkJobs = []model.BulkJob{{ID: 1, Status: model.BulkJobErrored, ConsecutiveFailures: 5}}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/downloads/1/resume", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	if len(st.bulkClearBackoff) != 1 || st.bulkClearBackoff[0] != 1 {
+		t.Errorf("expected ClearBulkJobBackoff(1); got %+v", st.bulkClearBackoff)
+	}
+	var sawRunning bool
+	for _, u := range st.bulkStatusUpdates {
+		if u.id == 1 && u.status == model.BulkJobRunning {
+			sawRunning = true
+		}
+	}
+	if !sawRunning {
+		t.Errorf("expected status flip to running; got %+v", st.bulkStatusUpdates)
+	}
+}
+
+// TestAPIDownloadsDeleteRemovesJob: POST /api/downloads/{id}/delete calls
+// DeleteBulkJob; chapter rows cascade via the FK at the SQLite layer
+// (not exercised here — covered by the store-level cascade test).
+func TestAPIDownloadsDeleteRemovesJob(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.bulkJobs = []model.BulkJob{{ID: 1, Status: model.BulkJobRunning}}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/downloads/1/delete", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	if len(st.bulkDeletes) != 1 || st.bulkDeletes[0] != 1 {
+		t.Errorf("expected DeleteBulkJob(1); got %+v", st.bulkDeletes)
+	}
+}

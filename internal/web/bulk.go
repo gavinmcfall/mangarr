@@ -126,3 +126,54 @@ func (h *Handler) apiBulkCreate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(previews)
 }
+
+// apiDownloadsAction handles POST /api/downloads/{id}/{action} where
+// action is one of pause, resume, delete.
+//
+// Resume on an errored job ALSO clears backoff state (consecutive_failures
+// + backoff_until) before flipping status back to running, so the next
+// orchestrator tick is unencumbered by the prior failure ladder.
+//
+// Delete cascades to bulk_job_chapters via the FK ON DELETE CASCADE clause
+// from Migration 4 (store.Open enables PRAGMA foreign_keys=ON so it fires).
+//
+// Returns:
+//   - 200 on success (no body — clients reload the list via GET /api/bulk/jobs)
+//   - 400 on unparseable {id} or unknown {action}
+//   - 500 on store errors
+func (h *Handler) apiDownloadsAction(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	action := r.PathValue("action")
+	switch action {
+	case "pause":
+		if err := h.store.UpdateBulkJobStatus(id, model.BulkJobPaused); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case "resume":
+		// On resume from errored, also clear backoff state so the next
+		// tick is unencumbered.
+		if err := h.store.ClearBulkJobBackoff(id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := h.store.UpdateBulkJobStatus(id, model.BulkJobRunning); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case "delete":
+		if err := h.store.DeleteBulkJob(id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	default:
+		http.Error(w, "unknown action: "+action, http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}

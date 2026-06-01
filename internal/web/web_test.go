@@ -46,6 +46,15 @@ type fakeStore struct {
 	savedBulkJobs   []model.BulkJob
 	savedChapterIDs []int64
 	libraryCache    map[int64]model.LibraryCacheEntry
+	// Plan A T14: pause/resume/delete tracking
+	bulkStatusUpdates []bulkStatusCall
+	bulkClearBackoff  []int64
+	bulkDeletes       []int64
+}
+
+type bulkStatusCall struct {
+	id     int64
+	status model.BulkJobStatus
 }
 
 type setTypeCall struct {
@@ -170,6 +179,23 @@ func (f *fakeStore) GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry
 		return e, nil
 	}
 	return model.LibraryCacheEntry{}, sql.ErrNoRows
+}
+
+// --- Plan A T14: pause/resume/delete mutation surfaces ---
+
+func (f *fakeStore) UpdateBulkJobStatus(id int64, s model.BulkJobStatus) error {
+	f.bulkStatusUpdates = append(f.bulkStatusUpdates, bulkStatusCall{id, s})
+	return nil
+}
+
+func (f *fakeStore) ClearBulkJobBackoff(id int64) error {
+	f.bulkClearBackoff = append(f.bulkClearBackoff, id)
+	return nil
+}
+
+func (f *fakeStore) DeleteBulkJob(id int64) error {
+	f.bulkDeletes = append(f.bulkDeletes, id)
+	return nil
 }
 
 // fakeSuwayomi implements web.SuwayomiClient for tests. Per-manga chapter
