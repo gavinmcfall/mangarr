@@ -50,6 +50,10 @@ type fakeStore struct {
 	bulkStatusUpdates []bulkStatusCall
 	bulkClearBackoff  []int64
 	bulkDeletes       []int64
+	// callOrder records the sequence of Store mutations for tests that
+	// pin ordering invariants (e.g. "ClearBulkJobBackoff must run BEFORE
+	// UpdateBulkJobStatus on resume from errored"). Append-only.
+	callOrder []string
 }
 
 type bulkStatusCall struct {
@@ -185,16 +189,19 @@ func (f *fakeStore) GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry
 
 func (f *fakeStore) UpdateBulkJobStatus(id int64, s model.BulkJobStatus) error {
 	f.bulkStatusUpdates = append(f.bulkStatusUpdates, bulkStatusCall{id, s})
+	f.callOrder = append(f.callOrder, fmt.Sprintf("status:%d:%s", id, s))
 	return nil
 }
 
 func (f *fakeStore) ClearBulkJobBackoff(id int64) error {
 	f.bulkClearBackoff = append(f.bulkClearBackoff, id)
+	f.callOrder = append(f.callOrder, fmt.Sprintf("clear:%d", id))
 	return nil
 }
 
 func (f *fakeStore) DeleteBulkJob(id int64) error {
 	f.bulkDeletes = append(f.bulkDeletes, id)
+	f.callOrder = append(f.callOrder, fmt.Sprintf("delete:%d", id))
 	return nil
 }
 

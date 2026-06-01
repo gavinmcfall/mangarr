@@ -174,6 +174,51 @@ func TestAPIDownloadsResumeClearsBackoffOnErrored(t *testing.T) {
 	if !sawRunning {
 		t.Errorf("expected status flip to running; got %+v", st.bulkStatusUpdates)
 	}
+	// Ordering invariant — the spec requires ClearBulkJobBackoff to run
+	// BEFORE UpdateBulkJobStatus(Running) so the next orchestrator tick
+	// reads consec_failures=0 + status=running together. A future
+	// regression that swaps the two calls would still leave both lists
+	// non-empty, so check ordering explicitly via callOrder.
+	if len(st.callOrder) != 2 ||
+		st.callOrder[0] != "clear:1" ||
+		st.callOrder[1] != "status:1:running" {
+		t.Errorf("resume must call ClearBulkJobBackoff BEFORE UpdateBulkJobStatus(Running); got callOrder=%v", st.callOrder)
+	}
+}
+
+// TestAPIDownloadsUnknownActionReturns400 pins the default branch in
+// apiDownloadsAction — an unknown action like "bogus" returns 400, not
+// 405/500, and does NOT touch the store.
+func TestAPIDownloadsUnknownActionReturns400(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.bulkJobs = []model.BulkJob{{ID: 1, Status: model.BulkJobRunning}}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/downloads/1/bogus", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 on unknown action, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if len(st.callOrder) != 0 {
+		t.Errorf("unknown action must NOT mutate the store; got callOrder=%v", st.callOrder)
+	}
+}
+
+// TestAPIDownloadsNonNumericIDReturns400 pins that a malformed id path
+// segment returns 400 from the strconv.ParseInt guard, before any
+// store call.
+func TestAPIDownloadsNonNumericIDReturns400(t *testing.T) {
+	h, st, _ := newTestHandler()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/downloads/abc/pause", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 on non-numeric id, got %d", rec.Code)
+	}
+	if len(st.callOrder) != 0 {
+		t.Errorf("non-numeric id must NOT mutate the store; got callOrder=%v", st.callOrder)
+	}
 }
 
 // TestAPIDownloadsDeleteRemovesJob: POST /api/downloads/{id}/delete calls
