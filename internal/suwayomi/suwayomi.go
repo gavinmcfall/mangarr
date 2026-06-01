@@ -533,6 +533,37 @@ func (c *Client) ListChapters(ctx context.Context, mangaID int64) ([]Chapter, er
 	return chapters, nil
 }
 
+// EnqueueChapterDownloads adds the given chapter IDs to Suwayomi's
+// download queue. Idempotent on the Suwayomi side — a re-enqueue of an
+// already-queued chapter is a no-op, which is what makes the
+// orchestrator's boot-recovery sweep (state='fed' → 'pending' → re-feed)
+// safe across pod restarts.
+//
+// An empty ids slice is a no-op (no network call). The mutation is
+// fire-and-forget from mangarr's perspective; we don't introspect the
+// clientMutationId in the response.
+func (c *Client) EnqueueChapterDownloads(ctx context.Context, chapterIDs []int64) error {
+	if len(chapterIDs) == 0 {
+		return nil
+	}
+	const mutation = `mutation EnqueueChapterDownloads($ids: [Int!]!) {
+		enqueueChapterDownloads(input: {ids: $ids}) {
+			clientMutationId
+		}
+	}`
+	body, err := json.Marshal(map[string]any{
+		"query":     mutation,
+		"variables": map[string]any{"ids": chapterIDs},
+	})
+	if err != nil {
+		return fmt.Errorf("suwayomi enqueue marshal: %w", err)
+	}
+	if _, err := c.doGraphQL(ctx, body); err != nil {
+		return err
+	}
+	return nil
+}
+
 // doGraphQL POSTs a pre-marshalled GraphQL request body to /api/graphql
 // and returns the raw response bytes. It runs through doJSON so auth,
 // 401-retry, and error wrapping are handled the same as REST endpoints.

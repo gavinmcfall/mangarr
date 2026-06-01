@@ -470,3 +470,41 @@ func TestSanitiseSegmentPreservesValidNames(t *testing.T) {
 		t.Fatalf("valid input: want %q, got %q", "Solo Leveling", got)
 	}
 }
+
+// ----- EnqueueChapterDownloads -----
+
+func TestEnqueueChapterDownloads(t *testing.T) {
+	var capturedBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/graphql" {
+			handlerErr(t, w, "want /api/graphql, got %s", r.URL.Path)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		capturedBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"data":{"enqueueChapterDownloads":{"clientMutationId":null}}}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	err := c.EnqueueChapterDownloads(context.Background(), []int64{100, 101, 102})
+	if err != nil {
+		t.Fatalf("EnqueueChapterDownloads: %v", err)
+	}
+	if !strings.Contains(capturedBody, `"ids":[100,101,102]`) {
+		t.Errorf("mutation body didn't carry ids array; got: %s", capturedBody)
+	}
+}
+
+func TestEnqueueChapterDownloadsEmptyIsNoOp(t *testing.T) {
+	// Empty batch must not even hit the network — pointless roundtrip.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("server should not be called for empty batch; got %s", r.URL.Path)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, NoAuth{})
+	if err := c.EnqueueChapterDownloads(context.Background(), nil); err != nil {
+		t.Errorf("empty batch should not error: %v", err)
+	}
+}
