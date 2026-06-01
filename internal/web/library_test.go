@@ -209,6 +209,30 @@ func TestPageLibraryEmptyStateNoSuwayomi(t *testing.T) {
 	}
 }
 
+// TestSidebarHasLibraryAndDownloadsEntries pins Plan B T9: the global
+// sidebar (rendered via base.html) carries top-level entries for both
+// /library and /downloads so operators can reach the new bulk-downloader
+// pages without typing the URL. We hit /library (a page that renders
+// base.html) because GET / is a redirect with no body.
+func TestSidebarHasLibraryAndDownloadsEntries(t *testing.T) {
+	h, _, _ := newTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/library", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{
+		`href="/library"`,
+		`href="/downloads"`,
+		// Labels appear inside the <a> after the inline SVG icon, so
+		// the human-readable text sits on its own line.
+		"Library\n", "Downloads\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("sidebar missing %q", want)
+		}
+	}
+}
+
 // TestPageLibraryEmptyStateEmptyLibrary pins the "library_cache empty"
 // empty state — Suwayomi is wired but the operator hasn't synced yet,
 // so the page nudges them toward Sync rather than rendering an empty
