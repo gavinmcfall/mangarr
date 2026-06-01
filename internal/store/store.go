@@ -223,10 +223,13 @@ func (s *Store) GetSettings() (model.Settings, error) {
 
 func defaultSettings() model.Settings {
 	return model.Settings{
-		FileMode:     model.ModeHardlink,
-		RenameScheme: "{series}/{series} - Ch.{chapter}.cbz",
-		PollMinutes:  15,
-		LibraryRoots: map[model.ContentType]string{},
+		FileMode:               model.ModeHardlink,
+		RenameScheme:           "{series}/{series} - Ch.{chapter}.cbz",
+		PollMinutes:            15,
+		LibraryRoots:           map[model.ContentType]string{},
+		BulkMaxInFlight:        5,
+		BulkRefillThreshold:    2,
+		BulkInterBatchDelaySec: 1,
 	}
 }
 
