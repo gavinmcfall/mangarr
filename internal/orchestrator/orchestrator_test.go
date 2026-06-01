@@ -172,6 +172,59 @@ func TestTickSkipsWhenInFlightAboveThreshold(t *testing.T) {
 	}
 }
 
+// fakeSuwayomiWithChapters extends fakeSuwayomi with a per-manga chapter
+// list so reconcile-phase tests can drive isDownloaded transitions.
+type fakeSuwayomiWithChapters struct {
+	fakeSuwayomi
+	chaptersByManga map[int64][]suwayomi.Chapter
+}
+
+func (f *fakeSuwayomiWithChapters) ListChapters(ctx context.Context, mangaID int64) ([]suwayomi.Chapter, error) {
+	return f.chaptersByManga[mangaID], nil
+}
+
+func TestTickReconcilesFedToDoneOnIsDownloaded(t *testing.T) {
+	now := time.Now()
+	st := &fakeStore{
+		settings: model.Settings{BulkMaxInFlight: 5, BulkRefillThreshold: 2},
+		jobs: []model.BulkJob{
+			{ID: 1, MangaID: 7, SourceID: "42", Status: model.BulkJobRunning, CreatedAt: now},
+		},
+		chaptersByJob: map[int64][]model.BulkJobChapter{
+			1: {
+				{JobID: 1, ChapterID: 100, State: model.BulkChapterFed},
+				{JobID: 1, ChapterID: 101, State: model.BulkChapterFed},
+				{JobID: 1, ChapterID: 102, State: model.BulkChapterPending},
+			},
+		},
+	}
+	sw := &fakeSuwayomiWithChapters{
+		fakeSuwayomi: fakeSuwayomi{inFlight: map[string]int{"42": 1}},
+		chaptersByManga: map[int64][]suwayomi.Chapter{
+			7: {
+				{ID: 100, IsDownloaded: true},  // should flip fed→done
+				{ID: 101, IsDownloaded: false}, // still fed
+				{ID: 102, IsDownloaded: false}, // still pending
+			},
+		},
+	}
+	o := New(st, sw)
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	// Look for the chapter 100 → 'done' update.
+	var sawDone bool
+	for _, u := range st.chapterUpdates {
+		if u.chapterID == 100 && u.state == model.BulkChapterDone {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Errorf("expected chapter 100 to flip to 'done' on isDownloaded=true; got updates: %+v", st.chapterUpdates)
+	}
+}
+
 func TestTickHonoursBackoffUntil(t *testing.T) {
 	future := time.Now().Add(5 * time.Minute)
 	st := &fakeStore{

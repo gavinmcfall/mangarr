@@ -64,9 +64,13 @@ func (s *Store) ListBulkJobs(status model.BulkJobStatus) ([]model.BulkJob, error
 		created_at, updated_at
 	FROM bulk_jobs`
 	if status == "" {
-		rows, err = s.db.Query(q + ` ORDER BY created_at ASC`)
+		// created_at is whole-second resolution in SQLite (strftime('%s','now')),
+		// so two jobs created in the same second tie. Adding `id ASC` makes
+		// FIFO ordering deterministic at the data layer (the orchestrator's
+		// sort.Slice is not stable).
+		rows, err = s.db.Query(q + ` ORDER BY created_at ASC, id ASC`)
 	} else {
-		rows, err = s.db.Query(q+` WHERE status = ? ORDER BY created_at ASC`, string(status))
+		rows, err = s.db.Query(q+` WHERE status = ? ORDER BY created_at ASC, id ASC`, string(status))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("ListBulkJobs: %w", err)

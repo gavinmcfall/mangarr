@@ -106,6 +106,28 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 			continue
 		}
 
+		// Reconcile phase: re-query Suwayomi's chapter list for this
+		// job's manga and flip any fed chapters whose isDownloaded=true
+		// to 'done'. We use ListChapters rather than downloadStatus
+		// because Suwayomi removes FINISHED entries from its queue
+		// after a short window — chapter.isDownloaded is the durable
+		// source of truth (spec Section 2.4).
+		fed, err := o.store.ListBulkJobChapters(job.ID, model.BulkChapterFed)
+		if err == nil && len(fed) > 0 {
+			chapters, err := o.suwayomi.ListChapters(ctx, job.MangaID)
+			if err == nil {
+				downloaded := map[int64]bool{}
+				for _, c := range chapters {
+					downloaded[c.ID] = c.IsDownloaded
+				}
+				for _, c := range fed {
+					if downloaded[c.ChapterID] {
+						_ = o.store.UpdateBulkJobChapterState(job.ID, c.ChapterID, model.BulkChapterDone)
+					}
+				}
+			}
+		}
+
 		// Feed the next batch.
 		pending, err := o.store.ListBulkJobChapters(job.ID, model.BulkChapterPending)
 		if err != nil {
