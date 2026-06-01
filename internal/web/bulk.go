@@ -1,11 +1,14 @@
 package web
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
@@ -47,12 +50,15 @@ func (h *Handler) apiBulkJobs(w http.ResponseWriter, r *http.Request) {
 
 // apiLibrarySync handles POST /api/library/sync. Fetches every manga the
 // operator has in Suwayomi's library via the existing
-// ListLibraryWithCategories GraphQL query and upserts one row per manga
-// into library_cache.
+// ListLibraryWithCategories GraphQL query, then resolves chapter counts
+// for each one with a bounded-parallel ListChapters fan-out, and upserts
+// one row per manga into library_cache.
 //
-// Chapter counts (total / downloaded) are left at 0 here — the Library
-// page's per-row HTMX fragment endpoint (Plan B T2) fills them in lazily
-// so the sync call returns quickly even for libraries of 100+ series.
+// Doing the counts here (instead of lazily per row on /library page load)
+// avoids a 600-request burst hammering sqlite and Suwayomi every time the
+// operator opens the page — the prior design produced "database is locked"
+// errors that the row endpoint misclassified as 404, leaving rows stuck
+// at "…" and (separately) destabilising HTMX on the page.
 //
 // Closes the Plan A→B gap flagged in the design review: library_cache
 // existed in the schema but was never written, so POST /api/bulk 400'd on
@@ -60,9 +66,10 @@ func (h *Handler) apiBulkJobs(w http.ResponseWriter, r *http.Request) {
 //
 // Returns:
 //   - 503 when Suwayomi isn't configured
-//   - 502 on a Suwayomi error
+//   - 502 on a Suwayomi library fetch error
 //   - 500 on a store write error
-//   - 200 with {"synced":N} JSON on success
+//   - 200 with {"synced":N} JSON on success (per-manga count errors are
+//     swallowed — the entry still lands with zero counts, refreshable later)
 func (h *Handler) apiLibrarySync(w http.ResponseWriter, r *http.Request) {
 	if h.suwayomi == nil {
 		http.Error(w, "suwayomi client not configured", http.StatusServiceUnavailable)
@@ -73,14 +80,47 @@ func (h *Handler) apiLibrarySync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "suwayomi library fetch: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	for _, e := range entries {
+
+	// Bounded-parallel chapter-count resolution. 8 workers keeps Suwayomi
+	// happy (well below the rate-ban threshold the bulk orchestrator
+	// guards against) and saturates a typical home upstream without
+	// queue overrun.
+	type countResult struct {
+		total      int
+		downloaded int
+	}
+	counts := make([]countResult, len(entries))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, e := range entries {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, mangaID int64) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			chs, err := h.suwayomi.ListChapters(r.Context(), mangaID)
+			if err != nil {
+				return // best-effort; row gets total=0, refreshable later
+			}
+			cr := countResult{total: len(chs)}
+			for _, c := range chs {
+				if c.IsDownloaded {
+					cr.downloaded++
+				}
+			}
+			counts[i] = cr
+		}(i, e.ID)
+	}
+	wg.Wait()
+
+	for i, e := range entries {
 		if err := h.store.SaveLibraryCacheEntry(model.LibraryCacheEntry{
-			MangaID:    e.ID,
-			Title:      e.Title,
-			SourceID:   e.SourceID,
-			SourceName: e.Source,
-			// TotalChapters and Downloaded stay 0; T2's fragment endpoint
-			// fills them in on first Library page render.
+			MangaID:       e.ID,
+			Title:         e.Title,
+			SourceID:      e.SourceID,
+			SourceName:    e.Source,
+			TotalChapters: counts[i].total,
+			Downloaded:    counts[i].downloaded,
 		}); err != nil {
 			http.Error(w, "library_cache write: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -117,7 +157,15 @@ func (h *Handler) apiLibraryRowMissing(w http.ResponseWriter, r *http.Request) {
 	}
 	entry, err := h.store.GetLibraryCacheEntry(mID)
 	if err != nil {
-		http.Error(w, "not in library cache", http.StatusNotFound)
+		// Only "no such row" is a real 404 — every other error (sqlite busy,
+		// disk full, schema drift) is a server-side failure and must surface
+		// as 500 so the operator sees the actual problem instead of a
+		// misleading "not in cache" placeholder.
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "not in library cache", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "library_cache read: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if h.suwayomi == nil {
