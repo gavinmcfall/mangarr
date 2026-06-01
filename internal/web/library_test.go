@@ -149,3 +149,77 @@ func TestAPILibraryRowMissingReturns503WhenSuwayomiUnconfigured(t *testing.T) {
 		t.Fatalf("want 503, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestPageLibraryRendersRowsWithLazyCountPlaceholders pins the /library
+// happy path: every library_cache row renders as a <tr> with a manga_id
+// checkbox + an HTMX-lazy count placeholder targeting the T2 fragment
+// endpoint. The form posts to /api/bulk with HTMX targeting the
+// #confirm-modal container so T3's modal-mode response can swap in.
+func TestPageLibraryRendersRowsWithLazyCountPlaceholders(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.libraryCache = map[int64]model.LibraryCacheEntry{
+		7: {MangaID: 7, Title: "One Piece", SourceID: "42", SourceName: "MangaDex EN"},
+		8: {MangaID: 8, Title: "SOLO LEVELING", SourceID: "42", SourceName: "MangaDex EN"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/library", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"<h1", "Library",
+		"One Piece", "SOLO LEVELING", "MangaDex EN",
+		// Multi-select form with hx-post to /api/bulk
+		`hx-post="/api/bulk"`,
+		`name="manga_id" value="7"`,
+		`name="manga_id" value="8"`,
+		// Lazy count placeholders via hx-get to /api/library/{id}/missing
+		`hx-get="/api/library/7/missing"`,
+		`hx-get="/api/library/8/missing"`,
+		`hx-trigger="load"`,
+		// Confirm-modal container
+		`id="confirm-modal"`,
+		// Sync button
+		`hx-post="/api/library/sync"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("library page missing %q", want)
+		}
+	}
+}
+
+// TestPageLibraryEmptyStateNoSuwayomi pins the "Suwayomi unconfigured"
+// empty state — the handler returns a friendly Settings prompt rather
+// than a blank table when no Suwayomi client is wired.
+func TestPageLibraryEmptyStateNoSuwayomi(t *testing.T) {
+	// Build a handler WITHOUT suwayomi wired to simulate unconfigured.
+	st := &fakeStore{}
+	h := NewHandler(HandlerOpts{Store: st, Runner: &fakeRunner{}})
+
+	req := httptest.NewRequest(http.MethodGet, "/library", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "Configure Suwayomi in Settings") {
+		t.Errorf("expected empty-state copy when Suwayomi unconfigured; body:\n%s", rec.Body.String())
+	}
+}
+
+// TestPageLibraryEmptyStateEmptyLibrary pins the "library_cache empty"
+// empty state — Suwayomi is wired but the operator hasn't synced yet,
+// so the page nudges them toward Sync rather than rendering an empty
+// table.
+func TestPageLibraryEmptyStateEmptyLibrary(t *testing.T) {
+	h, _, _ := newTestHandler()
+	// Default fakeStore has empty libraryCache.
+	req := httptest.NewRequest(http.MethodGet, "/library", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "Your Suwayomi library is empty") {
+		t.Errorf("expected empty-state copy for empty library; body:\n%s", rec.Body.String())
+	}
+}

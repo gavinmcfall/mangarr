@@ -115,6 +115,10 @@ type Store interface {
 	// Suwayomi's library; without this the bulk-create handler 400s with
 	// "manga_id not in library cache" because nothing ever writes the table.
 	SaveLibraryCacheEntry(in model.LibraryCacheEntry) error
+	// ListLibraryCacheEntries returns every row in library_cache ordered by
+	// title — drives the /library page (Plan B T5). *store.Store satisfies
+	// this from Plan A T5.
+	ListLibraryCacheEntries() ([]model.LibraryCacheEntry, error)
 
 	// --- Bulk-download mutation surfaces (Plan A T14) ---
 	// UpdateBulkJobStatus flips a job's status — used by the
@@ -284,6 +288,7 @@ func NewHandler(opts HandlerOpts) *Handler {
 	h.mux.HandleFunc("GET /activity", h.pageActivity)
 	h.mux.HandleFunc("GET /health", h.pageHealth)
 	h.mux.HandleFunc("GET /tasks", h.pageTasks)
+	h.mux.HandleFunc("GET /library", h.pageLibrary)
 	h.mux.HandleFunc("GET /settings", h.pageSettings)
 	h.mux.HandleFunc("POST /settings", h.saveSettings)
 
@@ -361,7 +366,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // overlaid, ensuring that {{block "content"}} resolves to THAT page's
 // definition rather than whichever happened to be parsed last globally.
 func parsePageTemplates() map[string]*template.Template {
-	pages := []string{"series.html", "preview.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "settings.html"}
+	pages := []string{"series.html", "preview.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "library.html", "settings.html"}
 	// Pages that need the override-rows partial. Listed explicitly so
 	// adding the partial to a new page is a one-line change here, not a
 	// fan-out across the codebase.
@@ -1029,6 +1034,84 @@ func buildTaskRow(info tasks.Info) taskRow {
 		LastRunLabel:  formatAge(time.Now(), info.LastRun),
 		ResultClass:   rc,
 	}
+}
+
+// libraryPageData drives the /library page render. Page mirrors the
+// convention used by seriesPageData/settingsPageData so the sidebar
+// active-link highlight (T9) can pick it up. SuwayomiConfigured drives
+// the "Configure Suwayomi" empty state; Entries == nil/empty drives the
+// "library empty" empty state.
+type libraryPageData struct {
+	Page               string
+	SuwayomiConfigured bool
+	Entries            []libraryRow
+}
+
+// libraryRow is the view-model for one row on /library. JobStatus is
+// the most-recent bulk_job status for this manga (running/paused/
+// completed/errored), or empty when no job exists yet.
+type libraryRow struct {
+	MangaID    int64
+	Title      string
+	SourceID   string
+	SourceName string
+	JobStatus  string
+}
+
+func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
+	configured := h.suwayomi != nil
+	if !configured {
+		// Unconfigured empty state — operator hasn't wired Suwayomi at all.
+		// We deliberately don't try to load library_cache here because the
+		// page can't function without a live Suwayomi client (Sync, lazy
+		// per-row counts, and bulk-download all depend on it).
+		h.render(w, "library.html", libraryPageData{Page: "library", SuwayomiConfigured: false})
+		return
+	}
+	entries, err := h.store.ListLibraryCacheEntries()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	rows := make([]libraryRow, 0, len(entries))
+	for _, e := range entries {
+		rows = append(rows, libraryRow{
+			MangaID:    e.MangaID,
+			Title:      e.Title,
+			SourceID:   e.SourceID,
+			SourceName: e.SourceName,
+			JobStatus:  h.mostRecentBulkJobStatus(e.MangaID),
+		})
+	}
+	h.render(w, "library.html", libraryPageData{
+		Page:               "library",
+		SuwayomiConfigured: true,
+		Entries:            rows,
+	})
+}
+
+// mostRecentBulkJobStatus returns the status of the most-recent bulk_job
+// row for this manga (by created_at), or "" when no job exists. Cheap —
+// the typical operator has at most a handful of jobs per manga, and
+// ListBulkJobs("") is already O(N) over the bulk_jobs table.
+func (h *Handler) mostRecentBulkJobStatus(mangaID int64) string {
+	jobs, err := h.store.ListBulkJobs("")
+	if err != nil {
+		return ""
+	}
+	var newest *model.BulkJob
+	for i := range jobs {
+		if jobs[i].MangaID != mangaID {
+			continue
+		}
+		if newest == nil || jobs[i].CreatedAt.After(newest.CreatedAt) {
+			newest = &jobs[i]
+		}
+	}
+	if newest == nil {
+		return ""
+	}
+	return string(newest.Status)
 }
 
 func (h *Handler) pageHealth(w http.ResponseWriter, r *http.Request) {

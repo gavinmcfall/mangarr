@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -187,6 +188,18 @@ func (f *fakeStore) GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry
 		return e, nil
 	}
 	return model.LibraryCacheEntry{}, sql.ErrNoRows
+}
+
+// ListLibraryCacheEntries returns every cached library entry sorted by
+// title so the /library page test assertions are deterministic regardless
+// of Go map iteration order.
+func (f *fakeStore) ListLibraryCacheEntries() ([]model.LibraryCacheEntry, error) {
+	out := make([]model.LibraryCacheEntry, 0, len(f.libraryCache))
+	for _, e := range f.libraryCache {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Title < out[j].Title })
+	return out, nil
 }
 
 // SaveLibraryCacheEntry appends the entry to savedLibraryEntries (for
