@@ -1082,7 +1082,12 @@ type libraryRow struct {
 }
 
 func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
-	configured := h.suwayomi != nil
+	// Gate the "Configure Suwayomi" empty state on actual Settings, not on
+	// whether the adapter is wired — main.go always passes a fresh-per-call
+	// adapter, so h.suwayomi is never nil in production. The user-facing
+	// question is "have they entered a Suwayomi URL?", which lives in Settings.
+	settings, _ := h.store.GetSettings()
+	configured := h.suwayomi != nil && strings.TrimSpace(settings.SuwayomiBaseURL) != ""
 	if !configured {
 		// Unconfigured empty state — operator hasn't wired Suwayomi at all.
 		// We deliberately don't try to load library_cache here because the

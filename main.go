@@ -257,6 +257,12 @@ func main() {
 	// Wire the planner into the poller so Preview can call Plan.
 	p.Planner = filr
 
+	// Suwayomi adapter — shared by the orchestrator (built later) and the
+	// web handler. Fresh-per-call so URL/cred edits take effect without a
+	// pod restart. nil-safe on unconfigured settings: each method returns
+	// errSuwayomiUnconfigured which both consumers handle gracefully.
+	suwayomiAdapter := &suwayomiOrchAdapter{settings: st}
+
 	// ---- web handler ----
 	h := web.NewHandler(web.HandlerOpts{
 		Store:                   st,
@@ -266,6 +272,7 @@ func main() {
 		HealthReg:               healthReg,
 		Metrics:                 metricsReg,
 		Previewer:               p,
+		Suwayomi:                suwayomiAdapter,
 		BrowseRoots:             []string{"/media", "/config"},
 		RecycleBinPath:          cfg.RecycleBinPath,
 		RecycleBinRetentionDays: cfg.RecycleBinRetentionDays,
@@ -412,7 +419,7 @@ func main() {
 	// per-source serialisation. The adapter rebuilds the Suwayomi client
 	// off current Settings on each call so UI edits take effect without
 	// a restart (matches the poller's fresh-per-call pattern).
-	bulkOrch := orchestrator.New(st, &suwayomiOrchAdapter{settings: st})
+	bulkOrch := orchestrator.New(st, suwayomiAdapter)
 	go func() {
 		bulkTicker := time.NewTicker(2 * time.Second)
 		defer bulkTicker.Stop()
@@ -599,6 +606,18 @@ func (a *suwayomiOrchAdapter) ListChapters(ctx context.Context, mangaID int64) (
 		return nil, err
 	}
 	return c.ListChapters(ctx, mangaID)
+}
+
+// ListLibraryWithCategories satisfies web.SuwayomiClient so the same
+// adapter wires into both the orchestrator and the /library + /api/bulk
+// + /api/library/sync handlers. Fresh-per-call: edits to Suwayomi URL
+// or credentials take effect on the next request without a pod restart.
+func (a *suwayomiOrchAdapter) ListLibraryWithCategories(ctx context.Context) ([]suwayomi.Manga, error) {
+	c, err := a.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListLibraryWithCategories(ctx)
 }
 
 // newSuwayomiClient is the SuwayomiClientFactory the poller invokes at
