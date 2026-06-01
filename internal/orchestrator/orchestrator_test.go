@@ -338,3 +338,65 @@ func TestTickResetsConsecFailuresOnSuccess(t *testing.T) {
 		t.Errorf("expected ClearBulkJobBackoff(1) call; got %+v", st.clearBackoffHistory)
 	}
 }
+
+func TestTickMarksJobCompletedWhenAllChaptersDone(t *testing.T) {
+	now := time.Now()
+	st := &fakeStore{
+		settings: model.Settings{BulkMaxInFlight: 5, BulkRefillThreshold: 2},
+		jobs: []model.BulkJob{
+			{ID: 1, MangaID: 7, SourceID: "42", Status: model.BulkJobRunning, CreatedAt: now, TotalChapters: 2, CompletedChapters: 2},
+		},
+		chaptersByJob: map[int64][]model.BulkJobChapter{
+			1: {
+				{JobID: 1, ChapterID: 100, State: model.BulkChapterDone},
+				{JobID: 1, ChapterID: 101, State: model.BulkChapterDone},
+			},
+		},
+	}
+	sw := &fakeSuwayomiWithChapters{
+		fakeSuwayomi: fakeSuwayomi{inFlight: map[string]int{}},
+	}
+	o := New(st, sw)
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	var sawCompleted bool
+	for _, s := range st.statusHistory {
+		if s.jobID == 1 && s.status == model.BulkJobCompleted {
+			sawCompleted = true
+		}
+	}
+	if !sawCompleted {
+		t.Errorf("expected job 1 to transition to 'completed'; got %+v", st.statusHistory)
+	}
+}
+
+func TestTickMarksJobErroredAfter5ConsecutiveFailures(t *testing.T) {
+	now := time.Now()
+	st := &fakeStore{
+		settings: model.Settings{BulkMaxInFlight: 5, BulkRefillThreshold: 2},
+		jobs: []model.BulkJob{
+			{ID: 1, SourceID: "42", Status: model.BulkJobRunning, CreatedAt: now, ConsecutiveFailures: 4},
+		},
+		chaptersByJob: map[int64][]model.BulkJobChapter{
+			1: {{JobID: 1, ChapterID: 100, State: model.BulkChapterPending}},
+		},
+	}
+	sw := &fakeSuwayomi429{
+		fakeSuwayomi: fakeSuwayomi{inFlight: map[string]int{}},
+		failNTimes:   1, // the 5th failure overall
+	}
+	o := New(st, sw)
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	var sawErrored bool
+	for _, s := range st.statusHistory {
+		if s.jobID == 1 && s.status == model.BulkJobErrored {
+			sawErrored = true
+		}
+	}
+	if !sawErrored {
+		t.Errorf("expected job 1 to transition to 'errored' after 5th failure; got status history %+v", st.statusHistory)
+	}
+}

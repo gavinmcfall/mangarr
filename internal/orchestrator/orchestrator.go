@@ -131,6 +131,21 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 			}
 		}
 
+		// Terminal state check: all chapters done → mark completed.
+		allChapters, err := o.store.ListBulkJobChapters(job.ID, "")
+		if err == nil && len(allChapters) > 0 {
+			done := 0
+			for _, c := range allChapters {
+				if c.State == model.BulkChapterDone {
+					done++
+				}
+			}
+			if done == len(allChapters) {
+				_ = o.store.UpdateBulkJobStatus(job.ID, model.BulkJobCompleted)
+				continue
+			}
+		}
+
 		// Feed the next batch.
 		pending, err := o.store.ListBulkJobChapters(job.ID, model.BulkChapterPending)
 		if err != nil {
@@ -157,10 +172,11 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 				next := job.ConsecutiveFailures + 1
 				until, terminal := backoffFor(next, now)
 				if terminal {
-					// Task 12 handles this — for now, set last_error
-					// and let consecutive_failures climb.
+					_ = o.store.UpdateBulkJobBackoff(job.ID, until, next, "suwayomi 429 (5 consecutive failures)")
+					_ = o.store.UpdateBulkJobStatus(job.ID, model.BulkJobErrored)
+				} else {
+					_ = o.store.UpdateBulkJobBackoff(job.ID, until, next, "suwayomi 429")
 				}
-				_ = o.store.UpdateBulkJobBackoff(job.ID, until, next, "suwayomi 429")
 			}
 			continue
 		}
