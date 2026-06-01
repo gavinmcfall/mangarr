@@ -825,6 +825,39 @@ func TestSaveSettingsInvalidSchemeReturns400(t *testing.T) {
 	}
 }
 
+// TestSettingsPOSTRoundTripsBulkPacingKnobs pins that the three Bulk
+// Download pacing knobs from Plan A T3 (BulkMaxInFlight,
+// BulkRefillThreshold, BulkInterBatchDelaySec) round-trip through the
+// saveSettings POST handler from form values into Settings.
+func TestSettingsPOSTRoundTripsBulkPacingKnobs(t *testing.T) {
+	h, st, _ := newTestHandler()
+	form := url.Values{
+		// Required-shape sibling fields copied from TestSaveSettingsFormPost
+		// so the handler doesn't reject the form on rename-scheme validation.
+		"file_mode":                  {"copy"},
+		"rename_scheme":              {"{series}/{series} - Ch.{chapter}.cbz"},
+		"poll_minutes":               {"60"},
+		"bulk_max_in_flight":         {"8"},
+		"bulk_refill_threshold":      {"3"},
+		"bulk_inter_batch_delay_sec": {"2"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/settings",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther && rec.Code != http.StatusOK {
+		t.Fatalf("settings save: want 200 or 303, got %d; body: %s",
+			rec.Code, rec.Body.String())
+	}
+	if st.settings.BulkMaxInFlight != 8 ||
+		st.settings.BulkRefillThreshold != 3 ||
+		st.settings.BulkInterBatchDelaySec != 2 {
+		t.Errorf("pacing knobs not persisted: %+v", st.settings)
+	}
+}
+
 func TestAPIPutSettingsInvalidSchemeReturns400(t *testing.T) {
 	h, st, _ := newTestHandler()
 	savedBefore := st.settings.RenameScheme

@@ -1630,6 +1630,28 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 	// leading/trailing space.
 	settings.SuwayomiPassword = r.FormValue("suwayomi_password")
 
+	// --- Bulk Download pacing knobs (Plan A T3 / Plan B T8) ---
+	// Three operator-tunable orchestrator knobs. Empty form values leave the
+	// existing setting untouched; parse failures are silently ignored to
+	// match the existing strconv.Atoi pattern used for poll_minutes above.
+	// The backoff ladder (5s / 15s / 60s / 5min) is intentionally NOT
+	// exposed — it ships as a fixed v3.0 contract.
+	if v := r.FormValue("bulk_max_in_flight"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			settings.BulkMaxInFlight = n
+		}
+	}
+	if v := r.FormValue("bulk_refill_threshold"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			settings.BulkRefillThreshold = n
+		}
+	}
+	if v := r.FormValue("bulk_inter_batch_delay_sec"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			settings.BulkInterBatchDelaySec = n
+		}
+	}
+
 	// Parse override rows. Form fields come as override_category_<idx> +
 	// override_binding_<idx> pairs (idx is the JS counter, not stable).
 	// Plan B Task 5: writes now land in the v2 SuwayomiCategoryBindings map
