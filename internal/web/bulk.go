@@ -2,11 +2,27 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
+	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
 )
+
+// bulkPreview is the per-manga preview row returned by apiBulkCreate
+// when confirm=0. The JSON shape is preserved from Plan A T13 (scripted
+// callers without HX-Request still receive it verbatim); promoting it
+// from an inline struct to file scope lets renderBulkConfirmModal
+// aggregate it for the HTMX confirmation modal (Plan B T3).
+type bulkPreview struct {
+	MangaID    int64  `json:"manga_id"`
+	Title      string `json:"title"`
+	SourceID   string `json:"source_id"`
+	SourceName string `json:"source_name"`
+	Missing    int    `json:"missing"`
+}
 
 // apiBulkJobs handles GET /api/bulk/jobs. Returns a JSON array of all
 // bulk jobs, optionally filtered by ?status=<running|paused|...>.
@@ -27,6 +43,119 @@ func (h *Handler) apiBulkJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(jobs)
+}
+
+// apiLibrarySync handles POST /api/library/sync. Fetches every manga the
+// operator has in Suwayomi's library via the existing
+// ListLibraryWithCategories GraphQL query and upserts one row per manga
+// into library_cache.
+//
+// Chapter counts (total / downloaded) are left at 0 here — the Library
+// page's per-row HTMX fragment endpoint (Plan B T2) fills them in lazily
+// so the sync call returns quickly even for libraries of 100+ series.
+//
+// Closes the Plan A→B gap flagged in the design review: library_cache
+// existed in the schema but was never written, so POST /api/bulk 400'd on
+// every request with "manga_id not in library cache".
+//
+// Returns:
+//   - 503 when Suwayomi isn't configured
+//   - 502 on a Suwayomi error
+//   - 500 on a store write error
+//   - 200 with {"synced":N} JSON on success
+func (h *Handler) apiLibrarySync(w http.ResponseWriter, r *http.Request) {
+	if h.suwayomi == nil {
+		http.Error(w, "suwayomi client not configured", http.StatusServiceUnavailable)
+		return
+	}
+	entries, err := h.suwayomi.ListLibraryWithCategories(r.Context())
+	if err != nil {
+		http.Error(w, "suwayomi library fetch: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	for _, e := range entries {
+		if err := h.store.SaveLibraryCacheEntry(model.LibraryCacheEntry{
+			MangaID:    e.ID,
+			Title:      e.Title,
+			SourceID:   e.SourceID,
+			SourceName: e.Source,
+			// TotalChapters and Downloaded stay 0; T2's fragment endpoint
+			// fills them in on first Library page render.
+		}); err != nil {
+			http.Error(w, "library_cache write: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = fmt.Fprintf(w, `{"synced":%d}`, len(entries))
+}
+
+// apiLibraryRowMissing handles GET /api/library/{mangaId}/missing.
+// Returns an HTMX-swappable 3-cell <td> fragment with Total / Downloaded /
+// Missing counts. Triggered lazily per-row from the Library page so the
+// page paints fast and the per-manga Suwayomi roundtrip is amortised
+// across N parallel HTMX requests.
+//
+// On a successful render the cache is best-effort refreshed with the
+// new counts so subsequent reads are warm. A cache-write error is
+// swallowed: the fragment still rendered correctly, and the next
+// request will simply re-roundtrip.
+//
+// Returns:
+//   - 400 on an unparseable mangaId path segment
+//   - 404 when the manga isn't in library_cache (HTMX swaps a visible
+//     "not in cache" indicator rather than blank cells)
+//   - 503 when Suwayomi isn't configured
+//   - 502 on a Suwayomi error
+//   - 200 with the rendered fragment on success
+func (h *Handler) apiLibraryRowMissing(w http.ResponseWriter, r *http.Request) {
+	mIDStr := r.PathValue("mangaId")
+	mID, err := strconv.ParseInt(mIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid mangaId", http.StatusBadRequest)
+		return
+	}
+	entry, err := h.store.GetLibraryCacheEntry(mID)
+	if err != nil {
+		http.Error(w, "not in library cache", http.StatusNotFound)
+		return
+	}
+	if h.suwayomi == nil {
+		http.Error(w, "suwayomi client not configured", http.StatusServiceUnavailable)
+		return
+	}
+	chapters, err := h.suwayomi.ListChapters(r.Context(), mID)
+	if err != nil {
+		http.Error(w, "suwayomi list chapters: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	total := len(chapters)
+	downloaded := 0
+	for _, c := range chapters {
+		if c.IsDownloaded {
+			downloaded++
+		}
+	}
+	missing := total - downloaded
+
+	// Best-effort cache refresh — preserve Title/SourceID/SourceName from
+	// the existing entry, overwrite only the count fields. A write error
+	// is swallowed: the fragment rendered fine, the next request will
+	// simply re-roundtrip and try again.
+	entry.TotalChapters = total
+	entry.Downloaded = downloaded
+	_ = h.store.SaveLibraryCacheEntry(entry)
+
+	data := struct {
+		Total      int
+		Downloaded int
+		Missing    int
+	}{total, downloaded, missing}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := h.renderTemplate(w, "library-row-count", "library-row-count", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
 // apiBulkCreate handles POST /api/bulk. Creates one BulkJob per manga_id
@@ -57,14 +186,7 @@ func (h *Handler) apiBulkCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	confirm := r.FormValue("confirm") == "1"
 
-	type preview struct {
-		MangaID    int64  `json:"manga_id"`
-		Title      string `json:"title"`
-		SourceID   string `json:"source_id"`
-		SourceName string `json:"source_name"`
-		Missing    int    `json:"missing"`
-	}
-	var previews []preview
+	var previews []bulkPreview
 
 	for _, mIDStr := range mangaIDStrs {
 		mID, err := strconv.ParseInt(mIDStr, 10, 64)
@@ -88,7 +210,7 @@ func (h *Handler) apiBulkCreate(w http.ResponseWriter, r *http.Request) {
 				missingIDs = append(missingIDs, c.ID)
 			}
 		}
-		previews = append(previews, preview{
+		previews = append(previews, bulkPreview{
 			MangaID:    mID,
 			Title:      entry.Title,
 			SourceID:   entry.SourceID,
@@ -123,8 +245,85 @@ func (h *Handler) apiBulkCreate(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/downloads", http.StatusSeeOther)
 		return
 	}
+	// Plan B T3: HTMX-driven submits from /library's form get the
+	// confirmation modal as HTML. Scripted (non-HTMX) callers still get
+	// the JSON preview from Plan A T13 — the HX-Request header is the
+	// branch point and is added automatically by HTMX.
+	if r.Header.Get("HX-Request") == "true" {
+		h.renderBulkConfirmModal(w, previews)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(previews)
+}
+
+// renderBulkConfirmModal collapses the preview slice into the shape
+// expected by bulk-confirm.html: per-provider aggregation (series +
+// chapter counts grouped by SourceName, falling back to SourceID when
+// the displayName is empty), running totals, and an .Empty flag so the
+// template can branch to empty-state copy when every selected series
+// is already fully downloaded.
+//
+// Providers are sorted by Name for stable rendering — pin-style tests
+// rely on deterministic order, and the operator-facing list reads
+// better alphabetised than in arbitrary map-iteration order.
+func (h *Handler) renderBulkConfirmModal(w http.ResponseWriter, previews []bulkPreview) {
+	type providerRow struct {
+		Name         string
+		SeriesCount  int
+		ChapterCount int
+	}
+	byProvider := map[string]*providerRow{}
+	totalChapters := 0
+	seriesCount := 0
+	mangaIDs := make([]int64, 0, len(previews))
+	for _, p := range previews {
+		mangaIDs = append(mangaIDs, p.MangaID)
+		if p.Missing == 0 {
+			// Don't include zero-missing series in the per-provider
+			// breakdown; if every selection is zero-missing the .Empty
+			// branch below renders the "fully downloaded" copy.
+			continue
+		}
+		seriesCount++
+		totalChapters += p.Missing
+		key := p.SourceName
+		if key == "" {
+			key = p.SourceID
+		}
+		if pr, ok := byProvider[key]; ok {
+			pr.SeriesCount++
+			pr.ChapterCount += p.Missing
+		} else {
+			byProvider[key] = &providerRow{Name: key, SeriesCount: 1, ChapterCount: p.Missing}
+		}
+	}
+	providers := make([]providerRow, 0, len(byProvider))
+	for _, pr := range byProvider {
+		providers = append(providers, *pr)
+	}
+	sort.Slice(providers, func(i, j int) bool { return providers[i].Name < providers[j].Name })
+
+	data := struct {
+		Empty         bool
+		TotalChapters int
+		SeriesCount   int
+		ProviderCount int
+		Providers     []providerRow
+		MangaIDs      []int64
+	}{
+		Empty:         seriesCount == 0,
+		TotalChapters: totalChapters,
+		SeriesCount:   seriesCount,
+		ProviderCount: len(providers),
+		Providers:     providers,
+		MangaIDs:      mangaIDs,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := h.renderTemplate(w, "bulk-confirm", "bulk-confirm", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
 // apiDownloadsAction handles POST /api/downloads/{id}/{action} where
@@ -138,7 +337,11 @@ func (h *Handler) apiBulkCreate(w http.ResponseWriter, r *http.Request) {
 // from Migration 4 (store.Open enables PRAGMA foreign_keys=ON so it fires).
 //
 // Returns:
-//   - 200 on success (no body — clients reload the list via GET /api/bulk/jobs)
+//   - On HX-Request: true (Plan B T4) — 200 with one <tr> (pause/resume re-read
+//     the job and render bulk-row.html; delete returns "<tr></tr>" so HTMX's
+//     outerHTML swap removes the row visually).
+//   - Otherwise — 200 no-body (Plan A T14: scripted callers reload via
+//     GET /api/bulk/jobs).
 //   - 400 on unparseable {id} or unknown {action}
 //   - 500 on store errors
 func (h *Handler) apiDownloadsAction(w http.ResponseWriter, r *http.Request) {
@@ -175,5 +378,77 @@ func (h *Handler) apiDownloadsAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown action: "+action, http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	// Plan A T14 branch — scripted (non-HTMX) callers get 200-no-body and
+	// reload via GET /api/bulk/jobs.
+	if r.Header.Get("HX-Request") != "true" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	// Plan B T4 branch — HTMX swap. Delete has no row to render; return an
+	// empty <tr> so the outerHTML swap removes the row visually.
+	if action == "delete" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<tr></tr>"))
+		return
+	}
+	// pause/resume — re-read the job (the in-place status flip is visible
+	// here) and render the updated <tr>.
+	job, err := h.store.GetBulkJob(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.renderBulkRow(w, job)
+}
+
+// renderBulkRow renders a single <tr> for the /downloads queue dashboard.
+// Used by both the per-action HTMX swaps (pause/resume) and — once T6
+// lands — the 3s HTMX poll that refreshes every row in the table.
+func (h *Handler) renderBulkRow(w http.ResponseWriter, job model.BulkJob) {
+	view := bulkRowView(job)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := h.renderTemplate(w, "bulk-row", "bulk-row", view); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+// bulkRowViewT wraps a BulkJob with computed display fields (ProgressPct,
+// LastUpdateHuman) so the template stays logic-free.
+type bulkRowViewT struct {
+	ID                int64
+	Title             string
+	SourceName        string
+	Status            model.BulkJobStatus
+	TotalChapters     int
+	CompletedChapters int
+	ProgressPct       int
+	LastUpdateHuman   string
+}
+
+// bulkRowView computes the per-row display fields from a BulkJob.
+//
+// ProgressPct is clamped to [0,100] — TotalChapters can legitimately be 0
+// for a freshly-saved job whose chapter rows haven't been counted yet, and
+// CompletedChapters > TotalChapters can briefly happen if completion races
+// the total recount; both cases stay safe by short-circuiting / clamping
+// rather than returning a nonsense percentage.
+func bulkRowView(j model.BulkJob) bulkRowViewT {
+	pct := 0
+	if j.TotalChapters > 0 {
+		pct = (j.CompletedChapters * 100) / j.TotalChapters
+		if pct > 100 {
+			pct = 100
+		}
+	}
+	return bulkRowViewT{
+		ID:                j.ID,
+		Title:             j.Title,
+		SourceName:        j.SourceName,
+		Status:            j.Status,
+		TotalChapters:     j.TotalChapters,
+		CompletedChapters: j.CompletedChapters,
+		ProgressPct:       pct,
+		LastUpdateHuman:   formatAge(time.Now(), j.UpdatedAt),
+	}
 }

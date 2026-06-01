@@ -1,0 +1,44 @@
+{{define "bulk-confirm"}}
+{{if .Empty}}
+<div class="modal-shell">
+  <div class="modal-card">
+    <h2 class="modal-title">Bulk download</h2>
+    <p class="modal-body">All selected series are fully downloaded — nothing to do.</p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary"
+              hx-on:click="document.getElementById('confirm-modal').innerHTML=''">Close</button>
+    </div>
+  </div>
+</div>
+{{else}}
+<div class="modal-shell">
+  <div class="modal-card">
+    <h2 class="modal-title">Bulk download</h2>
+    <p class="modal-body">
+      You're about to queue <b>{{.TotalChapters}} chapters</b> across
+      <b>{{.SeriesCount}} series</b> and
+      <b>{{.ProviderCount}} provider{{if ne .ProviderCount 1}}s{{end}}</b>.
+    </p>
+    <ul class="modal-list">
+      {{range .Providers}}
+      <li>{{.Name}} — {{.SeriesCount}} series · {{.ChapterCount}} chapters</li>
+      {{end}}
+    </ul>
+    <p class="modal-fine">
+      Mangarr will pace 5 chapters in flight per provider, refilling when down to 2.
+      Suwayomi's per-chapter delay still applies on top.
+      Different providers download in parallel; same provider runs one series at a time.
+    </p>
+    <form hx-post="/api/bulk" hx-swap="none">
+      {{range .MangaIDs}}<input type="hidden" name="manga_id" value="{{.}}">{{end}}
+      <input type="hidden" name="confirm" value="1">
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary"
+                hx-on:click="document.getElementById('confirm-modal').innerHTML=''">Cancel</button>
+        <button type="submit" class="btn btn-primary">Queue downloads</button>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}
+{{end}}

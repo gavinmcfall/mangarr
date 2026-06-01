@@ -334,6 +334,38 @@
     </div>
   </div>
 
+  <!-- Bulk Download -->
+  <div class="settings-card">
+    <div class="settings-card-header">
+      <p class="settings-card-title">Bulk Download</p>
+      <p class="settings-card-desc">Per-provider pacing for the safe-mass-download feature on the Library page.</p>
+    </div>
+    <div class="settings-card-body">
+      <div class="settings-row">
+        <label class="settings-label">Max in-flight per provider</label>
+        <div class="settings-input-wrap">
+          <input type="number" name="bulk_max_in_flight" min="1" max="50"
+            value="{{.Settings.BulkMaxInFlight}}">
+        </div>
+      </div>
+      <div class="settings-row">
+        <label class="settings-label">Refill threshold</label>
+        <div class="settings-input-wrap">
+          <input type="number" name="bulk_refill_threshold" min="0" max="50"
+            value="{{.Settings.BulkRefillThreshold}}">
+        </div>
+      </div>
+      <div class="settings-row">
+        <label class="settings-label">Inter-batch delay (seconds)</label>
+        <div class="settings-input-wrap">
+          <input type="number" name="bulk_inter_batch_delay_sec" min="0" max="60"
+            value="{{.Settings.BulkInterBatchDelaySec}}">
+        </div>
+      </div>
+      <p class="settings-card-desc" style="margin-top:4px;">Backoff ladder on Suwayomi HTTP 429: 5s → 15s → 60s → 5min, then mark errored.</p>
+    </div>
+  </div>
+
   <!-- Library Map -->
   <div class="settings-card">
     <div class="settings-card-header">

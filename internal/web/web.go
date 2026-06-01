@@ -110,11 +110,24 @@ type Store interface {
 	// POST /api/bulk uses that "missing entry" signal to reject unknown
 	// manga IDs with HTTP 400.
 	GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry, error)
+	// SaveLibraryCacheEntry upserts (by manga_id) one row in library_cache.
+	// Used by POST /api/library/sync (Plan B T1) to populate the cache from
+	// Suwayomi's library; without this the bulk-create handler 400s with
+	// "manga_id not in library cache" because nothing ever writes the table.
+	SaveLibraryCacheEntry(in model.LibraryCacheEntry) error
+	// ListLibraryCacheEntries returns every row in library_cache ordered by
+	// title — drives the /library page (Plan B T5). *store.Store satisfies
+	// this from Plan A T5.
+	ListLibraryCacheEntries() ([]model.LibraryCacheEntry, error)
 
 	// --- Bulk-download mutation surfaces (Plan A T14) ---
 	// UpdateBulkJobStatus flips a job's status — used by the
 	// POST /api/downloads/{id}/{pause,resume} actions.
 	UpdateBulkJobStatus(id int64, status model.BulkJobStatus) error
+	// GetBulkJob re-reads a single job by ID — used by Plan B T4's
+	// HX-Request branch in apiDownloadsAction to render the updated
+	// <tr> after pause/resume mutates status.
+	GetBulkJob(id int64) (model.BulkJob, error)
 	// ClearBulkJobBackoff resets backoff_until + consecutive_failures —
 	// invoked from POST /api/downloads/{id}/resume so an errored job
 	// gets a clean slate before the next orchestrator tick.
@@ -125,11 +138,15 @@ type Store interface {
 }
 
 // SuwayomiClient is the subset of *suwayomi.Client the web package needs.
-// Currently only ListChapters (for POST /api/bulk's per-manga chapter
-// fetch). Plan B will extend with category-list calls for the bulk
-// confirmation modal.
+//
+// ListChapters drives POST /api/bulk's per-manga chapter fetch.
+// ListLibraryWithCategories drives POST /api/library/sync's full-library
+// upsert into library_cache (Plan B T1). The name mirrors *suwayomi.Client's
+// existing method so the production client satisfies the interface
+// implicitly.
 type SuwayomiClient interface {
 	ListChapters(ctx context.Context, mangaID int64) ([]suwayomi.Chapter, error)
+	ListLibraryWithCategories(ctx context.Context) ([]suwayomi.Manga, error)
 }
 
 // Runner can execute one poll pass on demand.
@@ -271,6 +288,8 @@ func NewHandler(opts HandlerOpts) *Handler {
 	h.mux.HandleFunc("GET /activity", h.pageActivity)
 	h.mux.HandleFunc("GET /health", h.pageHealth)
 	h.mux.HandleFunc("GET /tasks", h.pageTasks)
+	h.mux.HandleFunc("GET /library", h.pageLibrary)
+	h.mux.HandleFunc("GET /downloads", h.pageDownloads)
 	h.mux.HandleFunc("GET /settings", h.pageSettings)
 	h.mux.HandleFunc("POST /settings", h.saveSettings)
 
@@ -309,10 +328,22 @@ func NewHandler(opts HandlerOpts) *Handler {
 	// ?status=.
 	h.mux.HandleFunc("GET /api/bulk/jobs", h.apiBulkJobs)
 	h.mux.HandleFunc("POST /api/bulk", h.apiBulkCreate)
+	// Plan B T1: re-sync library_cache from Suwayomi. Closes the Plan A→B
+	// gap where library_cache was never written, causing POST /api/bulk
+	// to 400 on every request with "manga_id not in library cache".
+	h.mux.HandleFunc("POST /api/library/sync", h.apiLibrarySync)
+	// Plan B T2: per-row count fragment for the Library page. Triggered
+	// lazily by HTMX on each row render so the page paints fast and the
+	// per-manga Suwayomi roundtrip is parallelised across N rows.
+	h.mux.HandleFunc("GET /api/library/{mangaId}/missing", h.apiLibraryRowMissing)
 	// Plan A T14: pause/resume/delete a bulk job. action is one of
 	// pause, resume, delete; resume additionally clears backoff state
 	// so an errored job's next orchestrator tick starts unencumbered.
 	h.mux.HandleFunc("POST /api/downloads/{id}/{action}", h.apiDownloadsAction)
+	// Plan B T6: HTMX 3s-poll fragment for /downloads. Returns just the
+	// <tbody> for outerHTML swap. filter=active (default, excludes
+	// completed) | all (includes everything).
+	h.mux.HandleFunc("GET /api/downloads/list", h.apiDownloadsList)
 
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
@@ -340,7 +371,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // overlaid, ensuring that {{block "content"}} resolves to THAT page's
 // definition rather than whichever happened to be parsed last globally.
 func parsePageTemplates() map[string]*template.Template {
-	pages := []string{"series.html", "preview.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "settings.html"}
+	pages := []string{"series.html", "preview.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "library.html", "downloads.html", "settings.html"}
 	// Pages that need the override-rows partial. Listed explicitly so
 	// adding the partial to a new page is a one-line change here, not a
 	// fan-out across the codebase.
@@ -349,6 +380,9 @@ func parsePageTemplates() map[string]*template.Template {
 	withBindingRows := map[string]bool{"settings.html": true}
 	// Pages that need the rule-rows partial (Plan B Classification Rules card).
 	withRuleRows := map[string]bool{"settings.html": true}
+	// Pages that need the bulk-row partial (Plan B T6 Downloads dashboard
+	// renders one <tr> per BulkJob via the shared bulk-row partial).
+	withBulkRow := map[string]bool{"downloads.html": true}
 	m := make(map[string]*template.Template, len(pages)+1)
 	for _, name := range pages {
 		// Parse base + the specific page. This gives each page its own
@@ -363,6 +397,9 @@ func parsePageTemplates() map[string]*template.Template {
 		if withRuleRows[name] {
 			files = append(files, "templates/rule-rows.html")
 		}
+		if withBulkRow[name] {
+			files = append(files, "templates/bulk-row.html")
+		}
 		t := template.Must(
 			template.New("").Funcs(templateFuncs()).ParseFS(assets, files...),
 		)
@@ -374,6 +411,44 @@ func parsePageTemplates() map[string]*template.Template {
 	m["override-fragment"] = template.Must(
 		template.New("").Funcs(templateFuncs()).ParseFS(assets,
 			"templates/override-rows.html",
+		),
+	)
+	// Plan B T2: standalone per-row count fragment for the Library page.
+	// HTMX-loaded lazily on each row render so the page paints fast and
+	// per-manga Suwayomi roundtrips are parallelised across the rows.
+	m["library-row-count"] = template.Must(
+		template.New("").Funcs(templateFuncs()).ParseFS(assets,
+			"templates/library-row-count.html",
+		),
+	)
+	// Plan B T3: standalone confirmation-modal fragment returned by
+	// POST /api/bulk when HX-Request: true. HTMX-driven submits from
+	// /library swap this HTML into #confirm-modal; scripted callers
+	// still get the JSON preview from Plan A T13.
+	m["bulk-confirm"] = template.Must(
+		template.New("").Funcs(templateFuncs()).ParseFS(assets,
+			"templates/bulk-confirm.html",
+		),
+	)
+	// Plan B T4: per-row partial returned by POST /api/downloads/{id}/{action}
+	// on HX-Request so HTMX outerHTML-swaps just the affected <tr> after
+	// pause/resume. T6 will reuse this same partial inside the 3s poll
+	// fragment for the /downloads dashboard.
+	m["bulk-row"] = template.Must(
+		template.New("").Funcs(templateFuncs()).ParseFS(assets,
+			"templates/bulk-row.html",
+		),
+	)
+	// Plan B T6: standalone <tbody>-fragment template for the /downloads
+	// 3s HTMX poll. Parses downloads.html (which defines "downloads-rows")
+	// together with bulk-row.html so the per-row partial is reachable.
+	// The fragment endpoint calls ExecuteTemplate(w, "downloads-rows", ...)
+	// to emit just the tbody — the page render still uses the page set
+	// above to wrap the same tbody in base.html chrome.
+	m["downloads-rows"] = template.Must(
+		template.New("").Funcs(templateFuncs()).ParseFS(assets,
+			"templates/downloads.html",
+			"templates/bulk-row.html",
 		),
 	)
 	return m
@@ -984,6 +1059,165 @@ func buildTaskRow(info tasks.Info) taskRow {
 	}
 }
 
+// libraryPageData drives the /library page render. Page mirrors the
+// convention used by seriesPageData/settingsPageData so the sidebar
+// active-link highlight (T9) can pick it up. SuwayomiConfigured drives
+// the "Configure Suwayomi" empty state; Entries == nil/empty drives the
+// "library empty" empty state.
+type libraryPageData struct {
+	Page               string
+	SuwayomiConfigured bool
+	Entries            []libraryRow
+}
+
+// libraryRow is the view-model for one row on /library. JobStatus is
+// the most-recent bulk_job status for this manga (running/paused/
+// completed/errored), or empty when no job exists yet.
+type libraryRow struct {
+	MangaID    int64
+	Title      string
+	SourceID   string
+	SourceName string
+	JobStatus  string
+}
+
+func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
+	configured := h.suwayomi != nil
+	if !configured {
+		// Unconfigured empty state — operator hasn't wired Suwayomi at all.
+		// We deliberately don't try to load library_cache here because the
+		// page can't function without a live Suwayomi client (Sync, lazy
+		// per-row counts, and bulk-download all depend on it).
+		h.render(w, "library.html", libraryPageData{Page: "library", SuwayomiConfigured: false})
+		return
+	}
+	entries, err := h.store.ListLibraryCacheEntries()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	rows := make([]libraryRow, 0, len(entries))
+	for _, e := range entries {
+		rows = append(rows, libraryRow{
+			MangaID:    e.MangaID,
+			Title:      e.Title,
+			SourceID:   e.SourceID,
+			SourceName: e.SourceName,
+			JobStatus:  h.mostRecentBulkJobStatus(e.MangaID),
+		})
+	}
+	h.render(w, "library.html", libraryPageData{
+		Page:               "library",
+		SuwayomiConfigured: true,
+		Entries:            rows,
+	})
+}
+
+// mostRecentBulkJobStatus returns the status of the most-recent bulk_job
+// row for this manga (by created_at), or "" when no job exists. Cheap —
+// the typical operator has at most a handful of jobs per manga, and
+// ListBulkJobs("") is already O(N) over the bulk_jobs table.
+func (h *Handler) mostRecentBulkJobStatus(mangaID int64) string {
+	jobs, err := h.store.ListBulkJobs("")
+	if err != nil {
+		return ""
+	}
+	var newest *model.BulkJob
+	for i := range jobs {
+		if jobs[i].MangaID != mangaID {
+			continue
+		}
+		if newest == nil || jobs[i].CreatedAt.After(newest.CreatedAt) {
+			newest = &jobs[i]
+		}
+	}
+	if newest == nil {
+		return ""
+	}
+	return string(newest.Status)
+}
+
+// downloadsPageData drives the /downloads dashboard. Page is consumed by
+// base.html's sidebar active-link highlight (T9). Filter is "active"
+// (default — excludes completed) or "all". Jobs holds one bulkRowViewT
+// per BulkJob the filter accepted.
+type downloadsPageData struct {
+	Page   string
+	Filter string
+	Jobs   []bulkRowViewT
+}
+
+// pageDownloads renders /downloads. The page paints the full chrome
+// once; the <tbody> then self-polls /api/downloads/list every 3s via
+// HTMX outerHTML swap, which keeps the polling attributes alive on
+// each tick because apiDownloadsList re-emits the same <tbody>.
+func (h *Handler) pageDownloads(w http.ResponseWriter, r *http.Request) {
+	filter := r.URL.Query().Get("filter")
+	if filter != "all" {
+		filter = "active"
+	}
+	jobs, err := h.collectBulkJobsForFilter(filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.render(w, "downloads.html", downloadsPageData{
+		Page:   "downloads",
+		Filter: filter,
+		Jobs:   jobs,
+	})
+}
+
+// apiDownloadsList is the 3s-poll fragment endpoint. Renders just the
+// <tbody> (via the "downloads-rows" block) so the HTMX outerHTML swap
+// replaces the existing tbody in-place. The block re-emits the same
+// hx-get/hx-trigger attributes so subsequent ticks keep polling.
+func (h *Handler) apiDownloadsList(w http.ResponseWriter, r *http.Request) {
+	filter := r.URL.Query().Get("filter")
+	if filter != "all" {
+		filter = "active"
+	}
+	jobs, err := h.collectBulkJobsForFilter(filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := h.renderTemplate(w, "downloads-rows", "downloads-rows", downloadsPageData{
+		Page:   "downloads",
+		Filter: filter,
+		Jobs:   jobs,
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// collectBulkJobsForFilter pulls every BulkJob from the store, applies
+// the active|all filter, and maps to the bulkRowViewT shared with T4's
+// per-row HTMX swap so both code paths render identical row markup.
+// Active = running|paused|pending|errored (anything an operator might
+// want to intervene on). All = every row including completed.
+func (h *Handler) collectBulkJobsForFilter(filter string) ([]bulkRowViewT, error) {
+	jobs, err := h.store.ListBulkJobs("")
+	if err != nil {
+		return nil, err
+	}
+	active := map[model.BulkJobStatus]bool{
+		model.BulkJobRunning: true,
+		model.BulkJobPaused:  true,
+		model.BulkJobPending: true,
+		model.BulkJobErrored: true,
+	}
+	rows := make([]bulkRowViewT, 0, len(jobs))
+	for _, j := range jobs {
+		if filter == "active" && !active[j.Status] {
+			continue
+		}
+		rows = append(rows, bulkRowView(j))
+	}
+	return rows, nil
+}
+
 func (h *Handler) pageHealth(w http.ResponseWriter, r *http.Request) {
 	if h.healthReg == nil {
 		h.render(w, "health.html", healthPageData{
@@ -1395,6 +1629,28 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 	// Password kept as-is; trimming would silently break credentials with a
 	// leading/trailing space.
 	settings.SuwayomiPassword = r.FormValue("suwayomi_password")
+
+	// --- Bulk Download pacing knobs (Plan A T3 / Plan B T8) ---
+	// Three operator-tunable orchestrator knobs. Empty form values leave the
+	// existing setting untouched; parse failures are silently ignored to
+	// match the existing strconv.Atoi pattern used for poll_minutes above.
+	// The backoff ladder (5s / 15s / 60s / 5min) is intentionally NOT
+	// exposed — it ships as a fixed v3.0 contract.
+	if v := r.FormValue("bulk_max_in_flight"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			settings.BulkMaxInFlight = n
+		}
+	}
+	if v := r.FormValue("bulk_refill_threshold"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			settings.BulkRefillThreshold = n
+		}
+	}
+	if v := r.FormValue("bulk_inter_batch_delay_sec"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			settings.BulkInterBatchDelaySec = n
+		}
+	}
 
 	// Parse override rows. Form fields come as override_category_<idx> +
 	// override_binding_<idx> pairs (idx is the JS counter, not stable).

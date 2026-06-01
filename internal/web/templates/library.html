@@ -1,0 +1,100 @@
+{{template "base" .}}
+{{define "title"}}Library{{end}}
+{{define "content"}}
+<header class="page-header">
+  <h1 class="page-title">Library</h1>
+  <div class="page-actions">
+    <span class="page-subtitle">What's in your Suwayomi library. Select rows then bulk-download missing chapters.</span>
+    {{if .SuwayomiConfigured}}
+    <button class="btn btn-secondary"
+            hx-post="/api/library/sync"
+            hx-swap="none"
+            hx-on::after-request="window.location.reload()">Sync</button>
+    {{end}}
+  </div>
+</header>
+<div class="page-body">
+  <div class="content-container">
+{{if not .SuwayomiConfigured}}
+<div class="empty-state">
+  <p>Configure Suwayomi in Settings to use Library.</p>
+  <a class="btn btn-primary" href="/settings#suwayomi">Open Settings</a>
+</div>
+{{else if not .Entries}}
+<div class="empty-state">
+  <p>Your Suwayomi library is empty. Add series via Suwayomi first, then click <b>Sync</b>.</p>
+</div>
+{{else}}
+<form hx-post="/api/bulk"
+      hx-target="#confirm-modal"
+      hx-swap="innerHTML">
+  <input type="hidden" name="confirm" value="0">
+
+  <div class="library-action-bar">
+    <span class="library-selection-counter" id="lib-selection-counter">0 selected</span>
+    <button class="btn btn-primary" type="submit" id="lib-download-btn" disabled>
+      Download Missing
+    </button>
+  </div>
+
+  <div class="data-table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th><input type="checkbox" id="lib-select-all"></th>
+        <th>Title</th>
+        <th>Source</th>
+        <th class="td-right">Total</th>
+        <th class="td-right">Got</th>
+        <th class="td-right">Missing</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Entries}}
+      <tr class="library-row">
+        <td>
+          <input type="checkbox" class="library-row-checkbox"
+                 name="manga_id" value="{{.MangaID}}">
+        </td>
+        <td>{{.Title}}</td>
+        <td class="td-dim">{{.SourceName}}</td>
+        <td hx-get="/api/library/{{.MangaID}}/missing"
+            hx-trigger="load"
+            hx-swap="outerHTML"
+            colspan="3"
+            class="td-dim td-right library-row-counts-loading">…</td>
+        <td class="td-dim">{{.JobStatus}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+</form>
+
+<div id="confirm-modal"></div>
+
+<script>
+(function () {
+  const counter = document.getElementById('lib-selection-counter');
+  const btn = document.getElementById('lib-download-btn');
+  const all = document.getElementById('lib-select-all');
+  const checks = () => document.querySelectorAll('.library-row-checkbox');
+  function refresh() {
+    const n = Array.from(checks()).filter(c => c.checked).length;
+    counter.textContent = n + ' selected';
+    btn.disabled = n === 0;
+  }
+  document.addEventListener('change', e => {
+    if (e.target.classList.contains('library-row-checkbox')) refresh();
+  });
+  all.addEventListener('change', () => {
+    checks().forEach(c => c.checked = all.checked);
+    refresh();
+  });
+})();
+</script>
+{{end}}
+  </div>
+</div>
+{{end}}

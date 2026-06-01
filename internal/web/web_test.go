@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +51,10 @@ type fakeStore struct {
 	bulkStatusUpdates []bulkStatusCall
 	bulkClearBackoff  []int64
 	bulkDeletes       []int64
+	// Plan B T1: library_cache writes (POST /api/library/sync). Append-only
+	// so tests can assert ordering matches the slice the Suwayomi client
+	// returned.
+	savedLibraryEntries []model.LibraryCacheEntry
 	// callOrder records the sequence of Store mutations for tests that
 	// pin ordering invariants (e.g. "ClearBulkJobBackoff must run BEFORE
 	// UpdateBulkJobStatus on resume from errored"). Append-only.
@@ -185,12 +190,57 @@ func (f *fakeStore) GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry
 	return model.LibraryCacheEntry{}, sql.ErrNoRows
 }
 
+// ListLibraryCacheEntries returns every cached library entry sorted by
+// title so the /library page test assertions are deterministic regardless
+// of Go map iteration order.
+func (f *fakeStore) ListLibraryCacheEntries() ([]model.LibraryCacheEntry, error) {
+	out := make([]model.LibraryCacheEntry, 0, len(f.libraryCache))
+	for _, e := range f.libraryCache {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Title < out[j].Title })
+	return out, nil
+}
+
+// SaveLibraryCacheEntry appends the entry to savedLibraryEntries (for
+// ordering assertions) and upserts into libraryCache (so subsequent
+// GetLibraryCacheEntry calls see the write).
+func (f *fakeStore) SaveLibraryCacheEntry(in model.LibraryCacheEntry) error {
+	f.savedLibraryEntries = append(f.savedLibraryEntries, in)
+	if f.libraryCache == nil {
+		f.libraryCache = map[int64]model.LibraryCacheEntry{}
+	}
+	f.libraryCache[in.MangaID] = in
+	return nil
+}
+
 // --- Plan A T14: pause/resume/delete mutation surfaces ---
 
 func (f *fakeStore) UpdateBulkJobStatus(id int64, s model.BulkJobStatus) error {
 	f.bulkStatusUpdates = append(f.bulkStatusUpdates, bulkStatusCall{id, s})
 	f.callOrder = append(f.callOrder, fmt.Sprintf("status:%d:%s", id, s))
+	// Plan B T4: also mutate bulkJobs in-place so a subsequent
+	// GetBulkJob re-read reflects the new status. The append-only
+	// trackers above remain for Plan A T14's assertions; this update
+	// is additive.
+	for i := range f.bulkJobs {
+		if f.bulkJobs[i].ID == id {
+			f.bulkJobs[i].Status = s
+		}
+	}
 	return nil
+}
+
+// GetBulkJob returns a single job by ID — Plan B T4's HX-Request branch
+// in apiDownloadsAction re-reads the row after the status flip so the
+// rendered <tr> reflects the mutation.
+func (f *fakeStore) GetBulkJob(id int64) (model.BulkJob, error) {
+	for _, j := range f.bulkJobs {
+		if j.ID == id {
+			return j, nil
+		}
+	}
+	return model.BulkJob{}, sql.ErrNoRows
 }
 
 func (f *fakeStore) ClearBulkJobBackoff(id int64) error {
@@ -212,6 +262,15 @@ func (f *fakeStore) DeleteBulkJob(id int64) error {
 // creation.
 type fakeSuwayomi struct {
 	chaptersForManga map[int64][]int64
+	// Plan B T2: per-chapter isDownloaded flag returned by ListChapters.
+	// Looked up by chapter ID; missing/false entries leave IsDownloaded
+	// at its zero value, which preserves the Plan A T13 behaviour where
+	// every chapter looked undownloaded.
+	chaptersDownloaded map[int64]bool
+	// Plan B T1: library entries returned by ListLibraryWithCategories
+	// (used by POST /api/library/sync). A nil/empty slice models the
+	// "operator has no series in Suwayomi yet" edge case.
+	libraryEntries []suwayomi.Manga
 }
 
 func (f *fakeSuwayomi) ListChapters(_ context.Context, mangaID int64) ([]suwayomi.Chapter, error) {
@@ -220,9 +279,18 @@ func (f *fakeSuwayomi) ListChapters(_ context.Context, mangaID int64) ([]suwayom
 	}
 	out := make([]suwayomi.Chapter, 0)
 	for _, id := range f.chaptersForManga[mangaID] {
-		out = append(out, suwayomi.Chapter{ID: id, IsDownloaded: false})
+		out = append(out, suwayomi.Chapter{ID: id, IsDownloaded: f.chaptersDownloaded[id]})
 	}
 	return out, nil
+}
+
+// ListLibraryWithCategories returns the seeded libraryEntries slice
+// unchanged so tests can assert against the same order the handler iterates.
+func (f *fakeSuwayomi) ListLibraryWithCategories(_ context.Context) ([]suwayomi.Manga, error) {
+	if f == nil {
+		return nil, nil
+	}
+	return f.libraryEntries, nil
 }
 
 // fakeRunner records RunOnce calls.
@@ -754,6 +822,39 @@ func TestSaveSettingsInvalidSchemeReturns400(t *testing.T) {
 	// Settings must NOT have been persisted.
 	if st.settings.RenameScheme != savedBefore {
 		t.Fatalf("settings were persisted despite validation failure")
+	}
+}
+
+// TestSettingsPOSTRoundTripsBulkPacingKnobs pins that the three Bulk
+// Download pacing knobs from Plan A T3 (BulkMaxInFlight,
+// BulkRefillThreshold, BulkInterBatchDelaySec) round-trip through the
+// saveSettings POST handler from form values into Settings.
+func TestSettingsPOSTRoundTripsBulkPacingKnobs(t *testing.T) {
+	h, st, _ := newTestHandler()
+	form := url.Values{
+		// Required-shape sibling fields copied from TestSaveSettingsFormPost
+		// so the handler doesn't reject the form on rename-scheme validation.
+		"file_mode":                  {"copy"},
+		"rename_scheme":              {"{series}/{series} - Ch.{chapter}.cbz"},
+		"poll_minutes":               {"60"},
+		"bulk_max_in_flight":         {"8"},
+		"bulk_refill_threshold":      {"3"},
+		"bulk_inter_batch_delay_sec": {"2"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/settings",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther && rec.Code != http.StatusOK {
+		t.Fatalf("settings save: want 200 or 303, got %d; body: %s",
+			rec.Code, rec.Body.String())
+	}
+	if st.settings.BulkMaxInFlight != 8 ||
+		st.settings.BulkRefillThreshold != 3 ||
+		st.settings.BulkInterBatchDelaySec != 2 {
+		t.Errorf("pacing knobs not persisted: %+v", st.settings)
 	}
 }
 

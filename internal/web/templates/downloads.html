@@ -1,0 +1,42 @@
+{{template "base" .}}
+{{define "title"}}Downloads{{end}}
+{{define "content"}}
+<header class="page-header">
+  <h1 class="page-title">Downloads</h1>
+  <div class="page-actions">
+    <span class="page-subtitle">Bulk download queue. Mangarr paces these per-provider to avoid bans.</span>
+    <a class="btn btn-sm{{if eq .Filter "active"}} btn-primary{{else}} btn-secondary{{end}}" href="/downloads?filter=active">Active</a>
+    <a class="btn btn-sm{{if eq .Filter "all"}} btn-primary{{else}} btn-secondary{{end}}" href="/downloads?filter=all">All</a>
+  </div>
+</header>
+<div class="page-body">
+  <div class="content-container">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Series</th>
+          <th>Source</th>
+          <th>Status</th>
+          <th>Progress</th>
+          <th>Last</th>
+          <th class="td-right">Actions</th>
+        </tr>
+      </thead>
+      {{template "downloads-rows" .}}
+    </table>
+  </div>
+</div>
+{{end}}
+
+{{define "downloads-rows"}}
+<tbody id="downloads-tbody"
+       hx-get="/api/downloads/list?filter={{.Filter}}"
+       hx-trigger="every 3s"
+       hx-swap="outerHTML">
+  {{if .Jobs}}
+    {{range .Jobs}}{{template "bulk-row" .}}{{end}}
+  {{else}}
+    <tr><td colspan="6" class="empty-state-cell">No bulk downloads. Start one from the Library page.</td></tr>
+  {{end}}
+</tbody>
+{{end}}

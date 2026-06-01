@@ -238,3 +238,169 @@ func TestAPIDownloadsDeleteRemovesJob(t *testing.T) {
 		t.Errorf("expected DeleteBulkJob(1); got %+v", st.bulkDeletes)
 	}
 }
+
+// TestAPIBulkCreatePreviewReturnsHTMLModalOnHXRequest: when the form
+// arrives with HX-Request: true and confirm=0, the handler renders the
+// confirmation modal HTML instead of JSON. Pin: per-provider grouping
+// (both series share sourceId 42 → 1 provider, 2 series, 8 chapters),
+// hidden inputs preserve the manga_ids for the confirm POST, and no
+// job is created during the preview.
+func TestAPIBulkCreatePreviewReturnsHTMLModalOnHXRequest(t *testing.T) {
+	h, st, sw := newTestHandler()
+	st.libraryCache = map[int64]model.LibraryCacheEntry{
+		7: {MangaID: 7, Title: "One Piece", SourceID: "42", SourceName: "MangaDex EN"},
+		8: {MangaID: 8, Title: "SOLO LEVELING", SourceID: "42", SourceName: "MangaDex EN"},
+	}
+	sw.chaptersForManga = map[int64][]int64{
+		7: {100, 101, 102},
+		8: {200, 201, 202, 203, 204},
+	}
+
+	form := url.Values{}
+	form.Add("manga_id", "7")
+	form.Add("manga_id", "8")
+	form.Set("confirm", "0")
+	req := httptest.NewRequest(http.MethodPost, "/api/bulk", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"You're about to queue <b>8 chapters</b>",
+		"<b>2 series</b>",
+		"<b>1 provider</b>",
+		"MangaDex EN",
+		`name="manga_id" value="7"`,
+		`name="manga_id" value="8"`,
+		`name="confirm" value="1"`,
+		"Queue downloads",
+		"Cancel",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("modal HTML missing %q. Body:\n%s", want, body)
+		}
+	}
+	if len(st.savedBulkJobs) != 0 {
+		t.Errorf("modal preview must NOT create jobs; got %d", len(st.savedBulkJobs))
+	}
+}
+
+// TestAPIBulkCreatePreviewModalSkipsZeroMissingSeries: when every
+// selected manga is already fully downloaded, the modal renders the
+// empty-state copy from the spec's "Empty states" section instead of
+// the queue-confirmation copy.
+func TestAPIBulkCreatePreviewModalSkipsZeroMissingSeries(t *testing.T) {
+	h, st, sw := newTestHandler()
+	st.libraryCache = map[int64]model.LibraryCacheEntry{
+		7: {MangaID: 7, Title: "Naruto", SourceID: "42", SourceName: "MangaDex EN"},
+	}
+	sw.chaptersForManga = map[int64][]int64{7: nil}
+
+	form := url.Values{}
+	form.Add("manga_id", "7")
+	form.Set("confirm", "0")
+	req := httptest.NewRequest(http.MethodPost, "/api/bulk", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "All selected series are fully downloaded") {
+		t.Errorf("expected empty-state modal copy; got:\n%s", rec.Body.String())
+	}
+}
+
+// TestAPIDownloadsPauseHXRequestReturnsUpdatedRow pins the Plan B T4
+// HX-Request branch for pause: after the in-place status flip, the
+// handler re-reads the job and renders a one-row HTML fragment whose
+// status pill / button set reflects the new (paused) state.
+func TestAPIDownloadsPauseHXRequestReturnsUpdatedRow(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.bulkJobs = []model.BulkJob{
+		{ID: 1, MangaID: 7, SourceID: "42", Title: "One Piece", SourceName: "MangaDex EN",
+			Status: model.BulkJobRunning, TotalChapters: 1076, CompletedChapters: 412},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/downloads/1/pause", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// The returned <tr> reflects the new status (the fakeStore updates
+	// bulkJobs in-place via UpdateBulkJobStatus so the GetBulkJob re-read
+	// here sees "paused").
+	for _, want := range []string{
+		"<tr", "One Piece", "MangaDex EN",
+		"412", "1076",
+		"pill-paused", "paused",
+		`hx-post="/api/downloads/1/resume"`,
+		`hx-post="/api/downloads/1/delete"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("row fragment missing %q. Body:\n%s", want, body)
+		}
+	}
+}
+
+// TestAPIDownloadsDeleteHXRequestReturnsEmptyTR pins delete's special
+// case: there's no row to render, so HTMX outerHTML-swaps an empty <tr>
+// to remove the row visually.
+func TestAPIDownloadsDeleteHXRequestReturnsEmptyTR(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.bulkJobs = []model.BulkJob{{ID: 1, Status: model.BulkJobRunning}}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/downloads/1/delete", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	body := strings.TrimSpace(rec.Body.String())
+	// Empty <tr> so HTMX outerHTML swap removes the row visually.
+	if body != "<tr></tr>" && body != "" {
+		t.Errorf("delete should return empty <tr> for outerHTML swap; got %q", body)
+	}
+}
+
+// TestAPIDownloadsResumeHXRequestReturnsRunningRow pins the resume path:
+// ClearBulkJobBackoff fires BEFORE UpdateBulkJobStatus(Running), and the
+// rendered row shows the Pause button (running state).
+func TestAPIDownloadsResumeHXRequestReturnsRunningRow(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.bulkJobs = []model.BulkJob{
+		{ID: 1, Title: "Berserk", SourceName: "MangaDex EN",
+			Status: model.BulkJobErrored, TotalChapters: 100, CompletedChapters: 50},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/downloads/1/resume", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Berserk", "pill-running", "running",
+		`hx-post="/api/downloads/1/pause"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("row fragment missing %q. Body:\n%s", want, body)
+		}
+	}
+}

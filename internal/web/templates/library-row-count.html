@@ -1,0 +1,5 @@
+{{define "library-row-count"}}
+<td class="td-dim td-right">{{.Total}}</td>
+<td class="td-dim td-right">{{.Downloaded}}</td>
+<td class="td-right">{{if gt .Missing 0}}<span class="pill pill-missing">{{.Missing}}</span>{{else}}<span class="td-dim">{{.Missing}}</span>{{end}}</td>
+{{end}}
