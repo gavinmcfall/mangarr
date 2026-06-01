@@ -951,7 +951,6 @@ input[type="number"].input-narrow {
 /* Status pills for bulk-download statuses */
 .pill-paused    { background: rgba(194,168,56,0.18);  color: #e0c97a; }
 .pill-errored   { background: rgba(197,65,65,0.22);   color: #e9756f; }
-.pill-pending   { background: rgba(255,255,255,0.08); color: #c3c8d2; }
 
 /* Confirmation modal */
 .modal-shell {
