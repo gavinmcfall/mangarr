@@ -150,16 +150,17 @@ func TestAPILibraryRowMissingReturns503WhenSuwayomiUnconfigured(t *testing.T) {
 	}
 }
 
-// TestPageLibraryRendersRowsWithLazyCountPlaceholders pins the /library
+// TestPageLibraryRendersRowsWithInlineCounts pins the /library
 // happy path: every library_cache row renders as a <tr> with a manga_id
-// checkbox + an HTMX-lazy count placeholder targeting the T2 fragment
-// endpoint. The form posts to /api/bulk with HTMX targeting the
-// #confirm-modal container so T3's modal-mode response can swap in.
-func TestPageLibraryRendersRowsWithLazyCountPlaceholders(t *testing.T) {
+// checkbox + the cached Total / Downloaded / Missing counts inline. The
+// form posts to /api/bulk targeting `body` with beforeend swap so the
+// confirmation modal lands as a top-level overlay regardless of where
+// the form sits in the DOM.
+func TestPageLibraryRendersRowsWithInlineCounts(t *testing.T) {
 	h, st, _ := newTestHandler()
 	st.libraryCache = map[int64]model.LibraryCacheEntry{
-		7: {MangaID: 7, Title: "One Piece", SourceID: "42", SourceName: "MangaDex EN"},
-		8: {MangaID: 8, Title: "SOLO LEVELING", SourceID: "42", SourceName: "MangaDex EN"},
+		7: {MangaID: 7, Title: "One Piece", SourceID: "42", SourceName: "MangaDex EN", TotalChapters: 1100, Downloaded: 1050},
+		8: {MangaID: 8, Title: "SOLO LEVELING", SourceID: "42", SourceName: "MangaDex EN", TotalChapters: 200, Downloaded: 200},
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/library", nil)
@@ -173,22 +174,28 @@ func TestPageLibraryRendersRowsWithLazyCountPlaceholders(t *testing.T) {
 	for _, want := range []string{
 		"<h1", "Library",
 		"One Piece", "SOLO LEVELING", "MangaDex EN",
-		// Multi-select form with hx-post to /api/bulk
+		// Multi-select form with hx-post to /api/bulk, targeting body
+		// to avoid any chance of htmx:targetError on a missing #id.
 		`hx-post="/api/bulk"`,
+		`hx-target="body"`,
+		`hx-swap="beforeend"`,
 		`name="manga_id" value="7"`,
 		`name="manga_id" value="8"`,
-		// Lazy count placeholders via hx-get to /api/library/{id}/missing
-		`hx-get="/api/library/7/missing"`,
-		`hx-get="/api/library/8/missing"`,
-		`hx-trigger="load"`,
-		// Confirm-modal container
-		`id="confirm-modal"`,
+		// Counts rendered inline from library_cache (no per-row HTMX
+		// fetch storm on page load).
+		`>1100<`, `>1050<`, // One Piece total + downloaded
+		`pill pill-missing">50<`, // One Piece missing = 50
+		`>200<`,                  // SOLO LEVELING total + downloaded
 		// Sync button
 		`hx-post="/api/library/sync"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("library page missing %q", want)
 		}
+	}
+	// The lazy-storm should be gone — no per-row hx-trigger="load" on counts.
+	if strings.Contains(body, `hx-trigger="load"`) {
+		t.Errorf("library page still contains per-row hx-trigger=\"load\" — lazy-storm wasn't removed")
 	}
 }
 

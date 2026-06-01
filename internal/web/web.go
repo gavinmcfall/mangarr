@@ -1074,11 +1074,15 @@ type libraryPageData struct {
 // the most-recent bulk_job status for this manga (running/paused/
 // completed/errored), or empty when no job exists yet.
 type libraryRow struct {
-	MangaID    int64
-	Title      string
-	SourceID   string
-	SourceName string
-	JobStatus  string
+	MangaID       int64
+	Title         string
+	SourceID      string
+	SourceName    string
+	TotalChapters int
+	Downloaded    int
+	Missing       int
+	Cached        bool // false when TotalChapters==0 — counts not yet populated
+	JobStatus     string
 }
 
 func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
@@ -1103,12 +1107,20 @@ func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := make([]libraryRow, 0, len(entries))
 	for _, e := range entries {
+		missing := e.TotalChapters - e.Downloaded
+		if missing < 0 {
+			missing = 0
+		}
 		rows = append(rows, libraryRow{
-			MangaID:    e.MangaID,
-			Title:      e.Title,
-			SourceID:   e.SourceID,
-			SourceName: e.SourceName,
-			JobStatus:  h.mostRecentBulkJobStatus(e.MangaID),
+			MangaID:       e.MangaID,
+			Title:         e.Title,
+			SourceID:      e.SourceID,
+			SourceName:    e.SourceName,
+			TotalChapters: e.TotalChapters,
+			Downloaded:    e.Downloaded,
+			Missing:       missing,
+			Cached:        e.TotalChapters > 0,
+			JobStatus:     h.mostRecentBulkJobStatus(e.MangaID),
 		})
 	}
 	h.render(w, "library.html", libraryPageData{

@@ -26,8 +26,8 @@
 </div>
 {{else}}
 <form hx-post="/api/bulk"
-      hx-target="#confirm-modal"
-      hx-swap="innerHTML">
+      hx-target="body"
+      hx-swap="beforeend">
   <input type="hidden" name="confirm" value="0">
 
   <div class="library-action-bar">
@@ -59,11 +59,15 @@
         </td>
         <td>{{.Title}}</td>
         <td class="td-dim">{{.SourceName}}</td>
-        <td hx-get="/api/library/{{.MangaID}}/missing"
-            hx-trigger="load"
-            hx-swap="outerHTML"
-            colspan="3"
-            class="td-dim td-right library-row-counts-loading">…</td>
+        {{if .Cached}}
+        <td class="td-dim td-right">{{.TotalChapters}}</td>
+        <td class="td-dim td-right">{{.Downloaded}}</td>
+        <td class="td-right">{{if gt .Missing 0}}<span class="pill pill-missing">{{.Missing}}</span>{{else}}<span class="td-dim">0</span>{{end}}</td>
+        {{else}}
+        <td class="td-dim td-right">—</td>
+        <td class="td-dim td-right">—</td>
+        <td class="td-dim td-right">—</td>
+        {{end}}
         <td class="td-dim">{{.JobStatus}}</td>
       </tr>
       {{end}}
