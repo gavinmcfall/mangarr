@@ -435,6 +435,7 @@ func newTestHandlerFull() (*Handler, *fakeStore, *fakeSuwayomi, *fakeRunner) {
 			PollMinutes:        15,
 			LibraryRoots:       map[model.ContentType]string{model.TypeManhwa: "/lib/Manhwa"},
 			KavitaLibIDsByType: map[model.ContentType]int64{model.TypeManhwa: 2},
+			SuwayomiBaseURL:    "http://suwayomi.test:4567",
 		},
 	}
 	runner := &fakeRunner{}
