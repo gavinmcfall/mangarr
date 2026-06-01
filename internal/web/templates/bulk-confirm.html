@@ -6,7 +6,7 @@
     <p class="modal-body">All selected series are fully downloaded — nothing to do.</p>
     <div class="modal-actions">
       <button type="button" class="btn btn-secondary"
-              hx-on:click="document.getElementById('confirm-modal').innerHTML=''">Close</button>
+              hx-on:click="this.closest('.modal-shell').remove()">Close</button>
     </div>
   </div>
 </div>
@@ -34,7 +34,7 @@
       <input type="hidden" name="confirm" value="1">
       <div class="modal-actions">
         <button type="button" class="btn btn-secondary"
-                hx-on:click="document.getElementById('confirm-modal').innerHTML=''">Cancel</button>
+                hx-on:click="this.closest('.modal-shell').remove()">Cancel</button>
         <button type="submit" class="btn btn-primary">Queue downloads</button>
       </div>
     </form>

@@ -76,6 +76,8 @@ const (
 	ActionUnmatched     ActivityAction = "unmatched"
 	ActionScanTriggered ActivityAction = "scan-triggered"
 	ActionError         ActivityAction = "error"
+	ActionBulkQueued    ActivityAction = "bulk-queued"
+	ActionBulkDone      ActivityAction = "bulk-done"
 )
 
 type ActivityEntry struct {

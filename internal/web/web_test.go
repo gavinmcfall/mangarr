@@ -92,6 +92,10 @@ func (f *fakeStore) ListActivity(limit int) ([]model.ActivityEntry, error) {
 	}
 	return f.activity[:limit], nil
 }
+func (f *fakeStore) AddActivity(e model.ActivityEntry) error {
+	f.activity = append([]model.ActivityEntry{e}, f.activity...)
+	return nil
+}
 func (f *fakeStore) GetSettings() (model.Settings, error)     { return f.settings, nil }
 func (f *fakeStore) SaveSettings(s model.Settings) error      { f.settings = s; return f.saveErr }
 func (f *fakeStore) SetSeriesType(id int64, ct model.ContentType) error {

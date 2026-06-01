@@ -286,10 +286,30 @@ func (h *Handler) apiBulkCreate(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "insert chapters: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
+			// Surface the queue event in the activity log so the operator
+			// has a "what just happened" trail without bouncing to /downloads.
+			_ = h.store.AddActivity(model.ActivityEntry{
+				Time:        time.Now().UTC(),
+				SeriesTitle: entry.Title,
+				Action:      model.ActionBulkQueued,
+				Detail:      fmt.Sprintf("queued %d chapters", len(missingIDs)),
+				Via:         "bulk:" + entry.SourceName,
+			})
 		}
 	}
 
 	if confirm {
+		// HTMX-driven submits land here from the confirmation modal's
+		// "Queue downloads" button. With hx-swap="none" a plain 303
+		// would be intercepted but never produce a navigation, leaving
+		// the modal visible. HX-Redirect tells htmx to do a client-side
+		// navigation; we fall back to a normal 303 for scripted/non-HX
+		// callers (the Plan A T14 contract).
+		if r.Header.Get("HX-Request") == "true" {
+			w.Header().Set("HX-Redirect", "/downloads")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		http.Redirect(w, r, "/downloads", http.StatusSeeOther)
 		return
 	}
