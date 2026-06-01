@@ -75,3 +75,27 @@ func TestAPIDownloadsListFiltersActiveVsAll(t *testing.T) {
 		}
 	}
 }
+
+func TestStaticCSSContainsBulkProgressStyles(t *testing.T) {
+	h, _, _ := newTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/static/mangarr.css", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200 for css, got %d", rec.Code)
+	}
+	css := rec.Body.String()
+	for _, want := range []string{
+		".bulk-progress",
+		".bulk-progress-bar",
+		".pill-paused",
+		".pill-errored",
+		".modal-shell",
+		".modal-card",
+		".library-action-bar",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("mangarr.css missing rule for %q", want)
+		}
+	}
+}

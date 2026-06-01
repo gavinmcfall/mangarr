@@ -916,3 +916,85 @@ input[type="number"].input-narrow {
     grid-template-columns: 1fr;
   }
 }
+
+/* Bulk-download progress bars (Plan B T7) */
+.bulk-progress {
+  position: relative;
+  background: rgba(255,255,255,0.06);
+  height: 18px;
+  border-radius: 3px;
+  overflow: hidden;
+  min-width: 120px;
+}
+.bulk-progress-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
+  transition: width 0.5s ease-out;
+}
+.bulk-progress-running   { background: #3ea75e; }
+.bulk-progress-paused    { background: #c2a838; }
+.bulk-progress-completed { background: #4488dd; }
+.bulk-progress-errored   { background: #c54141; }
+.bulk-progress-pending   { background: rgba(255,255,255,0.18); }
+.bulk-progress-text {
+  position: relative;
+  z-index: 1;
+  display: inline-block;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: #fff;
+  mix-blend-mode: difference;
+}
+
+/* Status pills for bulk-download statuses */
+.pill-paused    { background: rgba(194,168,56,0.18);  color: #e0c97a; }
+.pill-errored   { background: rgba(197,65,65,0.22);   color: #e9756f; }
+.pill-pending   { background: rgba(255,255,255,0.08); color: #c3c8d2; }
+
+/* Confirmation modal */
+.modal-shell {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+}
+.modal-card {
+  background: #1f2329;
+  border-radius: 6px;
+  padding: 24px;
+  max-width: 520px;
+  min-width: 360px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+}
+.modal-title  { margin: 0 0 12px 0; font-size: 18px; }
+.modal-body   { margin: 0 0 12px 0; line-height: 1.5; }
+.modal-list   { margin: 0 0 12px 0; padding-left: 20px; }
+.modal-fine   { font-size: 12px; opacity: 0.75; line-height: 1.5; }
+.modal-actions {
+  display: flex; gap: 8px; justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* Library page */
+.library-action-bar {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 12px;
+}
+.library-selection-counter {
+  opacity: 0.75;
+  font-size: 13px;
+}
+.library-row-counts-loading {
+  opacity: 0.55;
+  font-style: italic;
+}
+.empty-state-cell {
+  text-align: center;
+  padding: 32px 12px;
+  opacity: 0.65;
+}
+
+/* Pill colour for "missing" badge on Library page */
+.pill-missing { background: rgba(255,150,90,0.18); color: #f59f6c; }
