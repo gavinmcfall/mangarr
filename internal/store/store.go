@@ -29,7 +29,12 @@ const sqliteDupColumnMarker = "duplicate column"
 type Store struct{ db *sql.DB }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// `?_pragma=foreign_keys(1)` is the modernc.org/sqlite DSN form for
+	// enabling SQLite's foreign-key enforcement at connection time. Without
+	// it, `REFERENCES … ON DELETE CASCADE` clauses (e.g. on
+	// bulk_job_chapters.job_id → bulk_jobs.id) are documentary-only and the
+	// cascade never fires. Once-per-process; benefits every table with FKs.
+	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
