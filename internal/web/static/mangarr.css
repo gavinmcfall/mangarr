@@ -989,6 +989,20 @@ input[type="number"].input-narrow {
   opacity: 0.55;
   font-style: italic;
 }
+.library-filter {
+  flex: 1 1 280px; min-width: 200px; max-width: 420px;
+  padding: 6px 10px;
+  background: #1a1d22;
+  border: 1px solid #2a2f37;
+  border-radius: 4px;
+  color: inherit;
+  font-size: 13px;
+}
+.library-filter::placeholder { opacity: 0.55; }
+th.lib-sort { user-select: none; }
+th.lib-sort:hover { background: rgba(255,255,255,0.04); }
+th.lib-sort[data-active="asc"]::after  { content: " ▲"; opacity: 0.7; font-size: 0.8em; }
+th.lib-sort[data-active="desc"]::after { content: " ▼"; opacity: 0.7; font-size: 0.8em; }
 .empty-state-cell {
   text-align: center;
   padding: 32px 12px;

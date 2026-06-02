@@ -31,6 +31,8 @@
   <input type="hidden" name="confirm" value="0">
 
   <div class="library-action-bar">
+    <input type="search" id="lib-filter" placeholder="Filter by title or source…"
+           class="library-filter" autocomplete="off">
     <span class="library-selection-counter" id="lib-selection-counter">0 selected</span>
     <button class="btn btn-primary" type="submit" id="lib-download-btn" disabled>
       Download Missing
@@ -42,17 +44,23 @@
     <thead>
       <tr>
         <th><input type="checkbox" id="lib-select-all"></th>
-        <th>Title</th>
-        <th>Source</th>
-        <th class="td-right">Total</th>
-        <th class="td-right">Got</th>
-        <th class="td-right">Missing</th>
-        <th>Status</th>
+        <th class="lib-sort" data-col="title" data-kind="str">Title</th>
+        <th class="lib-sort" data-col="source" data-kind="str">Source</th>
+        <th class="lib-sort td-right" data-col="total" data-kind="num">Total</th>
+        <th class="lib-sort td-right" data-col="downloaded" data-kind="num">Got</th>
+        <th class="lib-sort td-right" data-col="missing" data-kind="num">Missing</th>
+        <th class="lib-sort" data-col="status" data-kind="str">Status</th>
       </tr>
     </thead>
     <tbody>
       {{range .Entries}}
-      <tr class="library-row">
+      <tr class="library-row"
+          data-title="{{.Title}}"
+          data-source="{{.SourceName}}"
+          data-total="{{.TotalChapters}}"
+          data-downloaded="{{.Downloaded}}"
+          data-missing="{{.Missing}}"
+          data-status="{{.JobStatus}}">
         <td>
           <input type="checkbox" class="library-row-checkbox"
                  name="manga_id" value="{{.MangaID}}">
@@ -83,17 +91,61 @@
   const counter = document.getElementById('lib-selection-counter');
   const btn = document.getElementById('lib-download-btn');
   const all = document.getElementById('lib-select-all');
-  const checks = () => document.querySelectorAll('.library-row-checkbox');
+  const filter = document.getElementById('lib-filter');
+  const tbody = document.querySelector('.library-row') && document.querySelector('.library-row').parentNode;
+  const rows = () => Array.from(document.querySelectorAll('.library-row'));
+  const visibleChecks = () => rows().filter(r => r.style.display !== 'none').map(r => r.querySelector('.library-row-checkbox'));
+
   function refresh() {
-    const n = Array.from(checks()).filter(c => c.checked).length;
+    const n = rows().filter(r => {
+      const cb = r.querySelector('.library-row-checkbox');
+      return cb && cb.checked;
+    }).length;
     counter.textContent = n + ' selected';
     btn.disabled = n === 0;
   }
+
+  // Filter — case-insensitive substring match against title + source.
+  function applyFilter() {
+    const q = (filter.value || '').trim().toLowerCase();
+    rows().forEach(r => {
+      const hit = !q ||
+        (r.dataset.title || '').toLowerCase().includes(q) ||
+        (r.dataset.source || '').toLowerCase().includes(q);
+      r.style.display = hit ? '' : 'none';
+    });
+  }
+  filter.addEventListener('input', applyFilter);
+
+  // Sort — click header toggles ASC/DESC on that column.
+  const sortState = {col: null, dir: 1};
+  document.querySelectorAll('th.lib-sort').forEach(th => {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      const kind = th.dataset.kind;
+      if (sortState.col === col) sortState.dir = -sortState.dir;
+      else { sortState.col = col; sortState.dir = 1; }
+      const dir = sortState.dir;
+      const sorted = rows().slice().sort((a, b) => {
+        const av = a.dataset[col] || '';
+        const bv = b.dataset[col] || '';
+        if (kind === 'num') return (parseInt(av, 10) - parseInt(bv, 10)) * dir;
+        return av.localeCompare(bv, undefined, {sensitivity: 'base'}) * dir;
+      });
+      sorted.forEach(r => tbody.appendChild(r));
+      document.querySelectorAll('th.lib-sort').forEach(t => t.removeAttribute('data-active'));
+      th.setAttribute('data-active', dir > 0 ? 'asc' : 'desc');
+    });
+  });
+
   document.addEventListener('change', e => {
     if (e.target.classList.contains('library-row-checkbox')) refresh();
   });
   all.addEventListener('change', () => {
-    checks().forEach(c => c.checked = all.checked);
+    // Select-all targets visible rows only — so a filtered list selects
+    // only what the operator can see.
+    visibleChecks().forEach(c => c.checked = all.checked);
     refresh();
   });
 })();

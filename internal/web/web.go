@@ -86,6 +86,7 @@ type Store interface {
 	ListSeries() ([]model.Series, error)
 	ListUnmatched() ([]model.Series, error)
 	ListActivity(limit int) ([]model.ActivityEntry, error)
+	AddActivity(model.ActivityEntry) error
 	GetSettings() (model.Settings, error)
 	SaveSettings(model.Settings) error
 	SetSeriesType(id int64, ct model.ContentType) error
