@@ -48,6 +48,30 @@ func (h *Handler) apiBulkJobs(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(jobs)
 }
 
+// apiSidebarDownloadsBadge handles GET /api/sidebar/downloads-badge.
+// Returns either an empty span (no active jobs — sidebar shows just
+// "Downloads") or a count badge to nudge the operator that work is in
+// flight without forcing them to navigate to /downloads.
+//
+// Polled every 5s from base.html so the badge stays fresh on every page.
+// The span replaces itself via outerHTML, so the response must remain a
+// single span element (htmx re-emits the hx-* attrs each tick).
+func (h *Handler) apiSidebarDownloadsBadge(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// "Active" = running OR pending OR errored-with-pending-retries.
+	// We sum running + pending; an errored job sits in /downloads but
+	// isn't actively burning resources, so it doesn't deserve the badge.
+	running, _ := h.store.ListBulkJobs(model.BulkJobRunning)
+	pending, _ := h.store.ListBulkJobs(model.BulkJobPending)
+	n := len(running) + len(pending)
+	const reload = `hx-get="/api/sidebar/downloads-badge" hx-trigger="every 5s" hx-swap="outerHTML"`
+	if n == 0 {
+		fmt.Fprintf(w, `<span %s></span>`, reload)
+		return
+	}
+	fmt.Fprintf(w, `<span class="sidebar-badge" %s>%d</span>`, reload, n)
+}
+
 // apiLibrarySync handles POST /api/library/sync. Fetches every manga the
 // operator has in Suwayomi's library via the existing
 // ListLibraryWithCategories GraphQL query, then resolves chapter counts
