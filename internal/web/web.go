@@ -346,6 +346,10 @@ func NewHandler(opts HandlerOpts) *Handler {
 	// completed) | all (includes everything).
 	h.mux.HandleFunc("GET /api/downloads/list", h.apiDownloadsList)
 
+	// Sidebar Downloads badge — polled every 5s from base.html. Renders
+	// an empty span when zero active jobs, or a count badge when >0.
+	h.mux.HandleFunc("GET /api/sidebar/downloads-badge", h.apiSidebarDownloadsBadge)
+
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
 

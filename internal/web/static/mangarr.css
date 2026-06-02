@@ -1003,6 +1003,19 @@ th.lib-sort { user-select: none; }
 th.lib-sort:hover { background: rgba(255,255,255,0.04); }
 th.lib-sort[data-active="asc"]::after  { content: " ▲"; opacity: 0.7; font-size: 0.8em; }
 th.lib-sort[data-active="desc"]::after { content: " ▼"; opacity: 0.7; font-size: 0.8em; }
+
+/* Sidebar Downloads-in-flight badge — small pill next to the link label */
+.sidebar-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(99, 145, 255, 0.22);
+  color: #87a6ff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+}
 .empty-state-cell {
   text-align: center;
   padding: 32px 12px;
