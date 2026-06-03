@@ -155,7 +155,7 @@ func (s *Store) BatchInsertBulkJobChapters(jobID int64, chapterIDs []int64) erro
 func (s *Store) ListBulkJobChapters(jobID int64, state model.BulkChapterState) ([]model.BulkJobChapter, error) {
 	var rows *sql.Rows
 	var err error
-	q := `SELECT job_id, chapter_id, state, updated_at FROM bulk_job_chapters WHERE job_id = ?`
+	q := `SELECT job_id, chapter_id, state, errored_reason, updated_at FROM bulk_job_chapters WHERE job_id = ?`
 	if state == "" {
 		rows, err = s.db.Query(q+` ORDER BY chapter_id ASC`, jobID)
 	} else {
@@ -170,7 +170,7 @@ func (s *Store) ListBulkJobChapters(jobID int64, state model.BulkChapterState) (
 		var c model.BulkJobChapter
 		var stateStr string
 		var updatedAt int64
-		if err := rows.Scan(&c.JobID, &c.ChapterID, &stateStr, &updatedAt); err != nil {
+		if err := rows.Scan(&c.JobID, &c.ChapterID, &stateStr, &c.ErroredReason, &updatedAt); err != nil {
 			return nil, fmt.Errorf("ListBulkJobChapters scan: %w", err)
 		}
 		c.State = model.BulkChapterState(stateStr)
@@ -178,6 +178,80 @@ func (s *Store) ListBulkJobChapters(jobID int64, state model.BulkChapterState) (
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// GetBulkJobChapter returns the single chapter row for (jobID, chapterID),
+// or sql.ErrNoRows (wrapped) when no such row exists.
+func (s *Store) GetBulkJobChapter(jobID, chapterID int64) (model.BulkJobChapter, error) {
+	var c model.BulkJobChapter
+	var stateStr string
+	var updatedAt int64
+	err := s.db.QueryRow(
+		`SELECT job_id, chapter_id, state, errored_reason, updated_at
+		   FROM bulk_job_chapters WHERE job_id = ? AND chapter_id = ?`,
+		jobID, chapterID,
+	).Scan(&c.JobID, &c.ChapterID, &stateStr, &c.ErroredReason, &updatedAt)
+	if err != nil {
+		return c, fmt.Errorf("GetBulkJobChapter: %w", err)
+	}
+	c.State = model.BulkChapterState(stateStr)
+	c.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+	return c, nil
+}
+
+// MarkBulkJobChapterErrored atomically marks a chapter as errored and
+// increments the parent job's errored_chapters counter. The update is
+// conditional on the chapter currently being in 'fed' or 'pending' state —
+// if the chapter is already 'done' or 'errored', this is a no-op (idempotent:
+// a redundant detect-tick must not double-bump errored_chapters).
+func (s *Store) MarkBulkJobChapterErrored(jobID, chapterID int64, reason string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("MarkBulkJobChapterErrored begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				log.Printf("store: rollback MarkBulkJobChapterErrored: %v", rbErr)
+			}
+		}
+	}()
+
+	res, err := tx.Exec(
+		`UPDATE bulk_job_chapters
+		    SET state = 'errored', errored_reason = ?, updated_at = strftime('%s','now')
+		  WHERE job_id = ? AND chapter_id = ? AND state IN ('fed', 'pending')`,
+		reason, jobID, chapterID,
+	)
+	if err != nil {
+		return fmt.Errorf("MarkBulkJobChapterErrored update chapter: %w", err)
+	}
+
+	// Only bump the job counters if the chapter row was actually updated.
+	// This is the idempotency gate: a second call when the chapter is already
+	// 'errored' (or 'done') leaves RowsAffected==0 and skips the bump.
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("MarkBulkJobChapterErrored rows affected: %w", err)
+	}
+	if affected > 0 {
+		if _, err := tx.Exec(
+			`UPDATE bulk_jobs
+			    SET errored_chapters = errored_chapters + 1, last_error = ?,
+			        updated_at = strftime('%s','now')
+			  WHERE id = ?`,
+			reason, jobID,
+		); err != nil {
+			return fmt.Errorf("MarkBulkJobChapterErrored update job: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("MarkBulkJobChapterErrored commit: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // UpdateBulkJobChapterState flips one chapter's state and bumps

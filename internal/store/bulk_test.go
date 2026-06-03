@@ -232,3 +232,121 @@ func TestListLibraryCacheEntries(t *testing.T) {
 		t.Errorf("want 3 entries, got %d", len(got))
 	}
 }
+
+// seedJobAndFedChapter is a shared helper that creates a bulk job with one
+// chapter in 'fed' state and returns both IDs.
+func seedJobAndFedChapter(t *testing.T, s *Store) (jobID, chapterID int64) {
+	t.Helper()
+	var err error
+	jobID, err = s.SaveBulkJob(model.BulkJob{
+		MangaID: 1, SourceID: "1", Title: "test", SourceName: "MangaDex EN",
+		Status: model.BulkJobRunning, TotalChapters: 1,
+	})
+	if err != nil {
+		t.Fatalf("SaveBulkJob: %v", err)
+	}
+	chapterID = int64(200)
+	if err := s.BatchInsertBulkJobChapters(jobID, []int64{chapterID}); err != nil {
+		t.Fatalf("BatchInsertBulkJobChapters: %v", err)
+	}
+	if err := s.UpdateBulkJobChapterState(jobID, chapterID, model.BulkChapterFed); err != nil {
+		t.Fatalf("UpdateBulkJobChapterState to fed: %v", err)
+	}
+	return jobID, chapterID
+}
+
+func TestMarkBulkJobChapterErroredHappyPath(t *testing.T) {
+	s := newTestStore(t)
+	jobID, chapterID := seedJobAndFedChapter(t, s)
+
+	if err := s.MarkBulkJobChapterErrored(jobID, chapterID, "test reason"); err != nil {
+		t.Fatalf("MarkBulkJobChapterErrored: %v", err)
+	}
+
+	// Assert chapter state = errored, ErroredReason populated.
+	ch, err := s.GetBulkJobChapter(jobID, chapterID)
+	if err != nil {
+		t.Fatalf("GetBulkJobChapter: %v", err)
+	}
+	if ch.State != model.BulkChapterErrored {
+		t.Errorf("chapter state: want %q, got %q", model.BulkChapterErrored, ch.State)
+	}
+	if ch.ErroredReason != "test reason" {
+		t.Errorf("ErroredReason: want %q, got %q", "test reason", ch.ErroredReason)
+	}
+
+	// Assert job counters.
+	job, err := s.GetBulkJob(jobID)
+	if err != nil {
+		t.Fatalf("GetBulkJob: %v", err)
+	}
+	if job.ErroredChapters != 1 {
+		t.Errorf("ErroredChapters: want 1, got %d", job.ErroredChapters)
+	}
+	if job.LastError != "test reason" {
+		t.Errorf("LastError: want %q, got %q", "test reason", job.LastError)
+	}
+}
+
+func TestMarkBulkJobChapterErroredIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	jobID, chapterID := seedJobAndFedChapter(t, s)
+
+	// First call: transitions chapter fed → errored, bumps ErroredChapters.
+	if err := s.MarkBulkJobChapterErrored(jobID, chapterID, "first reason"); err != nil {
+		t.Fatalf("first MarkBulkJobChapterErrored: %v", err)
+	}
+
+	// Second call: chapter is already errored, must be a no-op.
+	if err := s.MarkBulkJobChapterErrored(jobID, chapterID, "second reason"); err != nil {
+		t.Fatalf("second MarkBulkJobChapterErrored: %v", err)
+	}
+
+	job, err := s.GetBulkJob(jobID)
+	if err != nil {
+		t.Fatalf("GetBulkJob: %v", err)
+	}
+	if job.ErroredChapters != 1 {
+		t.Errorf("ErroredChapters after double-call: want 1, got %d", job.ErroredChapters)
+	}
+
+	// Reason should still be from the first call (second call was a no-op).
+	ch, err := s.GetBulkJobChapter(jobID, chapterID)
+	if err != nil {
+		t.Fatalf("GetBulkJobChapter: %v", err)
+	}
+	if ch.ErroredReason != "first reason" {
+		t.Errorf("ErroredReason: want %q (first call), got %q", "first reason", ch.ErroredReason)
+	}
+}
+
+func TestMarkBulkJobChapterErroredSkipsAlreadyDone(t *testing.T) {
+	s := newTestStore(t)
+	jobID, chapterID := seedJobAndFedChapter(t, s)
+
+	// Mark chapter done first (simulates normal completion before stall detector fires).
+	if err := s.UpdateBulkJobChapterState(jobID, chapterID, model.BulkChapterDone); err != nil {
+		t.Fatalf("UpdateBulkJobChapterState to done: %v", err)
+	}
+
+	// MarkBulkJobChapterErrored must be a no-op on an already-done chapter.
+	if err := s.MarkBulkJobChapterErrored(jobID, chapterID, "should be ignored"); err != nil {
+		t.Fatalf("MarkBulkJobChapterErrored on done chapter: %v", err)
+	}
+
+	ch, err := s.GetBulkJobChapter(jobID, chapterID)
+	if err != nil {
+		t.Fatalf("GetBulkJobChapter: %v", err)
+	}
+	if ch.State != model.BulkChapterDone {
+		t.Errorf("chapter state should stay done, got %q", ch.State)
+	}
+
+	job, err := s.GetBulkJob(jobID)
+	if err != nil {
+		t.Fatalf("GetBulkJob: %v", err)
+	}
+	if job.ErroredChapters != 0 {
+		t.Errorf("ErroredChapters should stay 0, got %d", job.ErroredChapters)
+	}
+}
