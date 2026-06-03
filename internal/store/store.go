@@ -223,19 +223,46 @@ func (s *Store) GetSettings() (model.Settings, error) {
 		return model.Settings{}, err
 	}
 	var set model.Settings
-	return set, json.Unmarshal([]byte(raw), &set)
+	if err := json.Unmarshal([]byte(raw), &set); err != nil {
+		return model.Settings{}, err
+	}
+	applySettingsDefaults(&set)
+	return set, nil
 }
 
 func defaultSettings() model.Settings {
-	return model.Settings{
-		FileMode:               model.ModeHardlink,
-		RenameScheme:           "{series}/{series} - Ch.{chapter}.cbz",
-		PollMinutes:            15,
-		LibraryRoots:           map[model.ContentType]string{},
-		BulkMaxInFlight:        5,
-		BulkRefillThreshold:    2,
-		BulkInterBatchDelaySec: 1,
+	s := model.Settings{
+		FileMode:     model.ModeHardlink,
+		RenameScheme: "{series}/{series} - Ch.{chapter}.cbz",
+		PollMinutes:  15,
+		LibraryRoots: map[model.ContentType]string{},
 	}
+	applySettingsDefaults(&s)
+	return s
+}
+
+// applySettingsDefaults fills in zero-value fields with their spec'd defaults.
+// Called both by defaultSettings (fresh store) and GetSettings (post-unmarshal)
+// so that rows stored before a new field was added get the correct default on
+// every read without a schema migration.
+func applySettingsDefaults(s *model.Settings) {
+	if s.BulkMaxInFlight == 0 {
+		s.BulkMaxInFlight = 5
+	}
+	if s.BulkRefillThreshold == 0 {
+		s.BulkRefillThreshold = 2
+	}
+	if s.BulkInterBatchDelaySec == 0 {
+		s.BulkInterBatchDelaySec = 1
+	}
+	if s.BulkStallTimeoutMinutes == 0 {
+		s.BulkStallTimeoutMinutes = 30
+	}
+	if s.BulkChapterMaxRetries == 0 {
+		s.BulkChapterMaxRetries = 3
+	}
+	// BulkAutoErrorEmptyChaptersDisabled: zero value (false) IS the
+	// correct default (auto-error enabled), so no defaulting needed here.
 }
 
 // ListUnmatched returns all series with StatusUnmatched.

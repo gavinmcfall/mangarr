@@ -164,6 +164,20 @@ type Settings struct {
 	// orchestrator inserts between feeding batches, on top of Suwayomi's
 	// own per-chapter delay. Default 1.
 	BulkInterBatchDelaySec int `json:"bulk_inter_batch_delay_sec"`
+
+	// BulkStallTimeoutMinutes is the wall-clock age (in minutes) after which
+	// a chapter stuck in state 'fed' is considered stalled and re-queued by
+	// the stalled-job detector. Default 30.
+	BulkStallTimeoutMinutes int `json:"bulk_stall_timeout_minutes,omitempty"`
+	// BulkChapterMaxRetries is the maximum number of times the orchestrator
+	// will re-queue a stalled chapter before marking it errored. Default 3.
+	BulkChapterMaxRetries int `json:"bulk_chapter_max_retries,omitempty"`
+	// BulkAutoErrorEmptyChaptersDisabled inverts the default-enabled
+	// "auto-error chapters with zero pages" behaviour. The zero value (false)
+	// means auto-error IS enabled; set to true to disable it.
+	// Read sites should derive the effective flag as:
+	//   autoError := !set.BulkAutoErrorEmptyChaptersDisabled
+	BulkAutoErrorEmptyChaptersDisabled bool `json:"bulk_auto_error_empty_chapters_disabled,omitempty"`
 }
 
 // Binding is one library destination the user has defined. Replaces the

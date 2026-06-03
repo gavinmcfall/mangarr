@@ -593,3 +593,58 @@ func TestDefaultSettingsHasBulkPacingDefaults(t *testing.T) {
 		t.Errorf("BulkInterBatchDelaySec default: want 1, got %d", set.BulkInterBatchDelaySec)
 	}
 }
+
+// TestGetSettingsAppliesNewBulkDefaults verifies that the stalled-job
+// detector knobs have their correct defaults on a fresh store (no
+// SaveSettings call). Covers:
+//   - BulkStallTimeoutMinutes = 30
+//   - BulkChapterMaxRetries   = 3
+//   - BulkAutoErrorEmptyChaptersDisabled = false  (meaning auto-error IS enabled by default)
+func TestGetSettingsAppliesNewBulkDefaults(t *testing.T) {
+	s := newTestStore(t)
+	set, err := s.GetSettings()
+	if err != nil {
+		t.Fatalf("GetSettings on fresh store: %v", err)
+	}
+	if set.BulkStallTimeoutMinutes != 30 {
+		t.Errorf("BulkStallTimeoutMinutes default: want 30, got %d", set.BulkStallTimeoutMinutes)
+	}
+	if set.BulkChapterMaxRetries != 3 {
+		t.Errorf("BulkChapterMaxRetries default: want 3, got %d", set.BulkChapterMaxRetries)
+	}
+	// BulkAutoErrorEmptyChaptersDisabled defaults false → auto-error is ENABLED by default.
+	if set.BulkAutoErrorEmptyChaptersDisabled {
+		t.Errorf("BulkAutoErrorEmptyChaptersDisabled default: want false (auto-error enabled), got true")
+	}
+}
+
+// TestSaveSettingsRoundTripsNewBulkFields verifies that explicit non-default
+// values for the stalled-job detector knobs survive a SaveSettings /
+// GetSettings round-trip without loss.
+func TestSaveSettingsRoundTripsNewBulkFields(t *testing.T) {
+	s := newTestStore(t)
+	want := model.Settings{
+		FileMode:                          model.ModeHardlink,
+		RenameScheme:                      "{series}/{series} - Ch.{chapter}.cbz",
+		PollMinutes:                       15,
+		BulkStallTimeoutMinutes:           45,
+		BulkChapterMaxRetries:             5,
+		BulkAutoErrorEmptyChaptersDisabled: true,
+	}
+	if err := s.SaveSettings(want); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+	got, err := s.GetSettings()
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if got.BulkStallTimeoutMinutes != 45 {
+		t.Errorf("BulkStallTimeoutMinutes round-trip: want 45, got %d", got.BulkStallTimeoutMinutes)
+	}
+	if got.BulkChapterMaxRetries != 5 {
+		t.Errorf("BulkChapterMaxRetries round-trip: want 5, got %d", got.BulkChapterMaxRetries)
+	}
+	if !got.BulkAutoErrorEmptyChaptersDisabled {
+		t.Errorf("BulkAutoErrorEmptyChaptersDisabled round-trip: want true, got false")
+	}
+}
