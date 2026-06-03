@@ -173,16 +173,20 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 		// and the stall detector won't re-feed them.
 		_ = o.detectStalledChapters(ctx, job, settings)
 
-		// Terminal state check: all chapters done → mark completed.
+		// Terminal state check: all chapters accounted for (done or errored) →
+		// mark completed. Errored chapters represent chapters the orchestrator
+		// gave up on (empty chapter, max retries); they count toward the total
+		// so the job doesn't stall forever waiting for chapters that will never
+		// download. Spec: "terminal when CompletedChapters + ErroredChapters >= TotalChapters".
 		allChapters, err := o.store.ListBulkJobChapters(job.ID, "")
 		if err == nil && len(allChapters) > 0 {
-			done := 0
+			terminal := 0
 			for _, c := range allChapters {
-				if c.State == model.BulkChapterDone {
-					done++
+				if c.State == model.BulkChapterDone || c.State == model.BulkChapterErrored {
+					terminal++
 				}
 			}
-			if done == len(allChapters) {
+			if terminal == len(allChapters) {
 				_ = o.store.UpdateBulkJobStatus(job.ID, model.BulkJobCompleted)
 				continue
 			}
