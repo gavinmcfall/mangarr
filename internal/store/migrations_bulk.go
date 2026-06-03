@@ -5,6 +5,19 @@ import (
 	"fmt"
 )
 
+// migration6BulkChapterTries adds a tries column to bulk_job_chapters so
+// mangarr can track how many times it has re-fed a chapter to Suwayomi.
+// This counter is independent of Suwayomi's own tries field, which resets
+// on Suwayomi restart. detectStalledChapters reads tries to decide whether
+// to re-feed or escalate to errored.
+func migration6BulkChapterTries(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE bulk_job_chapters ADD COLUMN tries INTEGER NOT NULL DEFAULT 0`)
+	if err != nil {
+		return fmt.Errorf("migration 6 add tries: %w", err)
+	}
+	return nil
+}
+
 // migration5BulkChapterErroredReason adds an errored_reason column to
 // bulk_job_chapters so the orchestrator can record WHY it gave up on a
 // chapter (stall timeout, empty-chapter signal, max retries exceeded, etc.)

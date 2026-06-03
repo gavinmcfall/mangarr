@@ -55,6 +55,7 @@ type BulkJobChapter struct {
 	ChapterID     int64 // Suwayomi numeric chapter ID
 	State         BulkChapterState
 	ErroredReason string // non-empty when State == BulkChapterErrored; persisted in errored_reason column
+	Tries         int    // number of times mangarr has fed this chapter to Suwayomi; independent of Suwayomi's own tries counter
 	UpdatedAt     time.Time
 }
 

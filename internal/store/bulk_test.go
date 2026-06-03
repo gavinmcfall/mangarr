@@ -320,6 +320,48 @@ func TestMarkBulkJobChapterErroredIdempotent(t *testing.T) {
 	}
 }
 
+func TestMarkBulkJobChapterFedBumpsTries(t *testing.T) {
+	s := newTestStore(t)
+	jobID, err := s.SaveBulkJob(model.BulkJob{
+		MangaID: 1, SourceID: "1", Title: "test", SourceName: "MangaDex EN",
+		Status: model.BulkJobRunning, TotalChapters: 1,
+	})
+	if err != nil {
+		t.Fatalf("SaveBulkJob: %v", err)
+	}
+	chapterID := int64(300)
+	if err := s.BatchInsertBulkJobChapters(jobID, []int64{chapterID}); err != nil {
+		t.Fatalf("BatchInsertBulkJobChapters: %v", err)
+	}
+
+	// First feed: tries should become 1.
+	if err := s.MarkBulkJobChapterFed(jobID, chapterID); err != nil {
+		t.Fatalf("first MarkBulkJobChapterFed: %v", err)
+	}
+	ch, err := s.GetBulkJobChapter(jobID, chapterID)
+	if err != nil {
+		t.Fatalf("GetBulkJobChapter after first feed: %v", err)
+	}
+	if ch.State != model.BulkChapterFed {
+		t.Errorf("state: want %q, got %q", model.BulkChapterFed, ch.State)
+	}
+	if ch.Tries != 1 {
+		t.Errorf("tries after first feed: want 1, got %d", ch.Tries)
+	}
+
+	// Second feed (re-feed after stall): tries should become 2.
+	if err := s.MarkBulkJobChapterFed(jobID, chapterID); err != nil {
+		t.Fatalf("second MarkBulkJobChapterFed: %v", err)
+	}
+	ch, err = s.GetBulkJobChapter(jobID, chapterID)
+	if err != nil {
+		t.Fatalf("GetBulkJobChapter after second feed: %v", err)
+	}
+	if ch.Tries != 2 {
+		t.Errorf("tries after second feed: want 2, got %d", ch.Tries)
+	}
+}
+
 func TestMarkBulkJobChapterErroredSkipsAlreadyDone(t *testing.T) {
 	s := newTestStore(t)
 	jobID, chapterID := seedJobAndFedChapter(t, s)
