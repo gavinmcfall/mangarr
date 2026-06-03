@@ -9,6 +9,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -32,6 +33,18 @@ type Store interface {
 	// by SaveBulkJob at creation is 0; without this bump it stays 0).
 	IncrementBulkJobCompletedChapters(jobID int64) error
 	GetSettings() (model.Settings, error)
+	// ListStalledFedChapters returns fed chapters for a job whose updated_at
+	// is older than olderThan, ordered by updated_at ASC (oldest first).
+	// Used by detectStalledChapters to find chapters that Suwayomi may have
+	// silently dropped from its queue.
+	ListStalledFedChapters(jobID int64, olderThan time.Time) ([]model.BulkJobChapter, error)
+	// MarkBulkJobChapterErrored atomically marks a chapter as errored and
+	// bumps the parent job's errored_chapters counter. Idempotent: no-op
+	// when the chapter is already 'done' or 'errored'.
+	MarkBulkJobChapterErrored(jobID, chapterID int64, reason string) error
+	// MarkBulkJobChapterFed marks a chapter as fed and bumps its mangarr-side
+	// tries counter. Used by detectStalledChapters when re-feeding a chapter.
+	MarkBulkJobChapterFed(jobID, chapterID int64) error
 }
 
 // SuwayomiClient is the subset of *suwayomi.Client the orchestrator uses.
@@ -39,6 +52,10 @@ type SuwayomiClient interface {
 	InFlightCountForSource(ctx context.Context, sourceID string) (int, error)
 	EnqueueChapterDownloads(ctx context.Context, chapterIDs []int64) error
 	ListChapters(ctx context.Context, mangaID int64) ([]suwayomi.Chapter, error)
+	// GetChapterMeta returns a stall-detection snapshot for one chapter:
+	// its page count, download state, queue position, and Suwayomi's own
+	// retry count. Used by detectStalledChapters for the four-way decision.
+	GetChapterMeta(ctx context.Context, chapterID int64) (suwayomi.ChapterMeta, error)
 }
 
 // Orchestrator owns one Tick loop. It is goroutine-safe to share across
@@ -144,6 +161,12 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 			}
 		}
 
+		// Stall detection: probe Suwayomi for chapters that have been in
+		// state='fed' longer than BulkStallTimeoutMinutes. Runs after the
+		// reconcile phase so IsDownloaded=true chapters are already 'done'
+		// and the stall detector won't re-feed them.
+		_ = o.detectStalledChapters(ctx, job, settings)
+
 		// Terminal state check: all chapters done → mark completed.
 		allChapters, err := o.store.ListBulkJobChapters(job.ID, "")
 		if err == nil && len(allChapters) > 0 {
@@ -200,6 +223,76 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 		for _, cid := range ids {
 			_ = o.store.UpdateBulkJobChapterState(job.ID, cid, model.BulkChapterFed)
 		}
+	}
+	return nil
+}
+
+// detectStalledChapters runs once per running job per tick, after the
+// fed→done reconcile phase. It lists fed chapters that have been in that
+// state longer than settings.BulkStallTimeoutMinutes and applies a four-way
+// decision matrix for each:
+//
+//  1. IsDownloaded=true → reconcile already handled this tick; skip.
+//  2. PageCount==0 AND QueueState=="ERROR" AND auto-error enabled → error.
+//  3. QueueState=="ERROR" AND chapter.Tries >= BulkChapterMaxRetries → error.
+//  4. QueueState in ("", "Queued", "Running") → re-feed via EnqueueChapterDownloads.
+//
+// Errors from individual chapter probes are skipped (Suwayomi may be
+// transiently unreachable); the chapter will be re-evaluated on the next
+// tick. Safe to call with an empty stalled list — returns nil immediately.
+// Does NOT write activity log entries (T9 owns that via a wrapper).
+func (o *Orchestrator) detectStalledChapters(ctx context.Context, job model.BulkJob, settings model.Settings) error {
+	stallTimeout := settings.BulkStallTimeoutMinutes
+	if stallTimeout <= 0 {
+		stallTimeout = 30
+	}
+	maxRetries := settings.BulkChapterMaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+
+	cutoff := time.Now().Add(-time.Duration(stallTimeout) * time.Minute)
+	stalled, err := o.store.ListStalledFedChapters(job.ID, cutoff)
+	if err != nil || len(stalled) == 0 {
+		return err
+	}
+
+	for _, chapter := range stalled {
+		meta, err := o.suwayomi.GetChapterMeta(ctx, chapter.ChapterID)
+		if err != nil {
+			// Suwayomi unreachable — skip this chapter, re-evaluate next tick.
+			continue
+		}
+
+		// Branch 1: already downloaded — reconcile will have caught it next tick.
+		if meta.IsDownloaded {
+			continue
+		}
+
+		// Branch 2: empty chapter — auto-error if enabled (the default).
+		if meta.PageCount == 0 && meta.QueueState == "ERROR" && !settings.BulkAutoErrorEmptyChaptersDisabled {
+			_ = o.store.MarkBulkJobChapterErrored(job.ID, chapter.ChapterID, "empty chapter (source returned 0 pages)")
+			continue
+		}
+
+		// Branch 3: Suwayomi errored AND we have exhausted our retry budget.
+		if meta.QueueState == "ERROR" && chapter.Tries >= maxRetries {
+			reason := fmt.Sprintf("suwayomi gave up after %d retries", meta.Tries)
+			_ = o.store.MarkBulkJobChapterErrored(job.ID, chapter.ChapterID, reason)
+			continue
+		}
+
+		// Branch 4: Suwayomi still thinks it's working on it (or chapter fell
+		// out of the queue entirely — QueueState=="") — re-feed.
+		if meta.QueueState == "" || meta.QueueState == "Queued" || meta.QueueState == "Running" {
+			_ = o.suwayomi.EnqueueChapterDownloads(ctx, []int64{chapter.ChapterID})
+			_ = o.store.MarkBulkJobChapterFed(job.ID, chapter.ChapterID)
+			continue
+		}
+
+		// Otherwise: leave the chapter alone; it will be re-evaluated on the
+		// next tick (e.g. QueueState is some other terminal state we don't yet
+		// know how to route).
 	}
 	return nil
 }

@@ -199,6 +199,38 @@ func (s *Store) GetBulkJobChapter(jobID, chapterID int64) (model.BulkJobChapter,
 	return c, nil
 }
 
+// ListStalledFedChapters returns all bulk_job_chapters for the given job that
+// are in state='fed' and whose updated_at is older than olderThan (passed as
+// Unix seconds for comparison against the integer column). Ordered by
+// updated_at ASC (oldest first) so the stall detector surfaces the
+// most-likely-stuck chapters first.
+func (s *Store) ListStalledFedChapters(jobID int64, olderThan time.Time) ([]model.BulkJobChapter, error) {
+	rows, err := s.db.Query(
+		`SELECT job_id, chapter_id, state, errored_reason, tries, updated_at
+		   FROM bulk_job_chapters
+		  WHERE job_id = ? AND state = 'fed' AND updated_at < ?
+		  ORDER BY updated_at ASC`,
+		jobID, olderThan.Unix(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("ListStalledFedChapters: %w", err)
+	}
+	defer rows.Close()
+	var out []model.BulkJobChapter
+	for rows.Next() {
+		var c model.BulkJobChapter
+		var stateStr string
+		var updatedAt int64
+		if err := rows.Scan(&c.JobID, &c.ChapterID, &stateStr, &c.ErroredReason, &c.Tries, &updatedAt); err != nil {
+			return nil, fmt.Errorf("ListStalledFedChapters scan: %w", err)
+		}
+		c.State = model.BulkChapterState(stateStr)
+		c.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // MarkBulkJobChapterFed marks a chapter as fed to Suwayomi and bumps the
 // chapter's mangarr-side tries counter. The tries counter is independent
 // of Suwayomi's own tries field, which resets on Suwayomi restart.
