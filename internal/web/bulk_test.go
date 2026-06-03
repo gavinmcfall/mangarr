@@ -376,6 +376,52 @@ func TestAPIDownloadsDeleteHXRequestReturnsEmptyTR(t *testing.T) {
 	}
 }
 
+// TestBulkRowRendersErroredPill verifies that when ErroredChapters > 0 the
+// bulk-row template contains a pill-error span with the count, and that
+// when ErroredChapters == 0 no pill-error element is emitted.
+func TestBulkRowRendersErroredPill(t *testing.T) {
+	h, st, _ := newTestHandler()
+
+	// Case 1: ErroredChapters=2 → pill-error must appear with "2 missing".
+	st.bulkJobs = []model.BulkJob{
+		{ID: 1, Title: "One Piece", SourceName: "MangaDex EN",
+			Status: model.BulkJobRunning, TotalChapters: 100, CompletedChapters: 50,
+			ErroredChapters: 2},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/downloads/1/pause", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "pill-error") {
+		t.Errorf("ErroredChapters=2: expected pill-error in body; got:\n%s", body)
+	}
+	if !strings.Contains(body, "2 missing") {
+		t.Errorf("ErroredChapters=2: expected '2 missing' in body; got:\n%s", body)
+	}
+
+	// Case 2: ErroredChapters=0 → no pill-error.
+	st.bulkJobs = []model.BulkJob{
+		{ID: 2, Title: "Naruto", SourceName: "MangaDex EN",
+			Status: model.BulkJobRunning, TotalChapters: 700, CompletedChapters: 500,
+			ErroredChapters: 0},
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/api/downloads/2/pause", nil)
+	req2.Header.Set("HX-Request", "true")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+	body2 := rec2.Body.String()
+	if strings.Contains(body2, "pill-error") {
+		t.Errorf("ErroredChapters=0: pill-error must NOT appear; got:\n%s", body2)
+	}
+}
+
 // TestAPIDownloadsResumeHXRequestReturnsRunningRow pins the resume path:
 // ClearBulkJobBackoff fires BEFORE UpdateBulkJobStatus(Running), and the
 // rendered row shows the Pause button (running state).

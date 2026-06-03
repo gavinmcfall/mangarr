@@ -514,6 +514,7 @@ type bulkRowViewT struct {
 	Status            model.BulkJobStatus
 	TotalChapters     int
 	CompletedChapters int
+	ErroredChapters   int
 	ProgressPct       int
 	LastUpdateHuman   string
 }
@@ -540,6 +541,7 @@ func bulkRowView(j model.BulkJob) bulkRowViewT {
 		Status:            j.Status,
 		TotalChapters:     j.TotalChapters,
 		CompletedChapters: j.CompletedChapters,
+		ErroredChapters:   j.ErroredChapters,
 		ProgressPct:       pct,
 		LastUpdateHuman:   formatAge(time.Now(), j.UpdatedAt),
 	}

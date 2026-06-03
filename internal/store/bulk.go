@@ -254,10 +254,13 @@ func (s *Store) MarkBulkJobChapterFed(jobID, chapterID int64) error {
 // conditional on the chapter currently being in 'fed' or 'pending' state —
 // if the chapter is already 'done' or 'errored', this is a no-op (idempotent:
 // a redundant detect-tick must not double-bump errored_chapters).
-func (s *Store) MarkBulkJobChapterErrored(jobID, chapterID int64, reason string) error {
+//
+// Returns (true, nil) when the chapter was actually transitioned to errored;
+// (false, nil) when the chapter was already in a terminal state (no-op).
+func (s *Store) MarkBulkJobChapterErrored(jobID, chapterID int64, reason string) (bool, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return fmt.Errorf("MarkBulkJobChapterErrored begin: %w", err)
+		return false, fmt.Errorf("MarkBulkJobChapterErrored begin: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -275,7 +278,7 @@ func (s *Store) MarkBulkJobChapterErrored(jobID, chapterID int64, reason string)
 		reason, jobID, chapterID,
 	)
 	if err != nil {
-		return fmt.Errorf("MarkBulkJobChapterErrored update chapter: %w", err)
+		return false, fmt.Errorf("MarkBulkJobChapterErrored update chapter: %w", err)
 	}
 
 	// Only bump the job counters if the chapter row was actually updated.
@@ -283,7 +286,7 @@ func (s *Store) MarkBulkJobChapterErrored(jobID, chapterID int64, reason string)
 	// 'errored' (or 'done') leaves RowsAffected==0 and skips the bump.
 	affected, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("MarkBulkJobChapterErrored rows affected: %w", err)
+		return false, fmt.Errorf("MarkBulkJobChapterErrored rows affected: %w", err)
 	}
 	if affected > 0 {
 		if _, err := tx.Exec(
@@ -293,15 +296,15 @@ func (s *Store) MarkBulkJobChapterErrored(jobID, chapterID int64, reason string)
 			  WHERE id = ?`,
 			reason, jobID,
 		); err != nil {
-			return fmt.Errorf("MarkBulkJobChapterErrored update job: %w", err)
+			return false, fmt.Errorf("MarkBulkJobChapterErrored update job: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("MarkBulkJobChapterErrored commit: %w", err)
+		return false, fmt.Errorf("MarkBulkJobChapterErrored commit: %w", err)
 	}
 	committed = true
-	return nil
+	return affected > 0, nil
 }
 
 // UpdateBulkJobChapterState flips one chapter's state and bumps

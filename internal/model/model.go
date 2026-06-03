@@ -72,12 +72,13 @@ type Series struct {
 type ActivityAction string
 
 const (
-	ActionFiled         ActivityAction = "filed"
-	ActionUnmatched     ActivityAction = "unmatched"
-	ActionScanTriggered ActivityAction = "scan-triggered"
-	ActionError         ActivityAction = "error"
-	ActionBulkQueued    ActivityAction = "bulk-queued"
-	ActionBulkDone      ActivityAction = "bulk-done"
+	ActionFiled              ActivityAction = "filed"
+	ActionUnmatched          ActivityAction = "unmatched"
+	ActionScanTriggered      ActivityAction = "scan-triggered"
+	ActionError              ActivityAction = "error"
+	ActionBulkQueued         ActivityAction = "bulk-queued"
+	ActionBulkDone           ActivityAction = "bulk-done"
+	ActionBulkChapterErrored ActivityAction = "bulk-chapter-errored"
 )
 
 type ActivityEntry struct {

@@ -259,8 +259,12 @@ func TestMarkBulkJobChapterErroredHappyPath(t *testing.T) {
 	s := newTestStore(t)
 	jobID, chapterID := seedJobAndFedChapter(t, s)
 
-	if err := s.MarkBulkJobChapterErrored(jobID, chapterID, "test reason"); err != nil {
+	marked, err := s.MarkBulkJobChapterErrored(jobID, chapterID, "test reason")
+	if err != nil {
 		t.Fatalf("MarkBulkJobChapterErrored: %v", err)
+	}
+	if !marked {
+		t.Errorf("MarkBulkJobChapterErrored: want marked=true on first call, got false")
 	}
 
 	// Assert chapter state = errored, ErroredReason populated.
@@ -293,13 +297,21 @@ func TestMarkBulkJobChapterErroredIdempotent(t *testing.T) {
 	jobID, chapterID := seedJobAndFedChapter(t, s)
 
 	// First call: transitions chapter fed → errored, bumps ErroredChapters.
-	if err := s.MarkBulkJobChapterErrored(jobID, chapterID, "first reason"); err != nil {
+	marked1, err := s.MarkBulkJobChapterErrored(jobID, chapterID, "first reason")
+	if err != nil {
 		t.Fatalf("first MarkBulkJobChapterErrored: %v", err)
 	}
+	if !marked1 {
+		t.Errorf("first MarkBulkJobChapterErrored: want marked=true, got false")
+	}
 
-	// Second call: chapter is already errored, must be a no-op.
-	if err := s.MarkBulkJobChapterErrored(jobID, chapterID, "second reason"); err != nil {
+	// Second call: chapter is already errored, must be a no-op and return false.
+	marked2, err := s.MarkBulkJobChapterErrored(jobID, chapterID, "second reason")
+	if err != nil {
 		t.Fatalf("second MarkBulkJobChapterErrored: %v", err)
+	}
+	if marked2 {
+		t.Errorf("second MarkBulkJobChapterErrored: want marked=false (idempotent no-op), got true")
 	}
 
 	job, err := s.GetBulkJob(jobID)
@@ -372,8 +384,12 @@ func TestMarkBulkJobChapterErroredSkipsAlreadyDone(t *testing.T) {
 	}
 
 	// MarkBulkJobChapterErrored must be a no-op on an already-done chapter.
-	if err := s.MarkBulkJobChapterErrored(jobID, chapterID, "should be ignored"); err != nil {
+	markedDone, err := s.MarkBulkJobChapterErrored(jobID, chapterID, "should be ignored")
+	if err != nil {
 		t.Fatalf("MarkBulkJobChapterErrored on done chapter: %v", err)
+	}
+	if markedDone {
+		t.Errorf("MarkBulkJobChapterErrored on done chapter: want marked=false, got true")
 	}
 
 	ch, err := s.GetBulkJobChapter(jobID, chapterID)

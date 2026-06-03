@@ -24,6 +24,7 @@ type fakeStore struct {
 	erroredChapters     []erroredChapterCall
 	fedChapters         []fedChapterCall
 	stalledCutoff       time.Time // last olderThan passed to ListStalledFedChapters
+	activityEntries     []model.ActivityEntry
 }
 
 type erroredChapterCall struct {
@@ -121,13 +122,18 @@ func (f *fakeStore) ListStalledFedChapters(jobID int64, olderThan time.Time) ([]
 	return out, nil
 }
 
-func (f *fakeStore) MarkBulkJobChapterErrored(jobID, chapterID int64, reason string) error {
+func (f *fakeStore) MarkBulkJobChapterErrored(jobID, chapterID int64, reason string) (bool, error) {
 	f.erroredChapters = append(f.erroredChapters, erroredChapterCall{jobID, chapterID, reason})
-	return nil
+	return true, nil
 }
 
 func (f *fakeStore) MarkBulkJobChapterFed(jobID, chapterID int64) error {
 	f.fedChapters = append(f.fedChapters, fedChapterCall{jobID, chapterID})
+	return nil
+}
+
+func (f *fakeStore) AddActivity(e model.ActivityEntry) error {
+	f.activityEntries = append(f.activityEntries, e)
 	return nil
 }
 
@@ -620,5 +626,71 @@ func TestDetectStalledChapters_StillQueued_Refeeds(t *testing.T) {
 	}
 	if len(st.erroredChapters) != 0 {
 		t.Errorf("want 0 MarkBulkJobChapterErrored calls, got %d: %+v", len(st.erroredChapters), st.erroredChapters)
+	}
+}
+
+// TestDetectStalledChapters_WritesActivityOnErrored verifies that when a
+// chapter is successfully marked errored, detectStalledChapters writes
+// exactly one ActivityEntry with ActionBulkChapterErrored, the correct
+// SeriesTitle, Via="bulk:<sourceName>", and a Detail containing the
+// chapter ID and erroring reason.
+func TestDetectStalledChapters_WritesActivityOnErrored(t *testing.T) {
+	stalledAt := time.Now().Add(-35 * time.Minute)
+	job := model.BulkJob{
+		ID: 1, MangaID: 7, SourceID: "42", Title: "Attack on Titan", SourceName: "MangaDex JP",
+		Status: model.BulkJobRunning, CreatedAt: stalledAt,
+	}
+	chapter := model.BulkJobChapter{
+		JobID: 1, ChapterID: 500, State: model.BulkChapterFed,
+		Tries: 1, UpdatedAt: stalledAt,
+	}
+	st := &fakeStore{
+		settings: model.Settings{
+			BulkMaxInFlight:                    5,
+			BulkRefillThreshold:                2,
+			BulkStallTimeoutMinutes:            30,
+			BulkChapterMaxRetries:              3,
+			BulkAutoErrorEmptyChaptersDisabled: false,
+		},
+		jobs:          []model.BulkJob{job},
+		chaptersByJob: map[int64][]model.BulkJobChapter{1: {chapter}},
+	}
+	sw := &fakeSuwayomi{
+		inFlight: map[string]int{},
+		chapterMetas: map[int64]suwayomi.ChapterMeta{
+			500: {PageCount: 0, IsDownloaded: false, QueueState: "ERROR", Tries: 1},
+		},
+	}
+	o := New(st, sw)
+	settings := st.settings
+	if err := o.detectStalledChapters(context.Background(), job, settings); err != nil {
+		t.Fatalf("detectStalledChapters: %v", err)
+	}
+
+	// Chapter must be marked errored.
+	if len(st.erroredChapters) != 1 {
+		t.Fatalf("want 1 MarkBulkJobChapterErrored call, got %d", len(st.erroredChapters))
+	}
+
+	// Activity entry must be written.
+	if len(st.activityEntries) != 1 {
+		t.Fatalf("want 1 activity entry, got %d: %+v", len(st.activityEntries), st.activityEntries)
+	}
+	entry := st.activityEntries[0]
+	if entry.Action != model.ActionBulkChapterErrored {
+		t.Errorf("activity Action: want %q, got %q", model.ActionBulkChapterErrored, entry.Action)
+	}
+	if entry.SeriesTitle != job.Title {
+		t.Errorf("activity SeriesTitle: want %q, got %q", job.Title, entry.SeriesTitle)
+	}
+	wantVia := "bulk:" + job.SourceName
+	if entry.Via != wantVia {
+		t.Errorf("activity Via: want %q, got %q", wantVia, entry.Via)
+	}
+	if !strings.Contains(entry.Detail, "500") {
+		t.Errorf("activity Detail should contain chapter id 500, got %q", entry.Detail)
+	}
+	if !strings.Contains(entry.Detail, "empty chapter") {
+		t.Errorf("activity Detail should contain erroring reason, got %q", entry.Detail)
 	}
 }

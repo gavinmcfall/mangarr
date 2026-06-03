@@ -40,11 +40,17 @@ type Store interface {
 	ListStalledFedChapters(jobID int64, olderThan time.Time) ([]model.BulkJobChapter, error)
 	// MarkBulkJobChapterErrored atomically marks a chapter as errored and
 	// bumps the parent job's errored_chapters counter. Idempotent: no-op
-	// when the chapter is already 'done' or 'errored'.
-	MarkBulkJobChapterErrored(jobID, chapterID int64, reason string) error
+	// when the chapter is already 'done' or 'errored'. Returns (true, nil)
+	// when the chapter was actually transitioned to errored; (false, nil)
+	// when the chapter was already in a terminal state (idempotent no-op).
+	MarkBulkJobChapterErrored(jobID, chapterID int64, reason string) (bool, error)
 	// MarkBulkJobChapterFed marks a chapter as fed and bumps its mangarr-side
 	// tries counter. Used by detectStalledChapters when re-feeding a chapter.
 	MarkBulkJobChapterFed(jobID, chapterID int64) error
+	// AddActivity appends one ActivityEntry to the activity log. Best-effort:
+	// callers should swallow errors to avoid interrupting the surrounding
+	// workflow on a log write failure.
+	AddActivity(model.ActivityEntry) error
 }
 
 // SuwayomiClient is the subset of *suwayomi.Client the orchestrator uses.
@@ -271,14 +277,31 @@ func (o *Orchestrator) detectStalledChapters(ctx context.Context, job model.Bulk
 
 		// Branch 2: empty chapter — auto-error if enabled (the default).
 		if meta.PageCount == 0 && meta.QueueState == "ERROR" && !settings.BulkAutoErrorEmptyChaptersDisabled {
-			_ = o.store.MarkBulkJobChapterErrored(job.ID, chapter.ChapterID, "empty chapter (source returned 0 pages)")
+			reason := "empty chapter (source returned 0 pages)"
+			if marked, _ := o.store.MarkBulkJobChapterErrored(job.ID, chapter.ChapterID, reason); marked {
+				_ = o.store.AddActivity(model.ActivityEntry{
+					Time:        time.Now().UTC(),
+					SeriesTitle: job.Title,
+					Action:      model.ActionBulkChapterErrored,
+					Detail:      fmt.Sprintf("chapter %d — %s", chapter.ChapterID, reason),
+					Via:         "bulk:" + job.SourceName,
+				})
+			}
 			continue
 		}
 
 		// Branch 3: Suwayomi errored AND we have exhausted our retry budget.
 		if meta.QueueState == "ERROR" && chapter.Tries >= maxRetries {
 			reason := fmt.Sprintf("suwayomi gave up after %d retries", meta.Tries)
-			_ = o.store.MarkBulkJobChapterErrored(job.ID, chapter.ChapterID, reason)
+			if marked, _ := o.store.MarkBulkJobChapterErrored(job.ID, chapter.ChapterID, reason); marked {
+				_ = o.store.AddActivity(model.ActivityEntry{
+					Time:        time.Now().UTC(),
+					SeriesTitle: job.Title,
+					Action:      model.ActionBulkChapterErrored,
+					Detail:      fmt.Sprintf("chapter %d — %s", chapter.ChapterID, reason),
+					Via:         "bulk:" + job.SourceName,
+				})
+			}
 			continue
 		}
 

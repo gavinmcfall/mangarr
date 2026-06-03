@@ -9,6 +9,9 @@
            style="width:{{.ProgressPct}}%"></div>
       <span class="bulk-progress-text">{{.CompletedChapters}}/{{.TotalChapters}}</span>
     </div>
+    {{if gt .ErroredChapters 0}}
+      <span class="pill pill-error">{{.ErroredChapters}} missing</span>
+    {{end}}
   </td>
   <td class="td-dim">{{.LastUpdateHuman}}</td>
   <td class="td-right">
