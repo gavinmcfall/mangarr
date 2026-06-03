@@ -1673,6 +1673,24 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 			settings.BulkInterBatchDelaySec = n
 		}
 	}
+	// --- Stall-detector knobs (T8) ---
+	// BulkStallTimeoutMinutes and BulkChapterMaxRetries follow the same
+	// Atoi-or-ignore pattern as the pacing knobs above. Empty = leave
+	// unchanged (e.g. user didn't type in that field).
+	// BulkAutoErrorEmptyChaptersDisabled is a checkbox: present+value="on"
+	// means checked (true); absent means unchecked (false). HTML form
+	// semantics guarantee absent key → empty string → false.
+	if v := r.FormValue("bulk_stall_timeout_minutes"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			settings.BulkStallTimeoutMinutes = n
+		}
+	}
+	if v := r.FormValue("bulk_chapter_max_retries"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			settings.BulkChapterMaxRetries = n
+		}
+	}
+	settings.BulkAutoErrorEmptyChaptersDisabled = r.FormValue("bulk_auto_error_empty_chapters_disabled") == "on"
 
 	// Parse override rows. Form fields come as override_category_<idx> +
 	// override_binding_<idx> pairs (idx is the JS counter, not stable).

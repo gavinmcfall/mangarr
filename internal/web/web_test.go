@@ -863,6 +863,122 @@ func TestSettingsPOSTRoundTripsBulkPacingKnobs(t *testing.T) {
 	}
 }
 
+// TestSaveSettingsRoundTripsStallDetectorFields pins that the three stall-detector
+// Settings knobs (BulkStallTimeoutMinutes, BulkChapterMaxRetries,
+// BulkAutoErrorEmptyChaptersDisabled) round-trip through the saveSettings POST
+// handler from HTML form values into the in-memory Settings struct.
+func TestSaveSettingsRoundTripsStallDetectorFields(t *testing.T) {
+	h, st, _ := newTestHandler()
+	form := url.Values{
+		// Required-shape sibling fields so the rename-scheme validator passes.
+		"file_mode":    {"copy"},
+		"rename_scheme": {"{series}/{series} - Ch.{chapter}.cbz"},
+		"poll_minutes":  {"60"},
+		// Stall-detector knobs under test.
+		"bulk_stall_timeout_minutes":              {"45"},
+		"bulk_chapter_max_retries":                {"5"},
+		"bulk_auto_error_empty_chapters_disabled": {"on"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/settings",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther && rec.Code != http.StatusOK {
+		t.Fatalf("settings save: want 200 or 303, got %d; body: %s",
+			rec.Code, rec.Body.String())
+	}
+	if st.settings.BulkStallTimeoutMinutes != 45 {
+		t.Errorf("BulkStallTimeoutMinutes: want 45, got %d", st.settings.BulkStallTimeoutMinutes)
+	}
+	if st.settings.BulkChapterMaxRetries != 5 {
+		t.Errorf("BulkChapterMaxRetries: want 5, got %d", st.settings.BulkChapterMaxRetries)
+	}
+	if !st.settings.BulkAutoErrorEmptyChaptersDisabled {
+		t.Errorf("BulkAutoErrorEmptyChaptersDisabled: want true, got false")
+	}
+
+	// Also verify the boolean reverts to false when the checkbox is absent
+	// (unchecked checkboxes are not submitted in HTML forms).
+	form2 := url.Values{
+		"file_mode":    {"copy"},
+		"rename_scheme": {"{series}/{series} - Ch.{chapter}.cbz"},
+		"poll_minutes":  {"60"},
+		// bulk_auto_error_empty_chapters_disabled intentionally omitted.
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/settings",
+		strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusSeeOther && rec2.Code != http.StatusOK {
+		t.Fatalf("second save: want 200 or 303, got %d", rec2.Code)
+	}
+	if st.settings.BulkAutoErrorEmptyChaptersDisabled {
+		t.Errorf("BulkAutoErrorEmptyChaptersDisabled: want false when checkbox absent, got true")
+	}
+}
+
+// TestPageSettingsRendersStallDetectorInputs verifies that the /settings GET
+// page renders the three stall-detector HTML inputs with the correct names,
+// help text, and that the checkbox's checked attribute reflects the seeded
+// BulkAutoErrorEmptyChaptersDisabled value.
+func TestPageSettingsRendersStallDetectorInputs(t *testing.T) {
+	h, st, _ := newTestHandler()
+
+	// Seed a non-default state so we can assert both the values and the
+	// checkbox checked attribute.
+	st.settings.BulkStallTimeoutMinutes = 20
+	st.settings.BulkChapterMaxRetries = 7
+	st.settings.BulkAutoErrorEmptyChaptersDisabled = true
+
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /settings: want 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// Input names must be present.
+	for _, name := range []string{
+		`name="bulk_stall_timeout_minutes"`,
+		`name="bulk_chapter_max_retries"`,
+		`name="bulk_auto_error_empty_chapters_disabled"`,
+	} {
+		if !strings.Contains(body, name) {
+			t.Errorf("rendered HTML missing input %s", name)
+		}
+	}
+
+	// Values must reflect the seeded settings.
+	if !strings.Contains(body, `value="20"`) {
+		t.Errorf("rendered HTML missing value=20 for BulkStallTimeoutMinutes")
+	}
+	if !strings.Contains(body, `value="7"`) {
+		t.Errorf("rendered HTML missing value=7 for BulkChapterMaxRetries")
+	}
+
+	// Checkbox must be checked when BulkAutoErrorEmptyChaptersDisabled=true.
+	if !strings.Contains(body, "bulk_auto_error_empty_chapters_disabled") ||
+		!strings.Contains(body, "checked") {
+		t.Errorf("checkbox not rendered as checked when BulkAutoErrorEmptyChaptersDisabled=true")
+	}
+
+	// Help text fragments must be present.
+	if !strings.Contains(body, "How long a fed chapter") {
+		t.Errorf("rendered HTML missing stall timeout help text")
+	}
+	if !strings.Contains(body, "re-feeds") {
+		t.Errorf("rendered HTML missing chapter max retries help text")
+	}
+	if !strings.Contains(body, "Disable auto-error on empty chapters") {
+		t.Errorf("rendered HTML missing auto-error checkbox label")
+	}
+}
+
 func TestAPIPutSettingsInvalidSchemeReturns400(t *testing.T) {
 	h, st, _ := newTestHandler()
 	savedBefore := st.settings.RenameScheme
