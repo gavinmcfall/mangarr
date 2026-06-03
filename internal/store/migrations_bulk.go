@@ -5,6 +5,18 @@ import (
 	"fmt"
 )
 
+// migration5BulkChapterErroredReason adds an errored_reason column to
+// bulk_job_chapters so the orchestrator can record WHY it gave up on a
+// chapter (stall timeout, empty-chapter signal, max retries exceeded, etc.)
+// without requiring the operator to dive into pod logs.
+func migration5BulkChapterErroredReason(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE bulk_job_chapters ADD COLUMN errored_reason TEXT NOT NULL DEFAULT ''`)
+	if err != nil {
+		return fmt.Errorf("migration 5 add errored_reason: %w", err)
+	}
+	return nil
+}
+
 // migrateBulkDownloadsTables creates the three tables Plan A of the
 // bulk-downloader spec depends on:
 //
