@@ -33,10 +33,10 @@ func TestBulkChapterStateEnumValues(t *testing.T) {
 	}
 }
 
-func TestChapterStateErroredConstAndErroredReasonField(t *testing.T) {
+func TestBulkChapterErroredConstAndErroredReasonField(t *testing.T) {
 	// Pin the wire string for the stalled-job detector.
-	if string(ChapterStateErrored) != "errored" {
-		t.Fatalf("ChapterStateErrored: want %q, got %q", "errored", string(ChapterStateErrored))
+	if string(BulkChapterErrored) != "errored" {
+		t.Fatalf("BulkChapterErrored: want %q, got %q", "errored", string(BulkChapterErrored))
 	}
 	// Compile-check that BulkJobChapter has the ErroredReason field.
 	bjc := BulkJobChapter{ErroredReason: "empty chapter (source returned 0 pages)"}

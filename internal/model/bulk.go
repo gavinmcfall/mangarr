@@ -28,11 +28,7 @@ const (
 	BulkChapterPending BulkChapterState = "pending" // not yet fed to Suwayomi
 	BulkChapterFed     BulkChapterState = "fed"     // EnqueueChapterDownloads call made
 	BulkChapterDone    BulkChapterState = "done"    // confirmed isDownloaded=true
-	BulkChapterErrored BulkChapterState = "errored" // Suwayomi tries >= 3, gave up
-
-	// ChapterStateErrored is an alias used by the stalled-job detector to mark
-	// chapters that cannot be downloaded (empty chapter, extension parser stale, etc.).
-	ChapterStateErrored BulkChapterState = "errored"
+	BulkChapterErrored BulkChapterState = "errored" // orchestrator gave up: max retries, empty chapter, or stall timeout
 )
 
 // BulkJob is one row in the bulk_jobs table.
@@ -58,7 +54,7 @@ type BulkJobChapter struct {
 	JobID         int64
 	ChapterID     int64 // Suwayomi numeric chapter ID
 	State         BulkChapterState
-	ErroredReason string // non-empty when State == ChapterStateErrored; persisted in errored_reason column
+	ErroredReason string // non-empty when State == BulkChapterErrored; persisted in errored_reason column
 	UpdatedAt     time.Time
 }
 
