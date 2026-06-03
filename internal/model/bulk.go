@@ -28,7 +28,7 @@ const (
 	BulkChapterPending BulkChapterState = "pending" // not yet fed to Suwayomi
 	BulkChapterFed     BulkChapterState = "fed"     // EnqueueChapterDownloads call made
 	BulkChapterDone    BulkChapterState = "done"    // confirmed isDownloaded=true
-	BulkChapterErrored BulkChapterState = "errored" // Suwayomi tries >= 3, gave up
+	BulkChapterErrored BulkChapterState = "errored" // orchestrator gave up: max retries, empty chapter, or stall timeout
 )
 
 // BulkJob is one row in the bulk_jobs table.
@@ -51,10 +51,12 @@ type BulkJob struct {
 
 // BulkJobChapter is one row in the bulk_job_chapters table.
 type BulkJobChapter struct {
-	JobID     int64
-	ChapterID int64 // Suwayomi numeric chapter ID
-	State     BulkChapterState
-	UpdatedAt time.Time
+	JobID         int64
+	ChapterID     int64 // Suwayomi numeric chapter ID
+	State         BulkChapterState
+	ErroredReason string // non-empty when State == BulkChapterErrored; persisted in errored_reason column
+	Tries         int    // number of times mangarr has fed this chapter to Suwayomi; independent of Suwayomi's own tries counter
+	UpdatedAt     time.Time
 }
 
 // LibraryCacheEntry is one row in the library_cache table — the per-manga

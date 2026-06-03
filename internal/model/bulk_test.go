@@ -33,6 +33,18 @@ func TestBulkChapterStateEnumValues(t *testing.T) {
 	}
 }
 
+func TestBulkChapterErroredConstAndErroredReasonField(t *testing.T) {
+	// Pin the wire string for the stalled-job detector.
+	if string(BulkChapterErrored) != "errored" {
+		t.Fatalf("BulkChapterErrored: want %q, got %q", "errored", string(BulkChapterErrored))
+	}
+	// Compile-check that BulkJobChapter has the ErroredReason field.
+	bjc := BulkJobChapter{ErroredReason: "empty chapter (source returned 0 pages)"}
+	if bjc.ErroredReason != "empty chapter (source returned 0 pages)" {
+		t.Fatalf("ErroredReason field: want %q, got %q", "empty chapter (source returned 0 pages)", bjc.ErroredReason)
+	}
+}
+
 func TestBulkJobIsTerminal(t *testing.T) {
 	terminals := []BulkJobStatus{BulkJobCompleted, BulkJobErrored}
 	active := []BulkJobStatus{BulkJobPending, BulkJobRunning, BulkJobPaused}

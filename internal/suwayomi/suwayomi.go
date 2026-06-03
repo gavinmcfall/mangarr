@@ -675,6 +675,78 @@ func (c *Client) GetDownloadStatus(ctx context.Context) (DownloadStatus, error) 
 	return status, nil
 }
 
+// ChapterMeta is the stall-detection snapshot for one chapter. PageCount==0 +
+// QueueState=="ERROR" is the unambiguous "give up" signal for the orchestrator.
+type ChapterMeta struct {
+	PageCount    int
+	IsDownloaded bool
+	QueueState   string // "Queued" | "Running" | "ERROR" | "" (not in Suwayomi's queue at all)
+	Tries        int
+}
+
+// GetChapterMeta returns a single-shot stall-detection probe for one chapter.
+// One GraphQL round-trip: combines chapter(id: $id) { ... } with downloadStatus
+// { queue { ... } } and matches the queue entry against the chapterID.
+func (c *Client) GetChapterMeta(ctx context.Context, chapterID int64) (ChapterMeta, error) {
+	const query = `query ChapterMeta($id: Int!) {
+		chapter(id: $id) { pageCount isDownloaded }
+		downloadStatus { queue { chapter { id } state progress tries } }
+	}`
+	body, err := json.Marshal(map[string]any{
+		"query":     query,
+		"variables": map[string]any{"id": chapterID},
+	})
+	if err != nil {
+		return ChapterMeta{}, fmt.Errorf("get chapter meta: %w", err)
+	}
+
+	raw, err := c.doGraphQL(ctx, body)
+	if err != nil {
+		return ChapterMeta{}, fmt.Errorf("get chapter meta: %w", err)
+	}
+
+	var out struct {
+		Data struct {
+			Chapter struct {
+				PageCount    int  `json:"pageCount"`
+				IsDownloaded bool `json:"isDownloaded"`
+			} `json:"chapter"`
+			DownloadStatus struct {
+				Queue []struct {
+					Chapter struct {
+						ID int64 `json:"id"`
+					} `json:"chapter"`
+					State    string  `json:"state"`
+					Progress float64 `json:"progress"`
+					Tries    int     `json:"tries"`
+				} `json:"queue"`
+			} `json:"downloadStatus"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return ChapterMeta{}, fmt.Errorf("get chapter meta: %w", err)
+	}
+	if len(out.Errors) > 0 {
+		return ChapterMeta{}, fmt.Errorf("get chapter meta graphql: %s", out.Errors[0].Message)
+	}
+
+	meta := ChapterMeta{
+		PageCount:    out.Data.Chapter.PageCount,
+		IsDownloaded: out.Data.Chapter.IsDownloaded,
+	}
+	for _, e := range out.Data.DownloadStatus.Queue {
+		if e.Chapter.ID == chapterID {
+			meta.QueueState = e.State
+			meta.Tries = e.Tries
+			break
+		}
+	}
+	return meta, nil
+}
+
 // InFlightCountForSource returns the number of download-queue entries
 // belonging to the given Suwayomi source that are still in-flight
 // (state ∈ {QUEUED, DOWNLOADING}). The orchestrator uses this to gate

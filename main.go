@@ -608,6 +608,14 @@ func (a *suwayomiOrchAdapter) ListChapters(ctx context.Context, mangaID int64) (
 	return c.ListChapters(ctx, mangaID)
 }
 
+func (a *suwayomiOrchAdapter) GetChapterMeta(ctx context.Context, chapterID int64) (suwayomi.ChapterMeta, error) {
+	c, err := a.client()
+	if err != nil {
+		return suwayomi.ChapterMeta{}, err
+	}
+	return c.GetChapterMeta(ctx, chapterID)
+}
+
 // ListLibraryWithCategories satisfies web.SuwayomiClient so the same
 // adapter wires into both the orchestrator and the /library + /api/bulk
 // + /api/library/sync handlers. Fresh-per-call: edits to Suwayomi URL

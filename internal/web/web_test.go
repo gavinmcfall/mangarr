@@ -59,6 +59,9 @@ type fakeStore struct {
 	// pin ordering invariants (e.g. "ClearBulkJobBackoff must run BEFORE
 	// UpdateBulkJobStatus on resume from errored"). Append-only.
 	callOrder []string
+	// SJD T10: per-job chapter map for orchestrator-facing methods.
+	// Keyed by job ID; values are mutable (pointer slice via map).
+	chaptersByJob map[int64][]model.BulkJobChapter
 }
 
 type bulkStatusCall struct {
@@ -259,6 +262,101 @@ func (f *fakeStore) DeleteBulkJob(id int64) error {
 	return nil
 }
 
+// --- SJD T10: orchestrator.Store methods wired into fakeStore ---
+// These let integration_test.go construct an orchestrator.New(fakeStore, fakeSuwayomi)
+// and call Tick() against the same in-memory state the web Handler reads.
+
+func (f *fakeStore) ListBulkJobChapters(jobID int64, state model.BulkChapterState) ([]model.BulkJobChapter, error) {
+	rows := f.chaptersByJob[jobID]
+	if state == "" {
+		return rows, nil
+	}
+	var out []model.BulkJobChapter
+	for _, c := range rows {
+		if c.State == state {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpdateBulkJobChapterState(jobID, chapterID int64, state model.BulkChapterState) error {
+	rows := f.chaptersByJob[jobID]
+	for i := range rows {
+		if rows[i].ChapterID == chapterID {
+			rows[i].State = state
+		}
+	}
+	f.chaptersByJob[jobID] = rows
+	return nil
+}
+
+func (f *fakeStore) UpdateBulkJobBackoff(jobID int64, until time.Time, consecFailures int, lastError string) error {
+	for i := range f.bulkJobs {
+		if f.bulkJobs[i].ID == jobID {
+			f.bulkJobs[i].ConsecutiveFailures = consecFailures
+			f.bulkJobs[i].LastError = lastError
+			f.bulkJobs[i].BackoffUntil = &until
+		}
+	}
+	return nil
+}
+
+func (f *fakeStore) IncrementBulkJobCompletedChapters(jobID int64) error {
+	for i := range f.bulkJobs {
+		if f.bulkJobs[i].ID == jobID {
+			f.bulkJobs[i].CompletedChapters++
+		}
+	}
+	return nil
+}
+
+func (f *fakeStore) ListStalledFedChapters(jobID int64, olderThan time.Time) ([]model.BulkJobChapter, error) {
+	rows := f.chaptersByJob[jobID]
+	var out []model.BulkJobChapter
+	for _, c := range rows {
+		if c.State == model.BulkChapterFed && c.UpdatedAt.Before(olderThan) {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// MarkBulkJobChapterErrored mutates chapter state in memory and bumps the
+// parent job's ErroredChapters counter. Idempotent: returns (false, nil) when
+// the chapter is already in a terminal state.
+func (f *fakeStore) MarkBulkJobChapterErrored(jobID, chapterID int64, reason string) (bool, error) {
+	rows := f.chaptersByJob[jobID]
+	for i := range rows {
+		if rows[i].ChapterID == chapterID {
+			if rows[i].State == model.BulkChapterDone || rows[i].State == model.BulkChapterErrored {
+				return false, nil // idempotent no-op
+			}
+			rows[i].State = model.BulkChapterErrored
+			rows[i].ErroredReason = reason
+		}
+	}
+	f.chaptersByJob[jobID] = rows
+	for i := range f.bulkJobs {
+		if f.bulkJobs[i].ID == jobID {
+			f.bulkJobs[i].ErroredChapters++
+		}
+	}
+	return true, nil
+}
+
+func (f *fakeStore) MarkBulkJobChapterFed(jobID, chapterID int64) error {
+	rows := f.chaptersByJob[jobID]
+	for i := range rows {
+		if rows[i].ChapterID == chapterID {
+			rows[i].State = model.BulkChapterFed
+			rows[i].Tries++
+		}
+	}
+	f.chaptersByJob[jobID] = rows
+	return nil
+}
+
 // fakeSuwayomi implements web.SuwayomiClient for tests. Per-manga chapter
 // IDs are configured via chaptersForManga; ListChapters returns each as
 // a Chapter{IsDownloaded:false}. A nil/empty slice for a manga ID models
@@ -275,6 +373,11 @@ type fakeSuwayomi struct {
 	// (used by POST /api/library/sync). A nil/empty slice models the
 	// "operator has no series in Suwayomi yet" edge case.
 	libraryEntries []suwayomi.Manga
+	// SJD T10: orchestrator-facing fields.
+	// inFlight is keyed by sourceID; zero value = 0 in-flight (passes refill check).
+	inFlight map[string]int
+	// chapterMetas is keyed by chapterID; returned by GetChapterMeta.
+	chapterMetas map[int64]suwayomi.ChapterMeta
 }
 
 func (f *fakeSuwayomi) ListChapters(_ context.Context, mangaID int64) ([]suwayomi.Chapter, error) {
@@ -295,6 +398,28 @@ func (f *fakeSuwayomi) ListLibraryWithCategories(_ context.Context) ([]suwayomi.
 		return nil, nil
 	}
 	return f.libraryEntries, nil
+}
+
+// --- SJD T10: orchestrator.SuwayomiClient methods ---
+
+func (f *fakeSuwayomi) InFlightCountForSource(_ context.Context, sourceID string) (int, error) {
+	if f.inFlight == nil {
+		return 0, nil
+	}
+	return f.inFlight[sourceID], nil
+}
+
+func (f *fakeSuwayomi) EnqueueChapterDownloads(_ context.Context, _ []int64) error {
+	return nil
+}
+
+func (f *fakeSuwayomi) GetChapterMeta(_ context.Context, chapterID int64) (suwayomi.ChapterMeta, error) {
+	if f.chapterMetas != nil {
+		if m, ok := f.chapterMetas[chapterID]; ok {
+			return m, nil
+		}
+	}
+	return suwayomi.ChapterMeta{}, nil
 }
 
 // fakeRunner records RunOnce calls.
@@ -860,6 +985,122 @@ func TestSettingsPOSTRoundTripsBulkPacingKnobs(t *testing.T) {
 		st.settings.BulkRefillThreshold != 3 ||
 		st.settings.BulkInterBatchDelaySec != 2 {
 		t.Errorf("pacing knobs not persisted: %+v", st.settings)
+	}
+}
+
+// TestSaveSettingsRoundTripsStallDetectorFields pins that the three stall-detector
+// Settings knobs (BulkStallTimeoutMinutes, BulkChapterMaxRetries,
+// BulkAutoErrorEmptyChaptersDisabled) round-trip through the saveSettings POST
+// handler from HTML form values into the in-memory Settings struct.
+func TestSaveSettingsRoundTripsStallDetectorFields(t *testing.T) {
+	h, st, _ := newTestHandler()
+	form := url.Values{
+		// Required-shape sibling fields so the rename-scheme validator passes.
+		"file_mode":    {"copy"},
+		"rename_scheme": {"{series}/{series} - Ch.{chapter}.cbz"},
+		"poll_minutes":  {"60"},
+		// Stall-detector knobs under test.
+		"bulk_stall_timeout_minutes":              {"45"},
+		"bulk_chapter_max_retries":                {"5"},
+		"bulk_auto_error_empty_chapters_disabled": {"on"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/settings",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther && rec.Code != http.StatusOK {
+		t.Fatalf("settings save: want 200 or 303, got %d; body: %s",
+			rec.Code, rec.Body.String())
+	}
+	if st.settings.BulkStallTimeoutMinutes != 45 {
+		t.Errorf("BulkStallTimeoutMinutes: want 45, got %d", st.settings.BulkStallTimeoutMinutes)
+	}
+	if st.settings.BulkChapterMaxRetries != 5 {
+		t.Errorf("BulkChapterMaxRetries: want 5, got %d", st.settings.BulkChapterMaxRetries)
+	}
+	if !st.settings.BulkAutoErrorEmptyChaptersDisabled {
+		t.Errorf("BulkAutoErrorEmptyChaptersDisabled: want true, got false")
+	}
+
+	// Also verify the boolean reverts to false when the checkbox is absent
+	// (unchecked checkboxes are not submitted in HTML forms).
+	form2 := url.Values{
+		"file_mode":    {"copy"},
+		"rename_scheme": {"{series}/{series} - Ch.{chapter}.cbz"},
+		"poll_minutes":  {"60"},
+		// bulk_auto_error_empty_chapters_disabled intentionally omitted.
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/settings",
+		strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusSeeOther && rec2.Code != http.StatusOK {
+		t.Fatalf("second save: want 200 or 303, got %d", rec2.Code)
+	}
+	if st.settings.BulkAutoErrorEmptyChaptersDisabled {
+		t.Errorf("BulkAutoErrorEmptyChaptersDisabled: want false when checkbox absent, got true")
+	}
+}
+
+// TestPageSettingsRendersStallDetectorInputs verifies that the /settings GET
+// page renders the three stall-detector HTML inputs with the correct names,
+// help text, and that the checkbox's checked attribute reflects the seeded
+// BulkAutoErrorEmptyChaptersDisabled value.
+func TestPageSettingsRendersStallDetectorInputs(t *testing.T) {
+	h, st, _ := newTestHandler()
+
+	// Seed a non-default state so we can assert both the values and the
+	// checkbox checked attribute.
+	st.settings.BulkStallTimeoutMinutes = 20
+	st.settings.BulkChapterMaxRetries = 7
+	st.settings.BulkAutoErrorEmptyChaptersDisabled = true
+
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /settings: want 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// Input names must be present.
+	for _, name := range []string{
+		`name="bulk_stall_timeout_minutes"`,
+		`name="bulk_chapter_max_retries"`,
+		`name="bulk_auto_error_empty_chapters_disabled"`,
+	} {
+		if !strings.Contains(body, name) {
+			t.Errorf("rendered HTML missing input %s", name)
+		}
+	}
+
+	// Values must reflect the seeded settings.
+	if !strings.Contains(body, `value="20"`) {
+		t.Errorf("rendered HTML missing value=20 for BulkStallTimeoutMinutes")
+	}
+	if !strings.Contains(body, `value="7"`) {
+		t.Errorf("rendered HTML missing value=7 for BulkChapterMaxRetries")
+	}
+
+	// Checkbox must be checked when BulkAutoErrorEmptyChaptersDisabled=true.
+	if !strings.Contains(body, "bulk_auto_error_empty_chapters_disabled") ||
+		!strings.Contains(body, "checked") {
+		t.Errorf("checkbox not rendered as checked when BulkAutoErrorEmptyChaptersDisabled=true")
+	}
+
+	// Help text fragments must be present.
+	if !strings.Contains(body, "How long a fed chapter") {
+		t.Errorf("rendered HTML missing stall timeout help text")
+	}
+	if !strings.Contains(body, "re-feeds") {
+		t.Errorf("rendered HTML missing chapter max retries help text")
+	}
+	if !strings.Contains(body, "Disable auto-error on empty chapters") {
+		t.Errorf("rendered HTML missing auto-error checkbox label")
 	}
 }
 

@@ -595,3 +595,131 @@ func TestSuwayomiHTTP429ReturnsTypedError(t *testing.T) {
 		t.Errorf("errors.Is(err, ErrHTTP429) = false; err = %v", err)
 	}
 }
+
+// ----- GetChapterMeta -----
+
+// TestGetChapterMetaHappyPathInQueueError covers the primary stall-detection
+// signal: pageCount==0, isDownloaded==false, queue entry matches the
+// requested chapterID with state=ERROR and tries=3.
+func TestGetChapterMetaHappyPathInQueueError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/graphql" {
+			handlerErr(t, w, "want /api/graphql, got %s", r.URL.Path)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"id":3185`) {
+			t.Errorf("query didn't carry id=3185; body: %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"data": {
+				"chapter": {"pageCount": 0, "isDownloaded": false},
+				"downloadStatus": {
+					"queue": [
+						{"chapter": {"id": 3185}, "state": "ERROR", "progress": 0.0, "tries": 3}
+					]
+				}
+			}
+		}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	meta, err := c.GetChapterMeta(context.Background(), 3185)
+	if err != nil {
+		t.Fatalf("GetChapterMeta: %v", err)
+	}
+	if meta.PageCount != 0 {
+		t.Errorf("PageCount: want 0, got %d", meta.PageCount)
+	}
+	if meta.IsDownloaded {
+		t.Errorf("IsDownloaded: want false, got true")
+	}
+	if meta.QueueState != "ERROR" {
+		t.Errorf("QueueState: want ERROR, got %q", meta.QueueState)
+	}
+	if meta.Tries != 3 {
+		t.Errorf("Tries: want 3, got %d", meta.Tries)
+	}
+}
+
+// TestGetChapterMetaNotInQueue covers the case where the chapter exists (has
+// pages) but is not in Suwayomi's download queue at all — no match means
+// QueueState="" and Tries=0.
+func TestGetChapterMetaNotInQueue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/graphql" {
+			handlerErr(t, w, "want /api/graphql, got %s", r.URL.Path)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"data": {
+				"chapter": {"pageCount": 12, "isDownloaded": false},
+				"downloadStatus": {"queue": []}
+			}
+		}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	meta, err := c.GetChapterMeta(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetChapterMeta: %v", err)
+	}
+	if meta.PageCount != 12 {
+		t.Errorf("PageCount: want 12, got %d", meta.PageCount)
+	}
+	if meta.IsDownloaded {
+		t.Errorf("IsDownloaded: want false, got true")
+	}
+	if meta.QueueState != "" {
+		t.Errorf("QueueState: want empty string, got %q", meta.QueueState)
+	}
+	if meta.Tries != 0 {
+		t.Errorf("Tries: want 0, got %d", meta.Tries)
+	}
+}
+
+// TestGetChapterMetaQueueWithMultipleChapters verifies that when the queue
+// contains several entries only the one matching the requested chapterID
+// contributes to QueueState and Tries. The other entries must be ignored.
+func TestGetChapterMetaQueueWithMultipleChapters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/graphql" {
+			handlerErr(t, w, "want /api/graphql, got %s", r.URL.Path)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// Queue has 3 entries; only chapter 200 matches the requested ID.
+		io.WriteString(w, `{
+			"data": {
+				"chapter": {"pageCount": 5, "isDownloaded": false},
+				"downloadStatus": {
+					"queue": [
+						{"chapter": {"id": 100}, "state": "QUEUED",      "progress": 0.0, "tries": 0},
+						{"chapter": {"id": 200}, "state": "DOWNLOADING", "progress": 0.4, "tries": 1},
+						{"chapter": {"id": 300}, "state": "ERROR",       "progress": 0.0, "tries": 5}
+					]
+				}
+			}
+		}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, NoAuth{})
+	meta, err := c.GetChapterMeta(context.Background(), 200)
+	if err != nil {
+		t.Fatalf("GetChapterMeta: %v", err)
+	}
+	if meta.PageCount != 5 {
+		t.Errorf("PageCount: want 5, got %d", meta.PageCount)
+	}
+	if meta.QueueState != "DOWNLOADING" {
+		t.Errorf("QueueState: want DOWNLOADING, got %q", meta.QueueState)
+	}
+	if meta.Tries != 1 {
+		t.Errorf("Tries: want 1 (from id=200 entry), got %d", meta.Tries)
+	}
+}

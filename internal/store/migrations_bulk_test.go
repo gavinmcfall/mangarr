@@ -7,6 +7,67 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestMigration6AddsTriesColumn(t *testing.T) {
+	s := newTestStore(t)
+	found := false
+	var colType string
+	var notnull int
+	var dfltValue sql.NullString
+	rows, err := s.DB().Query(`PRAGMA table_info(bulk_job_chapters)`)
+	if err != nil {
+		t.Fatalf("pragma table_info: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, pk int
+		var name string
+		if err := rows.Scan(&cid, &name, &colType, &notnull, &dfltValue, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if name == "tries" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("migration 6 did not add bulk_job_chapters.tries")
+	}
+	if colType != "INTEGER" {
+		t.Errorf("tries column type: want INTEGER, got %q", colType)
+	}
+	if notnull != 1 {
+		t.Errorf("tries column should be NOT NULL (notnull=1), got %d", notnull)
+	}
+	if !dfltValue.Valid || dfltValue.String != "0" {
+		t.Errorf("tries column default: want '0', got %v", dfltValue)
+	}
+}
+
+func TestMigration5AddsErroredReasonColumn(t *testing.T) {
+	s := newTestStore(t)
+	var name, typ string
+	found := false
+	rows, err := s.DB().Query(`PRAGMA table_info(bulk_job_chapters)`)
+	if err != nil {
+		t.Fatalf("pragma table_info: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if name == "errored_reason" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("migration 5 did not add bulk_job_chapters.errored_reason")
+	}
+}
+
 func TestMigration4CreatesBulkTables(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

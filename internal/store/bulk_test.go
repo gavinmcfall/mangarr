@@ -232,3 +232,179 @@ func TestListLibraryCacheEntries(t *testing.T) {
 		t.Errorf("want 3 entries, got %d", len(got))
 	}
 }
+
+// seedJobAndFedChapter is a shared helper that creates a bulk job with one
+// chapter in 'fed' state and returns both IDs.
+func seedJobAndFedChapter(t *testing.T, s *Store) (jobID, chapterID int64) {
+	t.Helper()
+	var err error
+	jobID, err = s.SaveBulkJob(model.BulkJob{
+		MangaID: 1, SourceID: "1", Title: "test", SourceName: "MangaDex EN",
+		Status: model.BulkJobRunning, TotalChapters: 1,
+	})
+	if err != nil {
+		t.Fatalf("SaveBulkJob: %v", err)
+	}
+	chapterID = int64(200)
+	if err := s.BatchInsertBulkJobChapters(jobID, []int64{chapterID}); err != nil {
+		t.Fatalf("BatchInsertBulkJobChapters: %v", err)
+	}
+	if err := s.UpdateBulkJobChapterState(jobID, chapterID, model.BulkChapterFed); err != nil {
+		t.Fatalf("UpdateBulkJobChapterState to fed: %v", err)
+	}
+	return jobID, chapterID
+}
+
+func TestMarkBulkJobChapterErroredHappyPath(t *testing.T) {
+	s := newTestStore(t)
+	jobID, chapterID := seedJobAndFedChapter(t, s)
+
+	marked, err := s.MarkBulkJobChapterErrored(jobID, chapterID, "test reason")
+	if err != nil {
+		t.Fatalf("MarkBulkJobChapterErrored: %v", err)
+	}
+	if !marked {
+		t.Errorf("MarkBulkJobChapterErrored: want marked=true on first call, got false")
+	}
+
+	// Assert chapter state = errored, ErroredReason populated.
+	ch, err := s.GetBulkJobChapter(jobID, chapterID)
+	if err != nil {
+		t.Fatalf("GetBulkJobChapter: %v", err)
+	}
+	if ch.State != model.BulkChapterErrored {
+		t.Errorf("chapter state: want %q, got %q", model.BulkChapterErrored, ch.State)
+	}
+	if ch.ErroredReason != "test reason" {
+		t.Errorf("ErroredReason: want %q, got %q", "test reason", ch.ErroredReason)
+	}
+
+	// Assert job counters.
+	job, err := s.GetBulkJob(jobID)
+	if err != nil {
+		t.Fatalf("GetBulkJob: %v", err)
+	}
+	if job.ErroredChapters != 1 {
+		t.Errorf("ErroredChapters: want 1, got %d", job.ErroredChapters)
+	}
+	if job.LastError != "test reason" {
+		t.Errorf("LastError: want %q, got %q", "test reason", job.LastError)
+	}
+}
+
+func TestMarkBulkJobChapterErroredIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	jobID, chapterID := seedJobAndFedChapter(t, s)
+
+	// First call: transitions chapter fed → errored, bumps ErroredChapters.
+	marked1, err := s.MarkBulkJobChapterErrored(jobID, chapterID, "first reason")
+	if err != nil {
+		t.Fatalf("first MarkBulkJobChapterErrored: %v", err)
+	}
+	if !marked1 {
+		t.Errorf("first MarkBulkJobChapterErrored: want marked=true, got false")
+	}
+
+	// Second call: chapter is already errored, must be a no-op and return false.
+	marked2, err := s.MarkBulkJobChapterErrored(jobID, chapterID, "second reason")
+	if err != nil {
+		t.Fatalf("second MarkBulkJobChapterErrored: %v", err)
+	}
+	if marked2 {
+		t.Errorf("second MarkBulkJobChapterErrored: want marked=false (idempotent no-op), got true")
+	}
+
+	job, err := s.GetBulkJob(jobID)
+	if err != nil {
+		t.Fatalf("GetBulkJob: %v", err)
+	}
+	if job.ErroredChapters != 1 {
+		t.Errorf("ErroredChapters after double-call: want 1, got %d", job.ErroredChapters)
+	}
+
+	// Reason should still be from the first call (second call was a no-op).
+	ch, err := s.GetBulkJobChapter(jobID, chapterID)
+	if err != nil {
+		t.Fatalf("GetBulkJobChapter: %v", err)
+	}
+	if ch.ErroredReason != "first reason" {
+		t.Errorf("ErroredReason: want %q (first call), got %q", "first reason", ch.ErroredReason)
+	}
+}
+
+func TestMarkBulkJobChapterFedBumpsTries(t *testing.T) {
+	s := newTestStore(t)
+	jobID, err := s.SaveBulkJob(model.BulkJob{
+		MangaID: 1, SourceID: "1", Title: "test", SourceName: "MangaDex EN",
+		Status: model.BulkJobRunning, TotalChapters: 1,
+	})
+	if err != nil {
+		t.Fatalf("SaveBulkJob: %v", err)
+	}
+	chapterID := int64(300)
+	if err := s.BatchInsertBulkJobChapters(jobID, []int64{chapterID}); err != nil {
+		t.Fatalf("BatchInsertBulkJobChapters: %v", err)
+	}
+
+	// First feed: tries should become 1.
+	if err := s.MarkBulkJobChapterFed(jobID, chapterID); err != nil {
+		t.Fatalf("first MarkBulkJobChapterFed: %v", err)
+	}
+	ch, err := s.GetBulkJobChapter(jobID, chapterID)
+	if err != nil {
+		t.Fatalf("GetBulkJobChapter after first feed: %v", err)
+	}
+	if ch.State != model.BulkChapterFed {
+		t.Errorf("state: want %q, got %q", model.BulkChapterFed, ch.State)
+	}
+	if ch.Tries != 1 {
+		t.Errorf("tries after first feed: want 1, got %d", ch.Tries)
+	}
+
+	// Second feed (re-feed after stall): tries should become 2.
+	if err := s.MarkBulkJobChapterFed(jobID, chapterID); err != nil {
+		t.Fatalf("second MarkBulkJobChapterFed: %v", err)
+	}
+	ch, err = s.GetBulkJobChapter(jobID, chapterID)
+	if err != nil {
+		t.Fatalf("GetBulkJobChapter after second feed: %v", err)
+	}
+	if ch.Tries != 2 {
+		t.Errorf("tries after second feed: want 2, got %d", ch.Tries)
+	}
+}
+
+func TestMarkBulkJobChapterErroredSkipsAlreadyDone(t *testing.T) {
+	s := newTestStore(t)
+	jobID, chapterID := seedJobAndFedChapter(t, s)
+
+	// Mark chapter done first (simulates normal completion before stall detector fires).
+	if err := s.UpdateBulkJobChapterState(jobID, chapterID, model.BulkChapterDone); err != nil {
+		t.Fatalf("UpdateBulkJobChapterState to done: %v", err)
+	}
+
+	// MarkBulkJobChapterErrored must be a no-op on an already-done chapter.
+	markedDone, err := s.MarkBulkJobChapterErrored(jobID, chapterID, "should be ignored")
+	if err != nil {
+		t.Fatalf("MarkBulkJobChapterErrored on done chapter: %v", err)
+	}
+	if markedDone {
+		t.Errorf("MarkBulkJobChapterErrored on done chapter: want marked=false, got true")
+	}
+
+	ch, err := s.GetBulkJobChapter(jobID, chapterID)
+	if err != nil {
+		t.Fatalf("GetBulkJobChapter: %v", err)
+	}
+	if ch.State != model.BulkChapterDone {
+		t.Errorf("chapter state should stay done, got %q", ch.State)
+	}
+
+	job, err := s.GetBulkJob(jobID)
+	if err != nil {
+		t.Fatalf("GetBulkJob: %v", err)
+	}
+	if job.ErroredChapters != 0 {
+		t.Errorf("ErroredChapters should stay 0, got %d", job.ErroredChapters)
+	}
+}

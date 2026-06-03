@@ -23,6 +23,8 @@ var migrations = []migration{
 	{2, "v1-settings-into-bindings", migrateV1SettingsIntoBindings},
 	{3, "series-manual-binding", migrateSeriesManualBinding},
 	{4, "bulk-downloads-tables", migrateBulkDownloadsTables},
+	{5, "bulk-chapter-errored-reason", migration5BulkChapterErroredReason},
+	{6, "bulk-chapter-tries", migration6BulkChapterTries},
 }
 
 // migrateSeriesManualBinding adds the manual_binding_id column to the

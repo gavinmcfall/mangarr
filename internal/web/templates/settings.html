@@ -362,6 +362,32 @@
             value="{{.Settings.BulkInterBatchDelaySec}}">
         </div>
       </div>
+      <div class="settings-row">
+        <label class="settings-label">Stall timeout (minutes)</label>
+        <div class="settings-input-wrap">
+          <input type="number" name="bulk_stall_timeout_minutes" min="1"
+            value="{{.Settings.BulkStallTimeoutMinutes}}">
+          <p class="input-hint">How long a fed chapter can sit without progress before the detector probes Suwayomi.</p>
+        </div>
+      </div>
+      <div class="settings-row">
+        <label class="settings-label">Chapter max retries</label>
+        <div class="settings-input-wrap">
+          <input type="number" name="bulk_chapter_max_retries" min="1"
+            value="{{.Settings.BulkChapterMaxRetries}}">
+          <p class="input-hint">After this many re-feeds, mangarr gives up on the chapter and the job auto-completes.</p>
+        </div>
+      </div>
+      <div class="settings-row">
+        <label class="settings-label">Disable auto-error on empty chapters</label>
+        <div class="settings-input-wrap">
+          <label class="settings-radio">
+            <input type="checkbox" name="bulk_auto_error_empty_chapters_disabled" {{if .Settings.BulkAutoErrorEmptyChaptersDisabled}}checked{{end}}>
+            Disable auto-error on empty chapters
+          </label>
+          <p class="input-hint">By default, a chapter Suwayomi reports as having 0 pages with queue state ERROR is given up on immediately. Tick this to fall back to the stall timeout instead (useful only if a source occasionally returns 0 pages transiently).</p>
+        </div>
+      </div>
       <p class="settings-card-desc" style="margin-top:4px;">Backoff ladder on Suwayomi HTTP 429: 5s → 15s → 60s → 5min, then mark errored.</p>
     </div>
   </div>
