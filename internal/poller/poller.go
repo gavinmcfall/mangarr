@@ -225,7 +225,8 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		// later flips status on the failure branch via a status-only
 		// UPDATE so there's no double-write.
 		s.Status = model.StatusPending
-		if _, err := p.Unmatched.UpsertSeries(s); err != nil {
+		sid, err := p.Unmatched.UpsertSeries(s)
+		if err != nil {
 			// No classification has run yet, so Via is empty rather than
 			// ViaUnmatched (which would falsely imply the classifier
 			// produced an unmatched decision).
@@ -233,6 +234,10 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 				fmt.Sprintf("upsert series: %v", err))
 			continue
 		}
+		// Scanner.ScanAll builds Series fresh from disk — s.ID is the zero
+		// value here. Backfill from the upsert result so downstream writes
+		// (SetSeriesCurrentBinding) land on the right row.
+		s.ID = sid
 
 		// Scanner.ScanAll builds Series fresh from disk and never carries
 		// DB-side fields like ManualBindingID. Pull the persisted override
