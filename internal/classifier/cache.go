@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/gavinmcfall/mangarr/internal/anilist"
 )
 
@@ -35,6 +37,12 @@ type CachingAniListClient struct {
 
 	mu sync.RWMutex
 	m  map[string]cacheEntry
+
+	// sf collapses concurrent cold-key lookups for the same title into a
+	// single inner call — thundering-herd protection that matters for
+	// AniList's 30-req/min budget when a poll tick fans out across many
+	// series at once.
+	sf singleflight.Group
 }
 
 type cacheEntry struct {
@@ -76,18 +84,26 @@ func (c *CachingAniListClient) Lookup(ctx context.Context, title string) (anilis
 		return e.result, nil
 	}
 
-	res, err := c.inner.Lookup(ctx, title)
-	switch {
-	case err == nil:
-		c.store(title, cacheEntry{result: res, expiresAt: time.Now().Add(c.successTTL)})
-	case errors.Is(err, anilist.ErrNotFound):
-		c.store(title, cacheEntry{notFound: true, expiresAt: time.Now().Add(c.notFoundTTL)})
-	default:
-		// transport / rate-limit / non-2xx — do NOT cache; the caller (the
-		// classifier) will fall through to step 5/6 this tick, but the
-		// next tick gets to try again.
+	// singleflight collapses concurrent misses for the same title; the
+	// winner runs the inner lookup + store, the rest receive its result.
+	v, err, _ := c.sf.Do(title, func() (interface{}, error) {
+		res, err := c.inner.Lookup(ctx, title)
+		switch {
+		case err == nil:
+			c.store(title, cacheEntry{result: res, expiresAt: time.Now().Add(c.successTTL)})
+		case errors.Is(err, anilist.ErrNotFound):
+			c.store(title, cacheEntry{notFound: true, expiresAt: time.Now().Add(c.notFoundTTL)})
+		default:
+			// transport / rate-limit / non-2xx — do NOT cache; the caller
+			// (the classifier) falls through to step 5/6 this tick, but the
+			// next tick gets to try again.
+		}
+		return res, err
+	})
+	if err != nil {
+		return anilist.Result{}, err
 	}
-	return res, err
+	return v.(anilist.Result), nil
 }
 
 func (c *CachingAniListClient) store(title string, e cacheEntry) {

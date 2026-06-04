@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gavinmcfall/mangarr/internal/anilist"
+	"github.com/gavinmcfall/mangarr/internal/mangadex"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
@@ -48,6 +49,13 @@ type AniListClient interface {
 	Lookup(ctx context.Context, title string) (anilist.Result, error)
 }
 
+// MangaDexClient is the subset of *mangadex.Client the Classify method
+// consumes as a fallback when AniList has no MANGA entry. Optional — nil
+// disables step 4b. Tests pass a fake; production wires the real client.
+type MangaDexClient interface {
+	Lookup(ctx context.Context, title string) (mangadex.Result, error)
+}
+
 // ScanItem is the input to Classify. It carries the metadata the
 // six-step flow needs to make a routing decision: the title to look up
 // on AniList and the parent directory the file was downloaded into
@@ -78,6 +86,7 @@ type Classifier struct {
 	Metrics MetricsSink // optional; nil disables all metric calls
 
 	anilist  AniListClient
+	mangadex MangaDexClient // optional; nil disables the step 4b fallback
 	suwayomi PathLookup
 	store    SettingsReader
 }
@@ -106,6 +115,12 @@ const (
 	// AniList-matching classification rule, formatted as "rule:<ruleID>".
 	ViaRulePrefix = "rule:"
 
+	// ViaMangaDexRulePrefix is the activity-log Via prefix for routes via
+	// the MangaDex fallback (step 4b) matching a classification rule,
+	// formatted as "mangadex-rule:<ruleID>". Distinct from ViaRulePrefix so
+	// the activity log shows which catalogue produced the match.
+	ViaMangaDexRulePrefix = "mangadex-rule:"
+
 	// ViaDefaultBinding is the literal Via value when the no-match
 	// fallback routed to Settings.DefaultBindingID.
 	ViaDefaultBinding = "default-binding"
@@ -122,6 +137,35 @@ const (
 // and a SettingsReader that exposes bindings, rules, and settings.
 func New(a AniListClient, p PathLookup, s SettingsReader) *Classifier {
 	return &Classifier{anilist: a, suwayomi: p, store: s}
+}
+
+// WithMangaDex sets the optional MangaDex fallback client (classifier
+// step 4b) and returns the receiver for chaining. nil leaves the fallback
+// disabled — Classify then behaves exactly as before.
+func (c *Classifier) WithMangaDex(m MangaDexClient) *Classifier {
+	c.mangadex = m
+	return c
+}
+
+// mangaDexLangToCountry maps MangaDex's originalLanguage (publication
+// language, ISO 639-1) onto the country-of-origin axis the rules reason
+// over. Only the unambiguous CJK languages map: a Korean manhwa is "ko",
+// a Japanese manga "ja", a Chinese manhua "zh". en is deliberately ABSENT
+// — publication language is not country of origin (an officially-English
+// manhwa, an OEL comic, and an English light novel are indistinguishable
+// here), so en-origin titles fall through to default/unmatched and are
+// resolved by a manual override. Returns "" for anything unmapped.
+func mangaDexLangToCountry(lang string) string {
+	switch lang {
+	case "ko":
+		return "KR"
+	case "ja":
+		return "JP"
+	case "zh", "zh-hk":
+		return "CN"
+	default:
+		return ""
+	}
 }
 
 // Classify is the six-step routing flow:
@@ -231,6 +275,44 @@ func (c *Classifier) Classify(ctx context.Context, item ScanItem) (model.Decisio
 					BindingID: r.BindingID,
 					Via:       fmt.Sprintf("%s%d", ViaRulePrefix, r.ID),
 				}, nil
+			}
+		}
+	}
+
+	// Step 4b: MangaDex fallback. AniList's catalogue misses popular
+	// manhwa/manhua (no MANGA entry, or only an anime adaptation with a
+	// misleading countryOfOrigin). When wired, consult MangaDex and map
+	// its originalLanguage onto the country-of-origin axis, then re-run the
+	// SAME rule walk. Only CJK languages map (see mangaDexLangToCountry);
+	// en-origin titles produce an empty country and won't match a
+	// country rule — by design. Errors swallowed like the AniList step.
+	if c.mangadex != nil {
+		md, mdErr := c.mangadex.Lookup(ctx, item.Title)
+		if mdErr != nil {
+			if bare := stripTrailingTag(item.Title); bare != "" && bare != item.Title {
+				if r2, err2 := c.mangadex.Lookup(ctx, bare); err2 == nil {
+					md, mdErr = r2, nil
+				}
+			}
+		}
+		if mdErr == nil {
+			if country := mangaDexLangToCountry(md.OriginalLanguage); country != "" {
+				synth := anilist.Result{CountryOfOrigin: country}
+				for _, r := range rules {
+					if r.Condition.IsPathOnly() {
+						continue
+					}
+					// Only country-of-origin rules can match a MangaDex
+					// synthetic result — isAdult/format aren't populated
+					// from this source, so a rule constraining those axes
+					// correctly won't fire.
+					if matchesRule(r.Condition, synth, item.ParentDir) {
+						return model.Decision{
+							BindingID: r.BindingID,
+							Via:       fmt.Sprintf("%s%d", ViaMangaDexRulePrefix, r.ID),
+						}, nil
+					}
+				}
 			}
 		}
 	}
