@@ -1001,9 +1001,34 @@ func TestReclassifyBulkPersistsTags(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
+	// Handler sorts the submitted set (for the no-op comparison); the store
+	// returns tags sorted on read anyway, so sorted is the truthful end state.
 	got := st.series[0].Tags
-	if len(got) != 3 || got[0] != "manhwa" || got[1] != "webtoon" || got[2] != "r18" {
-		t.Fatalf("tags not persisted/parsed: %v", got)
+	if len(got) != 3 || got[0] != "manhwa" || got[1] != "r18" || got[2] != "webtoon" {
+		t.Fatalf("tags not persisted/sorted: %v", got)
+	}
+	// A tag change must be counted so the UI doesn't report "Saved 0".
+	if hdr := rec.Header().Get("X-Mangarr-Updated"); hdr != "1" {
+		t.Errorf("X-Mangarr-Updated: want 1 for a tag change, got %q", hdr)
+	}
+}
+
+// TestReclassifyBulkTagNoOpNotCounted pins that re-submitting the SAME tags a
+// series already has is a no-op: no count, no spurious write. So a reported
+// count of 0 now genuinely means "nothing changed".
+func TestReclassifyBulkTagNoOpNotCounted(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.series = []model.Series{{ID: 1, Title: "Solo Leveling", Tags: []string{"manhwa", "r18"}}}
+	form := url.Values{"tags_1": {"r18, manhwa"}} // same set, different order
+	req := httptest.NewRequest(http.MethodPost, "/api/series/reclassify-bulk", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if hdr := rec.Header().Get("X-Mangarr-Updated"); hdr != "0" {
+		t.Errorf("X-Mangarr-Updated: want 0 for an unchanged tag set, got %q", hdr)
 	}
 }
 

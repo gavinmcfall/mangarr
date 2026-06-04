@@ -10,7 +10,7 @@
     <input type="search" id="series-tag-filter" placeholder="Filter by tag…"
            class="series-filter" autocomplete="off">
     <button class="btn btn-primary" type="submit" form="series-reclassify-form">
-      Set selected bindings
+      Save changes
     </button>
     {{end}}
     <button class="btn btn-primary"
@@ -31,7 +31,7 @@
 <form id="series-reclassify-form"
       hx-post="/api/series/reclassify-bulk"
       hx-swap="none"
-      hx-on::after-request="document.getElementById('reclassify-msg').textContent='Saved ' + (event.detail.xhr.getResponseHeader('X-Mangarr-Updated') || '0') + ' override(s)'">
+      hx-on::after-request="if(event.detail.successful){var n=event.detail.xhr.getResponseHeader('X-Mangarr-Updated')||'0'; if(n==='0'){document.getElementById('reclassify-msg').textContent='No changes';}else{document.getElementById('reclassify-msg').textContent='Saved '+n+' change(s)'; setTimeout(function(){window.location.reload();}, 400);}}">
 <div class="data-table-wrap">
 <table>
   <thead><tr>

@@ -2110,10 +2110,14 @@ func (h *Handler) apiReclassifyBulk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current := make(map[int64]int64, len(series))
+	currentTags := make(map[int64]string, len(series))
 	for _, s := range series {
 		if s.ManualBindingID != nil {
 			current[s.ID] = *s.ManualBindingID
 		}
+		// Normalized "a|b|c" of the current tag set (ListSeries returns tags
+		// sorted) for a cheap no-op comparison against the submitted set.
+		currentTags[s.ID] = strings.Join(s.Tags, "|")
 	}
 	updated := 0
 	for key, vals := range r.Form {
@@ -2162,15 +2166,30 @@ func (h *Handler) apiReclassifyBulk(w http.ResponseWriter, r *http.Request) {
 			// the wire payload clean here too.
 			parts := strings.Split(vals[0], ",")
 			tags := make([]string, 0, len(parts))
+			seen := map[string]struct{}{}
 			for _, p := range parts {
-				if p = strings.TrimSpace(p); p != "" {
-					tags = append(tags, p)
+				p = strings.TrimSpace(p)
+				if p == "" {
+					continue
 				}
+				if _, dup := seen[p]; dup {
+					continue
+				}
+				seen[p] = struct{}{}
+				tags = append(tags, p)
+			}
+			// Compare against current (sorted) tag set so a no-op submit
+			// doesn't write or inflate the saved-count. Sort the submitted
+			// set the same way the store/ListSeries does before joining.
+			sort.Strings(tags)
+			if strings.Join(tags, "|") == currentTags[seriesID] {
+				continue // no change — skip write, don't count
 			}
 			if err := h.store.SetSeriesTags(seriesID, tags); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			updated++
 		}
 	}
 	w.Header().Set("X-Mangarr-Updated", strconv.Itoa(updated))
