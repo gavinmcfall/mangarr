@@ -290,6 +290,55 @@ func TestAPIBulkCreatePreviewReturnsHTMLModalOnHXRequest(t *testing.T) {
 	}
 }
 
+// TestAPIBulkCreatePreviewShowsSkippedComplete pins that a selected series
+// with zero missing chapters renders under "Won't download — already have
+// it" instead of silently vanishing from the modal — so selecting 2 and
+// seeing 1 queued is explained, not confusing.
+func TestAPIBulkCreatePreviewShowsSkippedComplete(t *testing.T) {
+	h, st, sw := newTestHandler()
+	st.libraryCache = map[int64]model.LibraryCacheEntry{
+		7: {MangaID: 7, Title: "One Piece", SourceID: "42", SourceName: "MangaDex EN"},
+		8: {MangaID: 8, Title: "Second Life Ranker", SourceID: "99", SourceName: "Bbato EN"},
+	}
+	sw.chaptersForManga = map[int64][]int64{
+		7: {100, 101, 102},      // 3 missing
+		8: {200, 201},           // fully downloaded below → 0 missing
+	}
+	sw.chaptersDownloaded = map[int64]bool{200: true, 201: true}
+
+	form := url.Values{}
+	form.Add("manga_id", "7")
+	form.Add("manga_id", "8")
+	form.Set("confirm", "0")
+	req := httptest.NewRequest(http.MethodPost, "/api/bulk", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"You're about to queue <b>3 chapters</b>",
+		"<b>1 series</b>",
+		"Will download",
+		"Won't download",            // the skipped section heading
+		"Second Life Ranker — Bbato EN", // the complete series listed there
+		"1 of 2 selected",           // summary line
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("modal HTML missing %q. Body:\n%s", want, body)
+		}
+	}
+	// The skipped (complete) series must NOT appear in the will-download
+	// provider list — only One Piece's provider should be billed.
+	if strings.Contains(body, "Bbato EN — 1 series") {
+		t.Errorf("complete series wrongly counted in will-download providers. Body:\n%s", body)
+	}
+}
+
 // TestAPIBulkCreatePreviewModalSkipsZeroMissingSeries: when every
 // selected manga is already fully downloaded, the modal renders the
 // empty-state copy from the spec's "Empty states" section instead of

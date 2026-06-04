@@ -365,16 +365,30 @@ func (h *Handler) renderBulkConfirmModal(w http.ResponseWriter, previews []bulkP
 		SeriesCount  int
 		ChapterCount int
 	}
+	// skippedRow is a selected series with nothing to fetch (0 missing) —
+	// surfaced in the modal's "Won't download — already complete" section
+	// so the operator sees why a selected row isn't in the queue, instead
+	// of silently getting fewer series than they picked.
+	type skippedRow struct {
+		Title  string
+		Source string
+	}
 	byProvider := map[string]*providerRow{}
 	totalChapters := 0
 	seriesCount := 0
+	var skipped []skippedRow
 	mangaIDs := make([]int64, 0, len(previews))
 	for _, p := range previews {
 		mangaIDs = append(mangaIDs, p.MangaID)
 		if p.Missing == 0 {
-			// Don't include zero-missing series in the per-provider
-			// breakdown; if every selection is zero-missing the .Empty
-			// branch below renders the "fully downloaded" copy.
+			// Zero-missing series are skipped server-side at confirm time.
+			// Collect them so the modal can show "already complete" rather
+			// than just quietly omitting them from the per-provider counts.
+			src := p.SourceName
+			if src == "" {
+				src = p.SourceID
+			}
+			skipped = append(skipped, skippedRow{Title: p.Title, Source: src})
 			continue
 		}
 		seriesCount++
@@ -395,6 +409,7 @@ func (h *Handler) renderBulkConfirmModal(w http.ResponseWriter, previews []bulkP
 		providers = append(providers, *pr)
 	}
 	sort.Slice(providers, func(i, j int) bool { return providers[i].Name < providers[j].Name })
+	sort.Slice(skipped, func(i, j int) bool { return skipped[i].Title < skipped[j].Title })
 
 	data := struct {
 		Empty         bool
@@ -402,6 +417,8 @@ func (h *Handler) renderBulkConfirmModal(w http.ResponseWriter, previews []bulkP
 		SeriesCount   int
 		ProviderCount int
 		Providers     []providerRow
+		Skipped       []skippedRow
+		SelectedCount int
 		MangaIDs      []int64
 	}{
 		Empty:         seriesCount == 0,
@@ -409,6 +426,8 @@ func (h *Handler) renderBulkConfirmModal(w http.ResponseWriter, previews []bulkP
 		SeriesCount:   seriesCount,
 		ProviderCount: len(providers),
 		Providers:     providers,
+		Skipped:       skipped,
+		SelectedCount: len(previews),
 		MangaIDs:      mangaIDs,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
