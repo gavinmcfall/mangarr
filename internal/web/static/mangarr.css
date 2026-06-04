@@ -299,6 +299,21 @@ tbody tr:hover td {
 .pill-unknown  { background: #3a3c40; color: #9aa0a6; }
 .pill-manual   { background: #1f4d3a; color: #5dec9b; }
 .pill-auto     { background: #1a3a4d; color: #5db8ec; }
+.pill-tag      { background: #2a2f37; color: #9fb0c3; margin-right: 4px; }
+
+/* Series page — tags edit + filter */
+.series-tags-cell  { white-space: normal; }
+.series-tags-input {
+  display: block; width: 160px; margin-top: 4px; padding: 2px 6px;
+  background: #1a1d22; border: 1px solid #2a2f37; border-radius: 4px;
+  color: inherit; font-size: 12px;
+}
+.series-filter {
+  flex: 0 1 220px; min-width: 140px; padding: 6px 10px;
+  background: #1a1d22; border: 1px solid #2a2f37; border-radius: 4px;
+  color: inherit; font-size: 13px;
+}
+.series-filter::placeholder { opacity: 0.55; }
 
 /* Status pills */
 .pill-filed    { background: #26543a; color: #3bb273; }

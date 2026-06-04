@@ -91,6 +91,8 @@ type Store interface {
 	SaveSettings(model.Settings) error
 	SetSeriesType(id int64, ct model.ContentType) error
 	SetSeriesManualBinding(id int64, bindingID *int64) error
+	SetSeriesTags(id int64, tags []string) error
+	ListAllTags() ([]string, error)
 	ListBindings() ([]model.Binding, error)
 	ListRules() ([]model.ClassificationRule, error)
 	SaveBindings([]model.Binding) error
@@ -602,6 +604,7 @@ type seriesPageData struct {
 	Page     string
 	Items    []model.Series
 	Bindings []model.Binding
+	AllTags  []string // distinct tags across all series, for the filter affordance
 	Flash    string
 	Error    string
 }
@@ -772,7 +775,10 @@ func (h *Handler) pageSeries(w http.ResponseWriter, r *http.Request) {
 	// at least see series state); the dropdown will show only the
 	// "no override" option, which is the safe default anyway.
 	bindings, _ := h.store.ListBindings()
-	h.render(w, "series.html", seriesPageData{Page: "series", Items: list, Bindings: bindings})
+	// AllTags feeds the per-page tag filter affordance. Best-effort: an
+	// error renders an empty list, which just means no filter suggestions.
+	allTags, _ := h.store.ListAllTags()
+	h.render(w, "series.html", seriesPageData{Page: "series", Items: list, Bindings: bindings, AllTags: allTags})
 }
 
 func (h *Handler) pagePreview(w http.ResponseWriter, r *http.Request) {
@@ -2111,36 +2117,61 @@ func (h *Handler) apiReclassifyBulk(w http.ResponseWriter, r *http.Request) {
 	}
 	updated := 0
 	for key, vals := range r.Form {
-		const prefix = "binding_id_"
-		if !strings.HasPrefix(key, prefix) || len(vals) == 0 {
+		if len(vals) == 0 {
 			continue
 		}
-		seriesID, err := strconv.ParseInt(key[len(prefix):], 10, 64)
-		if err != nil {
-			continue
-		}
-		bindingID, err := strconv.ParseInt(vals[0], 10, 64)
-		if err != nil {
-			continue
-		}
-		if bindingID > 0 {
-			if _, ok := validBinding[bindingID]; !ok {
-				continue // silently skip stale/invalid binding refs
+		const bindingPrefix = "binding_id_"
+		const tagPrefix = "tags_"
+
+		switch {
+		case strings.HasPrefix(key, bindingPrefix):
+			seriesID, err := strconv.ParseInt(key[len(bindingPrefix):], 10, 64)
+			if err != nil {
+				continue
+			}
+			bindingID, err := strconv.ParseInt(vals[0], 10, 64)
+			if err != nil {
+				continue
+			}
+			if bindingID > 0 {
+				if _, ok := validBinding[bindingID]; !ok {
+					continue // silently skip stale/invalid binding refs
+				}
+			}
+			if current[seriesID] == bindingID {
+				continue // no-op — selection matches DB
+			}
+			var override *int64
+			if bindingID > 0 {
+				v := bindingID
+				override = &v
+			}
+			if err := h.store.SetSeriesManualBinding(seriesID, override); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			updated++
+
+		case strings.HasPrefix(key, tagPrefix):
+			seriesID, err := strconv.ParseInt(key[len(tagPrefix):], 10, 64)
+			if err != nil {
+				continue
+			}
+			// Parse the comma-separated tags input; trim each, drop blanks.
+			// The store's SetSeriesTags dedups/normalizes again, but we keep
+			// the wire payload clean here too.
+			parts := strings.Split(vals[0], ",")
+			tags := make([]string, 0, len(parts))
+			for _, p := range parts {
+				if p = strings.TrimSpace(p); p != "" {
+					tags = append(tags, p)
+				}
+			}
+			if err := h.store.SetSeriesTags(seriesID, tags); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
 			}
 		}
-		if current[seriesID] == bindingID {
-			continue // no-op — selection matches DB
-		}
-		var override *int64
-		if bindingID > 0 {
-			v := bindingID
-			override = &v
-		}
-		if err := h.store.SetSeriesManualBinding(seriesID, override); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		updated++
 	}
 	w.Header().Set("X-Mangarr-Updated", strconv.Itoa(updated))
 	w.WriteHeader(http.StatusOK)
