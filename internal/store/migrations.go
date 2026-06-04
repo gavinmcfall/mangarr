@@ -26,6 +26,7 @@ var migrations = []migration{
 	{5, "bulk-chapter-errored-reason", migration5BulkChapterErroredReason},
 	{6, "bulk-chapter-tries", migration6BulkChapterTries},
 	{7, "series-current-binding", migrateSeriesCurrentBinding},
+	{8, "series-tags", migrateSeriesTags},
 }
 
 // migrateSeriesManualBinding adds the manual_binding_id column to the
