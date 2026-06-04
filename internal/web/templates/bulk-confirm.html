@@ -18,12 +18,22 @@
       You're about to queue <b>{{.TotalChapters}} chapters</b> across
       <b>{{.SeriesCount}} series</b> and
       <b>{{.ProviderCount}} provider{{if ne .ProviderCount 1}}s{{end}}</b>.
+      {{if .Skipped}}<br><span class="modal-fine">{{.SeriesCount}} of {{.SelectedCount}} selected · {{len .Skipped}} already complete (below).</span>{{end}}
     </p>
+    <p class="modal-section-label">Will download</p>
     <ul class="modal-list">
       {{range .Providers}}
       <li>{{.Name}} — {{.SeriesCount}} series · {{.ChapterCount}} chapters</li>
       {{end}}
     </ul>
+    {{if .Skipped}}
+    <p class="modal-section-label">Won't download — already have it</p>
+    <ul class="modal-list modal-list-muted">
+      {{range .Skipped}}
+      <li>{{.Title}} — {{.Source}}</li>
+      {{end}}
+    </ul>
+    {{end}}
     <p class="modal-fine">
       Mangarr will pace 5 chapters in flight per provider, refilling when down to 2.
       Suwayomi's per-chapter delay still applies on top.
