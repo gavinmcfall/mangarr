@@ -112,10 +112,17 @@ func main() {
 	// Classifier: widened AniList client (countryOfOrigin + isAdult +
 	// format) + Suwayomi PathCache + store-backed bindings/rules/settings
 	// reader. Note: the v1 in-process AniList cache (NewWithCache) is NOT
-	// wired here — the v2 path makes a fresh AniList call per classify.
-	// This may surface as additional GraphQL traffic on cache-cold ticks;
-	// Plan B/C may re-introduce caching on the v2 path.
-	anilistClient := anilist.New(anilistEndpoint)
+	// AniList's public endpoint enforces a hard 30-req/min rate limit (down
+	// from the documented 90 since their 2025 throttle change). Two polls
+	// over a 20-series library can blow the budget mid-tick; the inner
+	// client returns "anilist rate limited" and the classifier falls to
+	// Unmatched — even for series it classified moments earlier. Wrap the
+	// raw client in a 24h success / 6h not-found in-memory TTL cache so
+	// repeated polls of the same title don't touch AniList at all once
+	// resolved. Transport errors (incl. rate-limit) are NOT cached so the
+	// next tick gets a fresh shot.
+	anilistRaw := anilist.New(anilistEndpoint)
+	anilistClient := classifier.NewCachingAniListClient(anilistRaw, 24*time.Hour, 6*time.Hour)
 	clf := classifier.New(anilistClient, suwayomiCache, st)
 	clf.Metrics = metricsReg
 
