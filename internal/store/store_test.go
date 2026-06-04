@@ -267,6 +267,38 @@ func TestUpsertSeriesUpdates(t *testing.T) {
 	}
 }
 
+// TestUpsertSeriesReturnsCorrectIDOnUpdateAfterOtherInserts is the
+// regression guard for the LastInsertId-on-UPSERT bug: SQLite does not
+// update last_insert_rowid on the ON CONFLICT DO UPDATE path, so it
+// returns a stale rowid from a prior INSERT. With ≥2 series, re-upserting
+// the FIRST one must still return ITS id — not the most-recently-inserted
+// series' id. (The single-series TestUpsertSeriesUpdates passes either way
+// because the stale rowid coincidentally equals the only row's id.)
+func TestUpsertSeriesReturnsCorrectIDOnUpdateAfterOtherInserts(t *testing.T) {
+	s := newTestStore(t)
+	idA, err := s.UpsertSeries(model.Series{Title: "Berserk", SourcePath: "/dl/berserk", Source: "suwayomi", Status: model.StatusPending})
+	if err != nil {
+		t.Fatalf("insert A: %v", err)
+	}
+	idB, err := s.UpsertSeries(model.Series{Title: "Solo Leveling", SourcePath: "/dl/solo", Source: "suwayomi", Status: model.StatusPending})
+	if err != nil {
+		t.Fatalf("insert B: %v", err)
+	}
+	if idA == idB {
+		t.Fatalf("two distinct series got the same id: %d", idA)
+	}
+	// Re-upsert A (the UPDATE path). The returned id must be A's, not B's
+	// (B was the most recent real INSERT, so a LastInsertId-trusting impl
+	// would wrongly return idB here).
+	gotA, err := s.UpsertSeries(model.Series{Title: "Berserk", SourcePath: "/dl/berserk", Source: "suwayomi", Status: model.StatusFiled})
+	if err != nil {
+		t.Fatalf("re-upsert A: %v", err)
+	}
+	if gotA != idA {
+		t.Fatalf("re-upsert of A returned wrong id: got %d, want %d (B's id is %d)", gotA, idA, idB)
+	}
+}
+
 // TestUpsertSeriesPreservesTypeAndManualBinding pins the ON CONFLICT
 // contract: an upsert with empty Type (the Scanner-built shape) must
 // NOT erase a previously-written Type. Same for ManualBindingID.
