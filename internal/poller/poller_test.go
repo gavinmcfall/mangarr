@@ -797,6 +797,19 @@ func (f *fakeSeriesStore) SetSeriesType(id int64, ct model.ContentType) error {
 	return nil
 }
 
+func (f *fakeSeriesStore) SetSeriesCurrentBinding(id int64, bindingID *int64) error {
+	if s, ok := f.series[id]; ok {
+		if bindingID == nil {
+			s.CurrentBindingID = nil
+		} else {
+			v := *bindingID
+			s.CurrentBindingID = &v
+		}
+		f.series[id] = s
+	}
+	return nil
+}
+
 // fakeCache satisfies poller.Cache for FileOne tests.
 type fakeCache struct {
 	writes []struct {

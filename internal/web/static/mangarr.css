@@ -298,6 +298,7 @@ tbody tr:hover td {
 .pill-manhua   { background: #3d1f30; color: #f0789c; }
 .pill-unknown  { background: #3a3c40; color: #9aa0a6; }
 .pill-manual   { background: #1f4d3a; color: #5dec9b; }
+.pill-auto     { background: #1a3a4d; color: #5db8ec; }
 
 /* Status pills */
 .pill-filed    { background: #26543a; color: #3bb273; }

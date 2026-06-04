@@ -25,6 +25,7 @@ var migrations = []migration{
 	{4, "bulk-downloads-tables", migrateBulkDownloadsTables},
 	{5, "bulk-chapter-errored-reason", migration5BulkChapterErroredReason},
 	{6, "bulk-chapter-tries", migration6BulkChapterTries},
+	{7, "series-current-binding", migrateSeriesCurrentBinding},
 }
 
 // migrateSeriesManualBinding adds the manual_binding_id column to the
@@ -63,6 +64,36 @@ func migrateSeriesManualBinding(tx *sql.Tx) error {
 	}
 	if _, err := tx.Exec(`ALTER TABLE series ADD COLUMN manual_binding_id INTEGER`); err != nil {
 		return fmt.Errorf("add series.manual_binding_id: %w", err)
+	}
+	return nil
+}
+
+// migrateSeriesCurrentBinding adds the current_binding_id column to series
+// so the poller can record which binding the classifier most recently
+// resolved a series to. /series renders this column as the visible pill
+// when no manual_binding_id is set, so operators can see the classifier's
+// decision without bouncing to the Activity page.
+//
+// Same idempotency-and-fixture-tolerance shape as migrateSeriesManualBinding.
+func migrateSeriesCurrentBinding(tx *sql.Tx) error {
+	var seriesTable string
+	err := tx.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='series'`).Scan(&seriesTable)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("probe series table: %w", err)
+	}
+	var name string
+	err = tx.QueryRow(`SELECT name FROM pragma_table_info('series') WHERE name = 'current_binding_id'`).Scan(&name)
+	if err == nil {
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("probe series.current_binding_id: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE series ADD COLUMN current_binding_id INTEGER`); err != nil {
+		return fmt.Errorf("add series.current_binding_id: %w", err)
 	}
 	return nil
 }

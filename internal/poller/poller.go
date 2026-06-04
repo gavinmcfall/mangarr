@@ -105,6 +105,11 @@ type SeriesStore interface {
 	GetSeriesByID(id int64) (model.Series, error)
 	GetSeriesByPath(path string) (model.Series, error)
 	SetSeriesType(id int64, ct model.ContentType) error
+	// SetSeriesCurrentBinding records the binding the auto-classifier
+	// resolved this series to at the most recent successful file, or
+	// clears it on Unmatched. /series reads this to render the visible
+	// pill without bouncing to the activity log.
+	SetSeriesCurrentBinding(id int64, bindingID *int64) error
 }
 
 // Planner returns a dry-run plan for a series without touching the
@@ -252,6 +257,13 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 					fmt.Sprintf("mark unmatched: %v", err))
 				continue
 			}
+			// Clear the auto-classifier verdict on Unmatched so /series
+			// stops showing a stale "auto" pill for a series whose AniList
+			// lookup just dropped out. Errors are swallowed — Unmatched
+			// activity row + UnmatchedSink are the durable signals.
+			if p.Store != nil {
+				_ = p.Store.SetSeriesCurrentBinding(s.ID, nil)
+			}
 			p.recordActivityVia(s.Title, model.ActionUnmatched, via, "")
 			if p.Metrics != nil {
 				p.Metrics.IncUnmatched()
@@ -282,6 +294,15 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 				p.Metrics.IncFileError()
 			}
 			continue
+		}
+		// Record the auto-classifier's verdict so /series can render the
+		// resolved binding without having to query the activity log.
+		// Errors swallowed — the file already landed, the activity row is
+		// authoritative, and a stale CurrentBindingID self-corrects on the
+		// next successful tick.
+		if p.Store != nil {
+			bid := binding.ID
+			_ = p.Store.SetSeriesCurrentBinding(s.ID, &bid)
 		}
 		p.recordActivityVia(s.Title, model.ActionFiled, d.Via,
 			fmt.Sprintf("filed into %s", binding.LibraryRoot))

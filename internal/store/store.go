@@ -147,13 +147,17 @@ ON CONFLICT(source_path) DO UPDATE SET
 func (s *Store) GetSeriesByPath(path string) (model.Series, error) {
 	var m model.Series
 	var typ, status string
-	var manual sql.NullInt64
-	err := s.db.QueryRow(`SELECT id,title,source,type,status,chapter_count,manual_binding_id FROM series WHERE source_path=?`, path).
-		Scan(&m.ID, &m.Title, &m.Source, &typ, &status, &m.ChapterCount, &manual)
+	var manual, current sql.NullInt64
+	err := s.db.QueryRow(`SELECT id,title,source,type,status,chapter_count,manual_binding_id,current_binding_id FROM series WHERE source_path=?`, path).
+		Scan(&m.ID, &m.Title, &m.Source, &typ, &status, &m.ChapterCount, &manual, &current)
 	m.SourcePath, m.Type, m.Status = path, model.ContentType(typ), model.Status(status)
 	if manual.Valid {
 		v := manual.Int64
 		m.ManualBindingID = &v
+	}
+	if current.Valid {
+		v := current.Int64
+		m.CurrentBindingID = &v
 	}
 	return m, err
 }
@@ -163,19 +167,23 @@ func (s *Store) GetSeriesByPath(path string) (model.Series, error) {
 func (s *Store) GetSeriesByID(id int64) (model.Series, error) {
 	var m model.Series
 	var typ, status string
-	var manual sql.NullInt64
-	err := s.db.QueryRow(`SELECT id,title,source_path,source,type,status,chapter_count,manual_binding_id FROM series WHERE id=?`, id).
-		Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount, &manual)
+	var manual, current sql.NullInt64
+	err := s.db.QueryRow(`SELECT id,title,source_path,source,type,status,chapter_count,manual_binding_id,current_binding_id FROM series WHERE id=?`, id).
+		Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount, &manual, &current)
 	m.Type, m.Status = model.ContentType(typ), model.Status(status)
 	if manual.Valid {
 		v := manual.Int64
 		m.ManualBindingID = &v
 	}
+	if current.Valid {
+		v := current.Int64
+		m.CurrentBindingID = &v
+	}
 	return m, err
 }
 
 func (s *Store) ListSeries() ([]model.Series, error) {
-	rows, err := s.db.Query(`SELECT id,title,source_path,source,type,status,chapter_count,manual_binding_id FROM series ORDER BY title`)
+	rows, err := s.db.Query(`SELECT id,title,source_path,source,type,status,chapter_count,manual_binding_id,current_binding_id FROM series ORDER BY title`)
 	if err != nil {
 		return nil, err
 	}
@@ -184,14 +192,18 @@ func (s *Store) ListSeries() ([]model.Series, error) {
 	for rows.Next() {
 		var m model.Series
 		var typ, status string
-		var manual sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount, &manual); err != nil {
+		var manual, current sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount, &manual, &current); err != nil {
 			return nil, err
 		}
 		m.Type, m.Status = model.ContentType(typ), model.Status(status)
 		if manual.Valid {
 			v := manual.Int64
 			m.ManualBindingID = &v
+		}
+		if current.Valid {
+			v := current.Int64
+			m.CurrentBindingID = &v
 		}
 		out = append(out, m)
 	}
@@ -267,7 +279,7 @@ func applySettingsDefaults(s *model.Settings) {
 
 // ListUnmatched returns all series with StatusUnmatched.
 func (s *Store) ListUnmatched() ([]model.Series, error) {
-	rows, err := s.db.Query(`SELECT id,title,source_path,source,type,status,chapter_count,manual_binding_id FROM series WHERE status=? ORDER BY title`, string(model.StatusUnmatched))
+	rows, err := s.db.Query(`SELECT id,title,source_path,source,type,status,chapter_count,manual_binding_id,current_binding_id FROM series WHERE status=? ORDER BY title`, string(model.StatusUnmatched))
 	if err != nil {
 		return nil, err
 	}
@@ -276,8 +288,8 @@ func (s *Store) ListUnmatched() ([]model.Series, error) {
 	for rows.Next() {
 		var m model.Series
 		var typ, status string
-		var manual sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount, &manual); err != nil {
+		var manual, current sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount, &manual, &current); err != nil {
 			return nil, err
 		}
 		m.Type, m.Status = model.ContentType(typ), model.Status(status)
@@ -285,9 +297,33 @@ func (s *Store) ListUnmatched() ([]model.Series, error) {
 			v := manual.Int64
 			m.ManualBindingID = &v
 		}
+		if current.Valid {
+			v := current.Int64
+			m.CurrentBindingID = &v
+		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// SetSeriesCurrentBinding records the binding the auto-classifier most
+// recently resolved a series to. Pass nil to clear (e.g. on Unmatched).
+// The same value goes into series.current_binding_id; the /series page
+// reads this to render the auto-classified pill when no manual override
+// is set.
+func (s *Store) SetSeriesCurrentBinding(id int64, bindingID *int64) error {
+	var arg interface{}
+	if bindingID == nil {
+		arg = nil
+	} else {
+		if *bindingID == 0 {
+			return fmt.Errorf("SetSeriesCurrentBinding: bindingID 0 is not valid; pass nil to clear")
+		}
+		arg = *bindingID
+	}
+	_, err := s.db.Exec(`UPDATE series SET current_binding_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		arg, id)
+	return err
 }
 
 // ListActivity returns the most recent `limit` activity entries, newest first.
