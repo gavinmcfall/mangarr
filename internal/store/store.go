@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS classification_cache (
 //     and read by the classifier at step 0. The ON CONFLICT clause leaves
 //     it untouched so a persisted override survives every poll.
 func (s *Store) UpsertSeries(in model.Series) (int64, error) {
-	res, err := s.db.Exec(`
+	_, err := s.db.Exec(`
 INSERT INTO series (title, source_path, source, type, status, chapter_count, updated_at)
 VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)
 ON CONFLICT(source_path) DO UPDATE SET
@@ -136,9 +136,13 @@ ON CONFLICT(source_path) DO UPDATE SET
 	if err != nil {
 		return 0, err
 	}
-	if id, err := res.LastInsertId(); err == nil && id != 0 {
-		return id, nil
-	}
+	// Always resolve the id by the UNIQUE source_path rather than trusting
+	// res.LastInsertId(): on the ON CONFLICT DO UPDATE path SQLite does NOT
+	// update last_insert_rowid, so it returns a stale rowid from a prior
+	// INSERT on the same pooled connection — non-zero and WRONG. The bug was
+	// latent until a caller started using the returned id (series.current_
+	// binding_id write), at which point every updated row got the wrong id
+	// or none. source_path is UNIQUE so this SELECT is exact.
 	var id int64
 	err = s.db.QueryRow(`SELECT id FROM series WHERE source_path=?`, in.SourcePath).Scan(&id)
 	return id, err
