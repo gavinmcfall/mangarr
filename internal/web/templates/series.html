@@ -7,6 +7,8 @@
     <span id="rescan-msg" class="rescan-msg"></span>
     <span id="reclassify-msg" class="rescan-msg"></span>
     {{if .Items}}
+    <input type="search" id="series-tag-filter" placeholder="Filter by tag…"
+           class="series-filter" autocomplete="off">
     <button class="btn btn-primary" type="submit" form="series-reclassify-form">
       Set selected bindings
     </button>
@@ -38,12 +40,13 @@
     <th>Source</th>
     <th>Chapters</th>
     <th>Status</th>
+    <th>Tags</th>
     <th class="td-right">Reclassify</th>
   </tr></thead>
   <tbody>
   {{$bindings := .Bindings}}
   {{range .Items}}
-  <tr>
+  <tr class="series-row" data-tags="{{range $i, $t := .Tags}}{{if $i}} {{end}}{{$t}}{{end}}">
     <td>{{.Title}}</td>
     <td>
       {{$series := .}}
@@ -62,6 +65,12 @@
     <td class="td-dim">{{.Source}}</td>
     <td class="td-dim">{{.ChapterCount}}</td>
     <td><span class="pill pill-{{.Status | lower}}">{{.Status}}</span></td>
+    <td class="series-tags-cell">
+      {{range .Tags}}<span class="pill pill-tag">{{.}}</span>{{end}}
+      <input type="text" name="tags_{{.ID}}" class="series-tags-input"
+             value="{{range $i, $t := .Tags}}{{if $i}}, {{end}}{{$t}}{{end}}"
+             placeholder="comma,separated" autocomplete="off">
+    </td>
     <td class="td-right">
       {{$current := int64Or .ManualBindingID 0}}
       <select name="binding_id_{{.ID}}" class="reclassify-select">
@@ -85,4 +94,18 @@
 {{end}}
   </div>
 </div>
+<script>
+(function () {
+  var tagFilter = document.getElementById('series-tag-filter');
+  if (!tagFilter) return;
+  tagFilter.addEventListener('input', function () {
+    var q = (tagFilter.value || '').trim().toLowerCase();
+    document.querySelectorAll('.series-row').forEach(function (row) {
+      var tags = (row.getAttribute('data-tags') || '').toLowerCase();
+      var hit = !q || tags.split(' ').some(function (t) { return t && t.indexOf(q) !== -1; });
+      row.style.display = hit ? '' : 'none';
+    });
+  });
+})();
+</script>
 {{end}}

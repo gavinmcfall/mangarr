@@ -122,6 +122,28 @@ func (f *fakeStore) SetSeriesManualBinding(id int64, bindingID *int64) error {
 	}
 	return nil
 }
+func (f *fakeStore) SetSeriesTags(id int64, tags []string) error {
+	for i := range f.series {
+		if f.series[i].ID == id {
+			f.series[i].Tags = tags
+		}
+	}
+	return nil
+}
+func (f *fakeStore) ListAllTags() ([]string, error) {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, s := range f.series {
+		for _, t := range s.Tags {
+			if _, ok := seen[t]; !ok {
+				seen[t] = struct{}{}
+				out = append(out, t)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
 func (f *fakeStore) ListBindings() ([]model.Binding, error)         { return f.bindings, nil }
 func (f *fakeStore) ListRules() ([]model.ClassificationRule, error) { return f.rules, nil }
 func (f *fakeStore) SaveBindings(in []model.Binding) error {
@@ -936,6 +958,52 @@ func TestAPIReclassifyBulkSkipsUnknownBinding(t *testing.T) {
 	}
 	if len(st.setManualBindingCalls) != 1 || st.setManualBindingCalls[0].id != 2 {
 		t.Errorf("want one SetSeriesManualBinding(2, ...); got %+v", st.setManualBindingCalls)
+	}
+}
+
+// TestPageSeriesRendersTagPills pins that the Series page renders per-series
+// tag pills, the per-row edit input (comma-joined current tags), and the
+// page-level tag-filter input.
+func TestPageSeriesRendersTagPills(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.series = []model.Series{
+		{ID: 1, Title: "Solo Leveling", Source: "suwayomi", Status: model.StatusFiled, Tags: []string{"manhwa", "webtoon"}},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/series", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`pill-tag`, ">manhwa<", ">webtoon<",
+		`id="series-tag-filter"`,
+		`name="tags_1"`, `value="manhwa, webtoon"`,
+		`data-tags="manhwa webtoon"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("series page missing %q", want)
+		}
+	}
+}
+
+// TestReclassifyBulkPersistsTags pins that the single Set submit also saves
+// tags from tags_<id> fields, parsed comma-separated with blanks trimmed.
+func TestReclassifyBulkPersistsTags(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.series = []model.Series{{ID: 1, Title: "Solo Leveling"}}
+	form := url.Values{"tags_1": {"manhwa, webtoon , r18"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/reclassify-bulk", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got := st.series[0].Tags
+	if len(got) != 3 || got[0] != "manhwa" || got[1] != "webtoon" || got[2] != "r18" {
+		t.Fatalf("tags not persisted/parsed: %v", got)
 	}
 }
 
