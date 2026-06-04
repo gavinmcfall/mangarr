@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gavinmcfall/mangarr/internal/anilist"
+	"github.com/gavinmcfall/mangarr/internal/mangadex"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
@@ -62,6 +63,18 @@ func (f *fakeAniListV2) Lookup(ctx context.Context, title string) (anilist.Resul
 	if f.onLookup != nil {
 		f.onLookup(title)
 	}
+	return f.result, f.err
+}
+
+// fakeMangaDex satisfies MangaDexClient for step-4b fallback tests.
+type fakeMangaDex struct {
+	result    mangadex.Result
+	err       error
+	callCount int
+}
+
+func (f *fakeMangaDex) Lookup(ctx context.Context, title string) (mangadex.Result, error) {
+	f.callCount++
 	return f.result, f.err
 }
 
@@ -466,5 +479,117 @@ func TestClassifyManualBindingZeroIsIgnored(t *testing.T) {
 	}
 	if d.BindingID != 1 || d.Via != "rule:5" {
 		t.Errorf("expected rule:5 match when override is *0, got %+v", d)
+	}
+}
+
+// --- Step 4b: MangaDex fallback ---
+
+// kr/jp helpers are declared per-test as needed; this block exercises the
+// fallback that fires only when AniList produced no rule match.
+
+func TestClassifyMangaDexFallbackResolvesWhenAniListMisses(t *testing.T) {
+	kr := "KR"
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 5, Name: "Manhwa"}},
+		rules: []model.ClassificationRule{
+			{ID: 6, Priority: 200, Name: "KR",
+				Condition: model.RuleCondition{CountryOfOrigin: &kr}, BindingID: 5},
+		},
+	}
+	// AniList returns NotFound — the catalogue gap case (e.g. a manhwa
+	// only present on AniList as its anime adaptation, or not at all).
+	al := &fakeAniListV2{err: anilist.ErrNotFound}
+	md := &fakeMangaDex{result: mangadex.Result{OriginalLanguage: "ko"}}
+	c := New(al, nil, st).WithMangaDex(md)
+
+	d, err := c.Classify(context.Background(), ScanItem{Title: "Legend of the Northern Blade", ParentDir: "/dl/lonb"})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if d.BindingID != 5 || d.Via != "mangadex-rule:6" {
+		t.Errorf("expected {BindingID:5, Via:mangadex-rule:6}, got %+v", d)
+	}
+	if md.callCount != 1 {
+		t.Errorf("expected MangaDex consulted once, got %d", md.callCount)
+	}
+}
+
+func TestClassifyMangaDexFallbackNotConsultedWhenAniListMatches(t *testing.T) {
+	jp := "JP"
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga"}},
+		rules: []model.ClassificationRule{
+			{ID: 5, Priority: 100, Name: "JP",
+				Condition: model.RuleCondition{CountryOfOrigin: &jp}, BindingID: 1},
+		},
+	}
+	al := &fakeAniListV2{result: anilist.Result{CountryOfOrigin: "JP"}}
+	md := &fakeMangaDex{result: mangadex.Result{OriginalLanguage: "ko"}}
+	c := New(al, nil, st).WithMangaDex(md)
+
+	d, _ := c.Classify(context.Background(), ScanItem{Title: "Bleach", ParentDir: "/dl/bleach"})
+	if d.Via != "rule:5" {
+		t.Errorf("expected AniList rule:5, got %+v", d)
+	}
+	if md.callCount != 0 {
+		t.Errorf("MangaDex must NOT be consulted when AniList already matched; got %d calls", md.callCount)
+	}
+}
+
+func TestClassifyMangaDexFallbackEnLanguageFallsThrough(t *testing.T) {
+	kr := "KR"
+	defBinding := int64(99)
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 5, Name: "Manhwa"}, {ID: 99, Name: "Default"}},
+		rules: []model.ClassificationRule{
+			{ID: 6, Priority: 200, Name: "KR",
+				Condition: model.RuleCondition{CountryOfOrigin: &kr}, BindingID: 5},
+		},
+		settings: model.Settings{DefaultBindingID: &defBinding},
+	}
+	al := &fakeAniListV2{err: anilist.ErrNotFound}
+	// en-origin (e.g. The Beginning After the End) — must NOT map to any
+	// country rule; falls through to the default binding.
+	md := &fakeMangaDex{result: mangadex.Result{OriginalLanguage: "en"}}
+	c := New(al, nil, st).WithMangaDex(md)
+
+	d, _ := c.Classify(context.Background(), ScanItem{Title: "The Beginning After the End", ParentDir: "/dl/tbate"})
+	if d.Via != ViaDefaultBinding || d.BindingID != 99 {
+		t.Errorf("en-origin must fall through to default binding, got %+v", d)
+	}
+}
+
+func TestClassifyMangaDexFallbackErrorIsSwallowed(t *testing.T) {
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga"}},
+		rules:    []model.ClassificationRule{},
+	}
+	al := &fakeAniListV2{err: anilist.ErrNotFound}
+	md := &fakeMangaDex{err: fmt.Errorf("mangadex rate limited")}
+	c := New(al, nil, st).WithMangaDex(md)
+
+	d, err := c.Classify(context.Background(), ScanItem{Title: "X", ParentDir: "/dl/x"})
+	if err != nil {
+		t.Fatalf("MangaDex transport error must be swallowed, got %v", err)
+	}
+	if d.Via != ViaUnmatched {
+		t.Errorf("expected unmatched fall-through on MangaDex error, got %+v", d)
+	}
+}
+
+func TestClassifyNilMangaDexDisablesFallback(t *testing.T) {
+	st := &fakeBindingsRulesStore{
+		bindings: []model.Binding{{ID: 1, Name: "Manga"}},
+		rules:    []model.ClassificationRule{},
+	}
+	al := &fakeAniListV2{err: anilist.ErrNotFound}
+	c := New(al, nil, st) // no WithMangaDex
+
+	d, err := c.Classify(context.Background(), ScanItem{Title: "X", ParentDir: "/dl/x"})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if d.Via != ViaUnmatched {
+		t.Errorf("expected unmatched with no fallback wired, got %+v", d)
 	}
 }

@@ -40,6 +40,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/health"
 	healthchecks "github.com/gavinmcfall/mangarr/internal/health/checks"
 	"github.com/gavinmcfall/mangarr/internal/kavita"
+	"github.com/gavinmcfall/mangarr/internal/mangadex"
 	"github.com/gavinmcfall/mangarr/internal/metrics"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/orchestrator"
@@ -125,6 +126,17 @@ func main() {
 	anilistClient := classifier.NewCachingAniListClient(anilistRaw, 24*time.Hour, 6*time.Hour)
 	clf := classifier.New(anilistClient, suwayomiCache, st)
 	clf.Metrics = metricsReg
+
+	// MangaDex fallback (classifier step 4b): AniList's catalogue misses
+	// popular manhwa/manhua (no MANGA entry, or only the anime adaptation
+	// with a misleading countryOfOrigin). When AniList produces no rule
+	// match, the classifier consults MangaDex and maps its originalLanguage
+	// (ko/ja/zh → KR/JP/CN) onto the country-of-origin rules. Same TTL-cache
+	// shape as AniList. MANGARR_MANGADEX_ENDPOINT overrides the API base for
+	// tests; empty uses the public api.mangadex.org.
+	mangadexRaw := mangadex.New(os.Getenv("MANGARR_MANGADEX_ENDPOINT"))
+	mangadexClient := classifier.NewCachingMangaDexClient(mangadexRaw, 24*time.Hour, 6*time.Hour)
+	clf.WithMangaDex(mangadexClient)
 
 	// ---- kavita client ----
 	kavitaClient := kavita.New(settings.KavitaBaseURL, settings.KavitaAPIKey)

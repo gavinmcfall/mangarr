@@ -108,6 +108,13 @@ func TestCachingAniListClient_TTLExpiry(t *testing.T) {
 func TestCachingAniListClient_ConcurrentSafe(t *testing.T) {
 	inner := &fakeAniList{}
 	inner.next = func(title string) (anilist.Result, error) {
+		// Small delay so concurrent cold-key misses genuinely overlap —
+		// that's the window singleflight is meant to collapse. With an
+		// instant return the goroutines for a key can serialize (first
+		// completes + caches before the next arrives), occasionally
+		// producing one extra real call and a spurious failure. The delay
+		// makes the singleflight property deterministic to assert.
+		time.Sleep(2 * time.Millisecond)
 		return anilist.Result{CountryOfOrigin: "JP"}, nil
 	}
 	c := NewCachingAniListClient(inner, time.Hour, time.Hour)
