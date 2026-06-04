@@ -5,6 +5,12 @@
   <h1 class="page-title">Series</h1>
   <div class="page-actions">
     <span id="rescan-msg" class="rescan-msg"></span>
+    <span id="reclassify-msg" class="rescan-msg"></span>
+    {{if .Items}}
+    <button class="btn btn-primary" type="submit" form="series-reclassify-form">
+      Set selected bindings
+    </button>
+    {{end}}
     <button class="btn btn-primary"
       hx-post="/api/rescan"
       hx-swap="none"
@@ -20,6 +26,10 @@
 <div class="page-body">
   <div class="content-container">
 {{if .Items}}
+<form id="series-reclassify-form"
+      hx-post="/api/series/reclassify-bulk"
+      hx-swap="none"
+      hx-on::after-request="document.getElementById('reclassify-msg').textContent='Saved ' + (event.detail.xhr.getResponseHeader('X-Mangarr-Updated') || '0') + ' override(s)'">
 <div class="data-table-wrap">
 <table>
   <thead><tr>
@@ -49,23 +59,18 @@
     <td class="td-dim">{{.ChapterCount}}</td>
     <td><span class="pill pill-{{.Status | lower}}">{{.Status}}</span></td>
     <td class="td-right">
-      <form class="reclassify-form"
-        hx-post="/api/series/{{.ID}}/reclassify"
-        hx-target="closest tr"
-        hx-swap="outerHTML">
-        {{$current := int64Or .ManualBindingID 0}}
-        <select name="binding_id" class="reclassify-select">
-          <option value="0"{{if eq $current 0}} selected{{end}}>&mdash; No override &mdash;</option>
-          {{range $bindings}}<option value="{{.ID}}"{{if eq .ID $current}} selected{{end}}>{{.Name}}</option>{{end}}
-        </select>
-        <button type="submit" class="btn-sm">Set</button>
-      </form>
+      {{$current := int64Or .ManualBindingID 0}}
+      <select name="binding_id_{{.ID}}" class="reclassify-select">
+        <option value="0"{{if eq $current 0}} selected{{end}}>&mdash; No override &mdash;</option>
+        {{range $bindings}}<option value="{{.ID}}"{{if eq .ID $current}} selected{{end}}>{{.Name}}</option>{{end}}
+      </select>
     </td>
   </tr>
   {{end}}
   </tbody>
 </table>
 </div>
+</form>
 {{else}}
 <div class="empty-state">
   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

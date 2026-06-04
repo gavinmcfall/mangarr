@@ -872,6 +872,73 @@ func TestAPIReclassifyRejectsUnknownBinding(t *testing.T) {
 	}
 }
 
+// TestAPIReclassifyBulkAppliesAllRows pins the happy path: one POST with
+// many binding_id_<seriesID> fields applies every selection that differs
+// from current state, in one transaction-shaped pass.
+func TestAPIReclassifyBulkAppliesAllRows(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.bindings = []model.Binding{
+		{ID: 1, Name: "Manga"},
+		{ID: 5, Name: "Manhwa"},
+	}
+	// Seed series with known current state; series 1 has no override (current=0),
+	// series 2 already pinned to Manga (current=1), series 3 already to Manhwa.
+	bind1 := int64(1)
+	bind5 := int64(5)
+	st.series = []model.Series{
+		{ID: 1},
+		{ID: 2, ManualBindingID: &bind1},
+		{ID: 3, ManualBindingID: &bind5},
+	}
+	form := url.Values{
+		"binding_id_1": {"5"}, // change: 0→5
+		"binding_id_2": {"1"}, // no-op: 1→1
+		"binding_id_3": {"0"}, // change: 5→nil
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/reclassify-bulk",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-Mangarr-Updated"); got != "2" {
+		t.Errorf("X-Mangarr-Updated: want 2, got %q", got)
+	}
+	if len(st.setManualBindingCalls) != 2 {
+		t.Fatalf("want 2 SetSeriesManualBinding calls (no-op series 2 should be skipped), got %d: %+v",
+			len(st.setManualBindingCalls), st.setManualBindingCalls)
+	}
+}
+
+// TestAPIReclassifyBulkSkipsUnknownBinding pins that an out-of-range binding
+// id from a stale page render doesn't crash the request and doesn't write
+// the bad row — but the rest of the form still applies.
+func TestAPIReclassifyBulkSkipsUnknownBinding(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.bindings = []model.Binding{{ID: 1, Name: "Manga"}}
+	st.series = []model.Series{{ID: 1}, {ID: 2}}
+	form := url.Values{
+		"binding_id_1": {"999"}, // invalid — skip
+		"binding_id_2": {"1"},   // valid — apply
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/series/reclassify-bulk",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-Mangarr-Updated"); got != "1" {
+		t.Errorf("X-Mangarr-Updated: want 1, got %q", got)
+	}
+	if len(st.setManualBindingCalls) != 1 || st.setManualBindingCalls[0].id != 2 {
+		t.Errorf("want one SetSeriesManualBinding(2, ...); got %+v", st.setManualBindingCalls)
+	}
+}
+
 func TestSaveSettingsFormPost(t *testing.T) {
 	h, st, _ := newTestHandler()
 	// Stub Kavita server so the round-trip GET /settings doesn't block on a real
