@@ -353,6 +353,11 @@ func NewHandler(opts HandlerOpts) *Handler {
 	// HTMX action: per-series reclassify (POST /api/series/{id}/reclassify)
 	h.mux.HandleFunc("POST /api/series/{id}/reclassify", h.apiReclassify)
 
+	// Bulk reclassify — single form on /series carries one binding_id_<seriesID>
+	// field per row. Apply each in a single pass so the operator can stage
+	// many overrides and commit them with one click.
+	h.mux.HandleFunc("POST /api/series/reclassify-bulk", h.apiReclassifyBulk)
+
 	// HTMX action: manual classify-and-file from Unmatched page (POST /api/series/{id}/assign)
 	h.mux.HandleFunc("POST /api/series/{id}/assign", h.apiAssign)
 
@@ -2062,6 +2067,83 @@ func (h *Handler) apiReclassify(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, row)
+}
+
+// apiReclassifyBulk handles POST /api/series/reclassify-bulk.
+//
+// The Series page wraps the whole table in one form. Each row contributes a
+// binding_id_<seriesID> field (value="0" → clear override; value="<id>" →
+// pin to that binding). One submit applies every row's selection.
+//
+// Compared to per-row reclassify: skips the per-call ListBindings lookup by
+// fetching once, skips per-call ListSeries for the row re-render (the page
+// reloads instead — Saved-toast feedback only), and writes only the rows
+// whose selection differs from current state so a stray submit doesn't
+// touch every row in the DB.
+//
+// Returns:
+//   - 400 on malformed form
+//   - 200 with X-Mangarr-Updated: <count> on success (HTMX toast reads it)
+func (h *Handler) apiReclassifyBulk(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	bindings, err := h.store.ListBindings()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	validBinding := make(map[int64]struct{}, len(bindings))
+	for _, b := range bindings {
+		validBinding[b.ID] = struct{}{}
+	}
+	series, err := h.store.ListSeries()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	current := make(map[int64]int64, len(series))
+	for _, s := range series {
+		if s.ManualBindingID != nil {
+			current[s.ID] = *s.ManualBindingID
+		}
+	}
+	updated := 0
+	for key, vals := range r.Form {
+		const prefix = "binding_id_"
+		if !strings.HasPrefix(key, prefix) || len(vals) == 0 {
+			continue
+		}
+		seriesID, err := strconv.ParseInt(key[len(prefix):], 10, 64)
+		if err != nil {
+			continue
+		}
+		bindingID, err := strconv.ParseInt(vals[0], 10, 64)
+		if err != nil {
+			continue
+		}
+		if bindingID > 0 {
+			if _, ok := validBinding[bindingID]; !ok {
+				continue // silently skip stale/invalid binding refs
+			}
+		}
+		if current[seriesID] == bindingID {
+			continue // no-op — selection matches DB
+		}
+		var override *int64
+		if bindingID > 0 {
+			v := bindingID
+			override = &v
+		}
+		if err := h.store.SetSeriesManualBinding(seriesID, override); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		updated++
+	}
+	w.Header().Set("X-Mangarr-Updated", strconv.Itoa(updated))
+	w.WriteHeader(http.StatusOK)
 }
 
 // apiAssign handles POST /api/series/{id}/assign.
