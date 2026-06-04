@@ -51,6 +51,10 @@
         {{$pinned := bindingByID $bindings (deref64 .ManualBindingID 0)}}
         {{if $pinned.Name}}<span class="pill pill-manual" title="Manual override — set via Reclassify">{{$pinned.Name}}</span>
         {{else}}<span class="pill pill-unknown" title="Manual binding ID {{deref64 .ManualBindingID 0}} not found">deleted binding</span>{{end}}
+      {{else if .CurrentBindingID}}
+        {{$auto := bindingByID $bindings (deref64 .CurrentBindingID 0)}}
+        {{if $auto.Name}}<span class="pill pill-auto" title="Auto-classified by the rule engine — set Reclassify to override">{{$auto.Name}}</span>
+        {{else}}<span class="pill pill-unknown" title="Current binding ID {{deref64 .CurrentBindingID 0}} not found">deleted binding</span>{{end}}
       {{else if .Type}}<span class="pill pill-{{.Type | lower}}">{{.Type}}</span>
       {{else}}<span class="pill pill-unknown">unknown</span>
       {{end}}

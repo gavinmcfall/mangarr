@@ -67,6 +67,14 @@ type Series struct {
 	// Via = "manual". nil means "no override; classify normally". Cleared
 	// by sending a nil pointer through SetSeriesManualBinding.
 	ManualBindingID *int64
+	// CurrentBindingID is the binding the classifier most recently routed
+	// this series to (the result of step 4/5 in the six-step flow, written
+	// at filer-success time). Distinct from ManualBindingID: this is the
+	// auto-classifier's verdict, recorded so /series can render the visible
+	// pill without bouncing to the Activity log. nil when no successful
+	// classification has happened yet (series is fresh, or only ever hit
+	// Unmatched). Cleared automatically on next successful classification.
+	CurrentBindingID *int64
 }
 
 type ActivityAction string
