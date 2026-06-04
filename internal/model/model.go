@@ -75,6 +75,11 @@ type Series struct {
 	// classification has happened yet (series is fresh, or only ever hit
 	// Unmatched). Cleared automatically on next successful classification.
 	CurrentBindingID *int64
+	// Tags are free-form per-series labels (Sonarr port #10), e.g.
+	// "webtoon", "oneshot", "r18", "archived". Populated by the store's
+	// list/get queries from the series_tags table; nil when a series has
+	// no tags. Edited via the Series page; used for client-side filtering.
+	Tags []string
 }
 
 type ActivityAction string
