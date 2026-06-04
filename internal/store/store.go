@@ -211,7 +211,17 @@ func (s *Store) ListSeries() ([]model.Series, error) {
 		}
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		tags, err := s.tagsForSeries(out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i].Tags = tags
+	}
+	return out, nil
 }
 
 func (s *Store) AddActivity(e model.ActivityEntry) error {

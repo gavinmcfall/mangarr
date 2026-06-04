@@ -55,3 +55,27 @@ func TestListAllTagsDistinctSorted(t *testing.T) {
 		t.Fatalf("ListAllTags: want %v, got %v", want, got)
 	}
 }
+
+func TestListSeriesPopulatesTags(t *testing.T) {
+	s := newTestStore(t)
+	id, _ := s.UpsertSeries(model.Series{Title: "Solo Leveling", SourcePath: "/dl/solo", Status: model.StatusPending})
+	if err := s.SetSeriesTags(id, []string{"manhwa", "webtoon"}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.ListSeries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *model.Series
+	for i := range list {
+		if list[i].ID == id {
+			found = &list[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("series not in ListSeries output")
+	}
+	if len(found.Tags) != 2 || found.Tags[0] != "manhwa" || found.Tags[1] != "webtoon" {
+		t.Fatalf("Tags not populated/sorted: %v", found.Tags)
+	}
+}
