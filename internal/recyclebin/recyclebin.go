@@ -84,18 +84,25 @@ func (b *Bin) GC(now time.Time) (filesRemoved int, dirsRemoved int, err error) {
 		return 0, 0, fmt.Errorf("recyclebin: GC read root %s: %w", b.Root, err)
 	}
 
-	cutoff := now.Add(-b.Retention)
+	// Compute the cutoff as a calendar-date STRING in the same (local) frame
+	// the date dirs are written in (dateDir uses now.Format(dateFmt) on move).
+	// ISO "2006-01-02" strings sort lexicographically, so a string compare is
+	// an exact date compare — and timezone-safe. The previous approach parsed
+	// the dir name as UTC midnight and compared against cutoff.Truncate(24h)
+	// (also UTC-aligned); on UTC+12/+13 hosts the local-date dir name's UTC
+	// midnight collapsed onto the cutoff boundary, so an 8-day-old dir under a
+	// 7-day retention was wrongly kept.
+	cutoffName := now.Add(-b.Retention).Format(dateFmt)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		// Only process dirs whose name is a valid YYYY-MM-DD date.
-		t, parseErr := time.Parse(dateFmt, entry.Name())
-		if parseErr != nil {
+		if _, parseErr := time.Parse(dateFmt, entry.Name()); parseErr != nil {
 			continue
 		}
-		// Keep dirs whose date is within retention.
-		if !t.Before(cutoff.Truncate(24 * time.Hour)) {
+		// Keep dirs dated on or after the cutoff date (within retention).
+		if entry.Name() >= cutoffName {
 			continue
 		}
 
