@@ -2,6 +2,7 @@ package store
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
 )
@@ -79,5 +80,38 @@ func TestListActivityFilteredByTag(t *testing.T) {
 	}
 	if page.Total != 2 { // both Berserk activity rows (matched by title)
 		t.Fatalf("tag filter: want 2 Berserk rows, got %d", page.Total)
+	}
+}
+
+func TestDeleteActivityOlderThan(t *testing.T) {
+	s := newTestStore(t)
+	seedActivity(t, s) // 4 rows at ~now
+	// Back-date the two oldest rows by 100 days.
+	if _, err := s.DB().Exec(
+		`UPDATE activity SET ts = ? WHERE id IN (SELECT id FROM activity ORDER BY id ASC LIMIT 2)`,
+		time.Now().AddDate(0, 0, -100).UTC().Format("2006-01-02 15:04:05")); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.DeleteActivityOlderThan(time.Now().AddDate(0, 0, -90))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("want 2 rows deleted, got %d", n)
+	}
+	page, _ := s.ListActivityFiltered(model.ActivityFilter{Limit: 50})
+	if page.Total != 2 {
+		t.Fatalf("want 2 rows remaining, got %d", page.Total)
+	}
+}
+
+func TestGetSettingsDefaultsActivityRetention(t *testing.T) {
+	s := newTestStore(t)
+	set, err := s.GetSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.ActivityRetentionDays != 90 {
+		t.Fatalf("want default 90, got %d", set.ActivityRetentionDays)
 	}
 }

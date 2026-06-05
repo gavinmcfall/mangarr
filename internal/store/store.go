@@ -289,6 +289,9 @@ func applySettingsDefaults(s *model.Settings) {
 	}
 	// BulkAutoErrorEmptyChaptersDisabled: zero value (false) IS the
 	// correct default (auto-error enabled), so no defaulting needed here.
+	if s.ActivityRetentionDays == 0 {
+		s.ActivityRetentionDays = 90
+	}
 }
 
 // ListUnmatched returns all series with StatusUnmatched.

@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
 )
@@ -71,4 +72,16 @@ func (s *Store) ListActivityFiltered(f model.ActivityFilter) (model.ActivityPage
 		out = append(out, e)
 	}
 	return model.ActivityPage{Items: out, Total: total}, rows.Err()
+}
+
+// DeleteActivityOlderThan removes activity rows with ts strictly before the
+// cutoff. Returns the number of rows deleted. The activity-gc task calls
+// this with now-minus-retention.
+func (s *Store) DeleteActivityOlderThan(cutoff time.Time) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM activity WHERE ts < ?`,
+		cutoff.UTC().Format("2006-01-02 15:04:05"))
+	if err != nil {
+		return 0, fmt.Errorf("DeleteActivityOlderThan: %w", err)
+	}
+	return res.RowsAffected()
 }
