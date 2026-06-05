@@ -18,6 +18,31 @@
 </header>
 <div class="page-body">
   <div class="content-container">
+
+<form method="get" action="/activity" class="activity-filter-bar">
+  <select name="action" class="reclassify-select">
+    <option value="">All actions</option>
+    {{$fa := .FilterAction}}
+    {{range .Actions}}<option value="{{.}}"{{if eq . $fa}} selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <input type="search" name="series" class="series-filter" placeholder="Series…"
+         value="{{.FilterSeries}}" autocomplete="off">
+  <select name="tag" class="reclassify-select">
+    <option value="">All tags</option>
+    {{$ft := .FilterTag}}
+    {{range .AllTags}}<option value="{{.}}"{{if eq . $ft}} selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <select name="range" class="reclassify-select">
+    {{$fr := .FilterRange}}
+    <option value=""{{if eq $fr ""}} selected{{end}}>Any time</option>
+    <option value="24h"{{if eq $fr "24h"}} selected{{end}}>Last 24h</option>
+    <option value="7d"{{if eq $fr "7d"}} selected{{end}}>Last 7 days</option>
+    <option value="30d"{{if eq $fr "30d"}} selected{{end}}>Last 30 days</option>
+  </select>
+  <button type="submit" class="btn btn-primary">Filter</button>
+  <a href="/activity" class="btn btn-secondary">Clear</a>
+</form>
+
 {{if .Items}}
 <div class="data-table-wrap">
 <table>
@@ -41,13 +66,18 @@
   </tbody>
 </table>
 </div>
+<div class="activity-pagination">
+  {{if .HasPrev}}<a class="btn btn-secondary" href="/activity?{{.FilterQuery}}{{if .FilterQuery}}&{{end}}page={{.PrevPage}}">&larr; Prev</a>{{else}}<span class="btn btn-secondary btn-disabled">&larr; Prev</span>{{end}}
+  <span class="activity-page-info">Page {{.CurPage}} of {{.TotalPages}} · {{.TotalCount}} total</span>
+  {{if .HasNext}}<a class="btn btn-secondary" href="/activity?{{.FilterQuery}}{{if .FilterQuery}}&{{end}}page={{.NextPage}}">Next &rarr;</a>{{else}}<span class="btn btn-secondary btn-disabled">Next &rarr;</span>{{end}}
+</div>
 {{else}}
 <div class="empty-state">
   <!-- Clock icon -->
   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
     <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
   </svg>
-  <p>No activity recorded yet.</p>
+  <p>{{if or .FilterAction .FilterSeries .FilterTag .FilterRange}}No activity matches the current filter.{{else}}No activity recorded yet.{{end}}</p>
 </div>
 {{end}}
   </div>

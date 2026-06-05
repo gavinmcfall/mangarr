@@ -315,6 +315,18 @@ tbody tr:hover td {
 }
 .series-filter::placeholder { opacity: 0.55; }
 
+/* Activity page — filter bar + pagination */
+.activity-filter-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin-bottom: 14px;
+}
+.activity-pagination {
+  display: flex; align-items: center; gap: 12px; justify-content: flex-end;
+  margin-top: 12px;
+}
+.activity-page-info { font-size: 13px; opacity: 0.7; }
+.btn-disabled { opacity: 0.4; pointer-events: none; cursor: default; }
+
 /* Status pills */
 .pill-filed    { background: #26543a; color: #3bb273; }
 .pill-pending  { background: #1f3756; color: #5d9cec; }
