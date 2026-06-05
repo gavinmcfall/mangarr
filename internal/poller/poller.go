@@ -536,65 +536,134 @@ func (p *Poller) Preview(ctx context.Context) ([]PreviewEntry, error) {
 			return results, ctx.Err()
 		default:
 		}
-
-		entry := PreviewEntry{
-			Title:        s.Title,
-			SourcePath:   s.SourcePath,
-			Source:       s.Source,
-			ChapterCount: s.ChapterCount,
-		}
-
-		manualOverride := p.resolveManualOverride(s)
-
-		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
-			Title:           s.Title,
-			ParentDir:       s.SourcePath,
-			ManualBindingID: manualOverride,
-		})
-		if classifyErr != nil {
-			entry.Status = "unmatched"
-			entry.Reason = fmt.Sprintf("classify error: %v", classifyErr)
-			results = append(results, entry)
-			continue
-		}
-		if d.BindingID == 0 {
-			entry.Status = "unmatched"
-			entry.Reason = "no binding matched"
-			results = append(results, entry)
-			continue
-		}
-
-		binding, ok := bindingByID[d.BindingID]
-		if !ok {
-			entry.Status = "misconfigured"
-			entry.Note = fmt.Sprintf("binding %d not found — was it deleted?", d.BindingID)
-			results = append(results, entry)
-			continue
-		}
-		if binding.LibraryRoot == "" {
-			entry.Status = "misconfigured"
-			entry.Note = fmt.Sprintf("binding %q has empty library_root — check Settings", binding.Name)
-			results = append(results, entry)
-			continue
-		}
-
-		entry.BindingName = binding.Name
-		entry.DstRoot = binding.LibraryRoot
-		entry.Status = "matched"
-
-		if p.Planner != nil {
-			plans, planErr := p.Planner.Plan(s.Title, s.SourcePath, binding.LibraryRoot)
-			if planErr != nil {
-				entry.Status = "misconfigured"
-				entry.Note = fmt.Sprintf("plan error: %v", planErr)
-				entry.DstRoot = ""
-				results = append(results, entry)
-				continue
-			}
-			entry.ChapterPlans = plans
-		}
-
-		results = append(results, entry)
+		results = append(results, p.previewSeries(ctx, s, bindingByID))
 	}
 	return results, nil
+}
+
+// previewSeries classifies a single series and builds its PreviewEntry without
+// touching the filesystem or triggering any side-effects. It is the shared
+// inner body used by both Preview (over scanner output) and PreviewOne (over a
+// single persisted series looked up by ID).
+//
+// The ctx.Done cancellation check belongs in Preview's loop — not here —
+// because previewSeries handles one already-selected series.
+func (p *Poller) previewSeries(ctx context.Context, s model.Series, bindingByID map[int64]model.Binding) PreviewEntry {
+	entry := PreviewEntry{
+		Title:        s.Title,
+		SourcePath:   s.SourcePath,
+		Source:       s.Source,
+		ChapterCount: s.ChapterCount,
+	}
+
+	manualOverride := p.resolveManualOverride(s)
+
+	d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
+		Title:           s.Title,
+		ParentDir:       s.SourcePath,
+		ManualBindingID: manualOverride,
+	})
+	if classifyErr != nil {
+		entry.Status = "unmatched"
+		entry.Reason = fmt.Sprintf("classify error: %v", classifyErr)
+		return entry
+	}
+	if d.BindingID == 0 {
+		entry.Status = "unmatched"
+		entry.Reason = "no binding matched"
+		return entry
+	}
+
+	binding, ok := bindingByID[d.BindingID]
+	if !ok {
+		entry.Status = "misconfigured"
+		entry.Note = fmt.Sprintf("binding %d not found — was it deleted?", d.BindingID)
+		return entry
+	}
+	if binding.LibraryRoot == "" {
+		entry.Status = "misconfigured"
+		entry.Note = fmt.Sprintf("binding %q has empty library_root — check Settings", binding.Name)
+		return entry
+	}
+
+	entry.BindingName = binding.Name
+	entry.DstRoot = binding.LibraryRoot
+	entry.Status = "matched"
+
+	if p.Planner != nil {
+		plans, planErr := p.Planner.Plan(s.Title, s.SourcePath, binding.LibraryRoot)
+		if planErr != nil {
+			entry.Status = "misconfigured"
+			entry.Note = fmt.Sprintf("plan error: %v", planErr)
+			entry.DstRoot = ""
+			return entry
+		}
+		entry.ChapterPlans = plans
+	}
+
+	return entry
+}
+
+// PreviewOne returns the PreviewEntry that Preview would produce for a single
+// persisted series identified by seriesID. It loads the series from Store (so
+// the persisted SourcePath and manual override are honoured), then delegates to
+// previewSeries.
+func (p *Poller) PreviewOne(ctx context.Context, seriesID int64) (PreviewEntry, error) {
+	if p.Store == nil {
+		return PreviewEntry{}, fmt.Errorf("PreviewOne: no store wired")
+	}
+	s, err := p.Store.GetSeriesByID(seriesID)
+	if err != nil {
+		return PreviewEntry{}, fmt.Errorf("PreviewOne: series %d: %w", seriesID, err)
+	}
+	bindingByID, err := p.loadBindings()
+	if err != nil {
+		return PreviewEntry{}, fmt.Errorf("PreviewOne: load bindings: %w", err)
+	}
+	return p.previewSeries(ctx, s, bindingByID), nil
+}
+
+// RefileOne classifies one persisted series via the current classifier and
+// files it into the resolved binding's LibraryRoot. It records an ActionFiled
+// activity entry and updates the series' CurrentBindingID on success.
+//
+// Unlike RunOnce, RefileOne does NOT trigger a Kavita library scan — it's an
+// operator-driven re-file from the detail page; the freshly filed chapters get
+// picked up by Kavita on the next poll tick's scan.
+//
+// Returns an error if the series cannot be found, the classifier returns
+// BindingID==0 (unmatched), the binding is missing or has no library_root, or
+// the filer fails.
+func (p *Poller) RefileOne(ctx context.Context, seriesID int64) error {
+	if p.Store == nil {
+		return fmt.Errorf("RefileOne: no store wired")
+	}
+	s, err := p.Store.GetSeriesByID(seriesID)
+	if err != nil {
+		return fmt.Errorf("RefileOne: series %d: %w", seriesID, err)
+	}
+	bindingByID, err := p.loadBindings()
+	if err != nil {
+		return fmt.Errorf("RefileOne: load bindings: %w", err)
+	}
+	d, err := p.Classifier.Classify(ctx, classifier.ScanItem{
+		Title: s.Title, ParentDir: s.SourcePath, ManualBindingID: p.resolveManualOverride(s),
+	})
+	if err != nil {
+		return fmt.Errorf("RefileOne: classify: %w", err)
+	}
+	if d.BindingID == 0 {
+		return fmt.Errorf("RefileOne: series %d is unmatched — nothing to file", seriesID)
+	}
+	binding, ok := bindingByID[d.BindingID]
+	if !ok || binding.LibraryRoot == "" {
+		return fmt.Errorf("RefileOne: binding %d missing or has no library_root", d.BindingID)
+	}
+	if err := p.Filer.File(s, binding.LibraryRoot); err != nil {
+		return fmt.Errorf("RefileOne: file: %w", err)
+	}
+	bid := binding.ID
+	_ = p.Store.SetSeriesCurrentBinding(s.ID, &bid)
+	p.recordActivityVia(s.Title, model.ActionFiled, d.Via, fmt.Sprintf("refiled into %s", binding.LibraryRoot))
+	return nil
 }

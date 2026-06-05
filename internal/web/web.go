@@ -61,6 +61,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/kavita"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/poller"
+	"github.com/gavinmcfall/mangarr/internal/recyclebin"
 	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 	"github.com/gavinmcfall/mangarr/internal/tasks"
 )
@@ -190,15 +191,24 @@ type MetricsSink interface {
 }
 
 // Previewer can run the full pipeline dry-run without side effects.
-// poller.Poller satisfies this interface via its Preview method.
+// poller.Poller satisfies this interface via its Preview and PreviewOne
+// methods. PreviewOne backs the per-series detail page.
 type Previewer interface {
 	Preview(ctx context.Context) ([]poller.PreviewEntry, error)
+	PreviewOne(ctx context.Context, seriesID int64) (poller.PreviewEntry, error)
 }
 
 // SeriesFiler can file a single series on demand.
 // poller.Poller satisfies this interface via its FileOne method.
 type SeriesFiler interface {
 	FileOne(ctx context.Context, seriesID int64, ct model.ContentType) error
+}
+
+// SeriesRefiler re-runs the filer for a single series via its current
+// classification (no caller-supplied ContentType). poller.Poller satisfies
+// this via its RefileOne method; it backs the detail page's "Re-run filer".
+type SeriesRefiler interface {
+	RefileOne(ctx context.Context, seriesID int64) error
 }
 
 // HandlerOpts is passed to NewHandler to wire all dependencies.
@@ -209,10 +219,14 @@ type HandlerOpts struct {
 	Store       Store
 	Runner      Runner
 	SeriesFiler SeriesFiler    // optional; /api/series/{id}/assign returns 503 when nil
+	Refiler     SeriesRefiler  // optional; /api/series/{id}/refile returns 503 when nil
 	TaskReg     TaskRegistry   // optional; tasks routes return 503 when nil
 	HealthReg   HealthRegistry // optional; health routes show a placeholder
 	Metrics     MetricsSink    // optional; /metrics returns 503 when nil
 	Previewer   Previewer      // optional; /preview returns placeholder when nil
+	// RecycleBin backs the per-chapter remove action on the series detail
+	// page. Optional; the remove handler returns 503 when nil.
+	RecycleBin *recyclebin.Bin
 	// Suwayomi is required for POST /api/bulk's ListChapters call. Optional
 	// so existing test setups can leave it nil; the bulk-create handler
 	// returns 503 when it's missing.
@@ -238,6 +252,8 @@ type Handler struct {
 	runner                  Runner
 	previewer               Previewer                     // optional; /preview returns placeholder when nil
 	seriesFiler             SeriesFiler                   // optional; /api/series/{id}/assign returns 503 when nil
+	refiler                 SeriesRefiler                 // optional; /api/series/{id}/refile returns 503 when nil
+	recycleBin              *recyclebin.Bin               // optional; per-chapter remove returns 503 when nil
 	browseRoots             []string                      // allowlist for /api/browse (injected; tests can override)
 	recycleBinPath          string
 	recycleBinRetentionDays int
@@ -268,6 +284,8 @@ func NewHandler(opts HandlerOpts) *Handler {
 		runner:                  opts.Runner,
 		previewer:               opts.Previewer,
 		seriesFiler:             opts.SeriesFiler,
+		refiler:                 opts.Refiler,
+		recycleBin:              opts.RecycleBin,
 		browseRoots:             browseRoots,
 		recycleBinPath:          opts.RecycleBinPath,
 		recycleBinRetentionDays: opts.RecycleBinRetentionDays,
@@ -288,6 +306,7 @@ func NewHandler(opts HandlerOpts) *Handler {
 		http.Redirect(w, r, "/series", http.StatusFound)
 	})
 	h.mux.HandleFunc("GET /series", h.pageSeries)
+	h.mux.HandleFunc("GET /series/{id}", h.pageSeriesDetail)
 	h.mux.HandleFunc("GET /preview", h.pagePreview)
 	h.mux.HandleFunc("GET /unmatched", h.pageUnmatched)
 	h.mux.HandleFunc("GET /activity", h.pageActivity)
@@ -365,6 +384,11 @@ func NewHandler(opts HandlerOpts) *Handler {
 	// HTMX action: manual classify-and-file from Unmatched page (POST /api/series/{id}/assign)
 	h.mux.HandleFunc("POST /api/series/{id}/assign", h.apiAssign)
 
+	// Series detail page actions (Sonarr port #8): re-run the filer for one
+	// series, and move a single filed chapter into the recycle bin.
+	h.mux.HandleFunc("POST /api/series/{id}/refile", h.apiSeriesRefile)
+	h.mux.HandleFunc("POST /api/series/{id}/chapter/remove", h.apiSeriesChapterRemove)
+
 	// Backup API
 	h.mux.HandleFunc("GET /api/backups", h.apiListBackups)
 	h.mux.HandleFunc("POST /api/backups/run", h.apiRunBackup)
@@ -385,7 +409,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // overlaid, ensuring that {{block "content"}} resolves to THAT page's
 // definition rather than whichever happened to be parsed last globally.
 func parsePageTemplates() map[string]*template.Template {
-	pages := []string{"series.html", "preview.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "library.html", "downloads.html", "settings.html"}
+	pages := []string{"series.html", "series-detail.html", "preview.html", "unmatched.html", "activity.html", "health.html", "tasks.html", "library.html", "downloads.html", "settings.html"}
 	// Pages that need the override-rows partial. Listed explicitly so
 	// adding the partial to a new page is a one-line change here, not a
 	// fan-out across the codebase.
@@ -485,6 +509,12 @@ func templateFuncs() template.FuncMap {
 		},
 		// formatAge renders a time.Time as a relative human-readable string.
 		"formatAge": formatAge,
+		// humanBytes renders a byte count as a short human-readable size
+		// (e.g. 1536 → "1.5 KB"). Used by the series detail page's file table.
+		"humanBytes": humanBytes,
+		// baseName returns the final path element of a path. Used by the
+		// series detail page to show source file names compactly.
+		"baseName": baseName,
 		// formatInterval renders a task IntervalMs as a short string, e.g. "15m".
 		"formatInterval": formatInterval,
 		// kavitaLibInList returns true if the given ID exists in the Library slice.

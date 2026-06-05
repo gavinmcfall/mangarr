@@ -2092,10 +2092,17 @@ func TestMetricsEndpointWithoutHandlerReturns503(t *testing.T) {
 type fakePreviewer struct {
 	entries []poller.PreviewEntry
 	err     error
+	// one is returned by PreviewOne; oneErr overrides it when non-nil.
+	one    poller.PreviewEntry
+	oneErr error
 }
 
 func (f *fakePreviewer) Preview(ctx context.Context) ([]poller.PreviewEntry, error) {
 	return f.entries, f.err
+}
+
+func (f *fakePreviewer) PreviewOne(ctx context.Context, seriesID int64) (poller.PreviewEntry, error) {
+	return f.one, f.oneErr
 }
 
 // newPreviewHandler builds a Handler wired with a fakePreviewer seeded with

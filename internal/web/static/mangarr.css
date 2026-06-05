@@ -1055,3 +1055,63 @@ th.lib-sort[data-active="desc"]::after { content: " ▼"; opacity: 0.7; font-siz
 
 /* Pill colour for "missing" badge on Library page */
 .pill-missing { background: rgba(255,150,90,0.18); color: #f59f6c; }
+
+/* ---- Series detail page (#8) ---- */
+.series-title-link { color: inherit; text-decoration: none; }
+.series-title-link:hover { color: #7baef5; text-decoration: underline; }
+
+.back-link {
+  display: inline-block;
+  font-size: 13px;
+  color: #7f8da3;
+  text-decoration: none;
+  margin-bottom: 4px;
+}
+.back-link:hover { color: #7baef5; }
+
+/* Status pills used by the detail page header + preview */
+.pill-matched      { background: #26543a; color: #3bb273; }
+.pill-misconfigured { background: #4d2424; color: #e15554; }
+
+.detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  margin: 4px 0 16px;
+}
+.detail-meta-item { display: flex; flex-direction: column; gap: 4px; }
+.detail-meta-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+}
+.detail-meta-value { font-size: 14px; }
+
+.detail-note {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #2a2118;
+  color: #e6a23c;
+  font-size: 13px;
+}
+
+.detail-reclassify {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 20px;
+}
+
+.btn-secondary {
+  background: #2b3242;
+  color: #cdd6e4;
+}
+.btn-secondary:hover { background: #38415480; }
+
+.btn-danger {
+  background: #4d2424;
+  color: #e15554;
+}
+.btn-danger:hover { background: #6a2f2f; }
