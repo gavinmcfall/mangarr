@@ -1271,6 +1271,32 @@ func TestSaveSettingsRoundTripsStallDetectorFields(t *testing.T) {
 	}
 }
 
+// TestSaveSettingsRoundTripsActivityRetention pins that the activity_retention_days
+// form field round-trips through the saveSettings POST handler into Settings.ActivityRetentionDays.
+func TestSaveSettingsRoundTripsActivityRetention(t *testing.T) {
+	h, st, _ := newTestHandler()
+	stub := kavitaStubServer(t, nil, 0, 0)
+	defer stub.Close()
+	form := url.Values{
+		"file_mode":               {"hardlink"},
+		"rename_scheme":           {"{series}/{series} - Ch.{chapter}.cbz"},
+		"poll_minutes":            {"15"},
+		"kavita_base_url":         {stub.URL},
+		"kavita_api_key":          {"k"},
+		"activity_retention_days": {"30"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("want 303, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if st.settings.ActivityRetentionDays != 30 {
+		t.Fatalf("retention not saved: %d", st.settings.ActivityRetentionDays)
+	}
+}
+
 // TestPageSettingsRendersStallDetectorInputs verifies that the /settings GET
 // page renders the three stall-detector HTML inputs with the correct names,
 // help text, and that the checkbox's checked attribute reflects the seeded

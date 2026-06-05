@@ -1810,6 +1810,13 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	settings.BulkAutoErrorEmptyChaptersDisabled = r.FormValue("bulk_auto_error_empty_chapters_disabled") == "on"
 
+	// --- Activity-log retention (Sonarr-port #11) ---
+	if v := r.FormValue("activity_retention_days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			settings.ActivityRetentionDays = n
+		}
+	}
+
 	// Parse override rows. Form fields come as override_category_<idx> +
 	// override_binding_<idx> pairs (idx is the JS counter, not stable).
 	// Plan B Task 5: writes now land in the v2 SuwayomiCategoryBindings map

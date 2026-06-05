@@ -392,6 +392,24 @@
     </div>
   </div>
 
+  <!-- Activity Log -->
+  <div class="settings-card">
+    <div class="settings-card-header">
+      <p class="settings-card-title">Activity Log</p>
+      <p class="settings-card-desc">Controls how long the activity log retains rows before they are pruned by the background activity-gc task.</p>
+    </div>
+    <div class="settings-card-body">
+      <div class="settings-row">
+        <label class="settings-label">Retention (days)</label>
+        <div class="settings-input-wrap">
+          <input type="number" name="activity_retention_days" min="0"
+            value="{{.Settings.ActivityRetentionDays}}">
+          <p class="input-hint">Activity-log rows older than this are pruned automatically. Set to 0 to keep forever.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Library Map -->
   <div class="settings-card">
     <div class="settings-card-header">
