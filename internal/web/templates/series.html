@@ -47,7 +47,7 @@
   {{$bindings := .Bindings}}
   {{range .Items}}
   <tr class="series-row" data-tags="{{range $i, $t := .Tags}}{{if $i}} {{end}}{{$t}}{{end}}">
-    <td>{{.Title}}</td>
+    <td><a href="/series/{{.ID}}" class="series-title-link">{{.Title}}</a></td>
     <td>
       {{$series := .}}
       {{if .ManualBindingID}}
