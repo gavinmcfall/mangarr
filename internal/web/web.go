@@ -45,6 +45,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -86,6 +87,7 @@ type Store interface {
 	ListSeries() ([]model.Series, error)
 	ListUnmatched() ([]model.Series, error)
 	ListActivity(limit int) ([]model.ActivityEntry, error)
+	ListActivityFiltered(model.ActivityFilter) (model.ActivityPage, error)
 	AddActivity(model.ActivityEntry) error
 	GetSettings() (model.Settings, error)
 	SaveSettings(model.Settings) error
@@ -885,19 +887,106 @@ func (h *Handler) pageUnmatched(w http.ResponseWriter, r *http.Request) {
 	h.render(w, "unmatched.html", pageData{Page: "unmatched", Items: list})
 }
 
+// activityPageSize is the fixed rows-per-page for the Activity page.
+const activityPageSize = 50
+
 func (h *Handler) pageActivity(w http.ResponseWriter, r *http.Request) {
-	list, err := h.store.ListActivity(200)
+	q := r.URL.Query()
+	action := q.Get("action")
+	series := strings.TrimSpace(q.Get("series"))
+	tag := q.Get("tag")
+	rng := q.Get("range") // "", "24h", "7d", "30d", "all"
+
+	// Date preset → lower bound.
+	var after time.Time
+	switch rng {
+	case "24h":
+		after = time.Now().Add(-24 * time.Hour)
+	case "7d":
+		after = time.Now().Add(-7 * 24 * time.Hour)
+	case "30d":
+		after = time.Now().Add(-30 * 24 * time.Hour)
+	}
+
+	page := 1
+	if n, err := strconv.Atoi(q.Get("page")); err == nil && n > 0 {
+		page = n
+	}
+
+	filter := model.ActivityFilter{
+		Action:     model.ActivityAction(action),
+		SeriesLike: series,
+		Tag:        tag,
+		After:      after,
+		Limit:      activityPageSize,
+		Offset:     (page - 1) * activityPageSize,
+	}
+	result, err := h.store.ListActivityFiltered(filter)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Resolve Via labels (suwayomi-override:category=N → category name).
-	// We fetch the Suwayomi category list once for the entire page render
-	// so per-row resolution is O(1). Failure to reach Suwayomi falls back
-	// to "Unknown (ID: N)" — the override still rendered through Plan B,
-	// so the user just sees a degraded label, not an error page.
-	rows := buildActivityRows(r.Context(), h.store, list)
-	h.render(w, "activity.html", activityPageData{Page: "activity", Items: rows})
+
+	// Resolve Via labels (suwayomi-override:category=N → category name) once
+	// for the page; Suwayomi failure degrades the label, not the page.
+	rows := buildActivityRows(r.Context(), h.store, result.Items)
+
+	totalPages := (result.Total + activityPageSize - 1) / activityPageSize
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	// Build the filter query string (without page) for nav links.
+	fq := url.Values{}
+	if action != "" {
+		fq.Set("action", action)
+	}
+	if series != "" {
+		fq.Set("series", series)
+	}
+	if tag != "" {
+		fq.Set("tag", tag)
+	}
+	if rng != "" {
+		fq.Set("range", rng)
+	}
+
+	allTags, _ := h.store.ListAllTags()
+
+	h.render(w, "activity.html", activityPageData{
+		Page:         "activity",
+		Items:        rows,
+		FilterAction: action,
+		FilterSeries: series,
+		FilterTag:    tag,
+		FilterRange:  rng,
+		AllTags:      allTags,
+		Actions:      activityActions(),
+		CurPage:      page,
+		TotalPages:   totalPages,
+		TotalCount:   result.Total,
+		HasPrev:      page > 1,
+		HasNext:      page < totalPages,
+		PrevPage:     page - 1,
+		NextPage:     page + 1,
+		FilterQuery:  fq.Encode(),
+	})
+}
+
+// activityActions returns the action values offered in the filter dropdown.
+func activityActions() []string {
+	return []string{
+		string(model.ActionFiled),
+		string(model.ActionUnmatched),
+		string(model.ActionScanTriggered),
+		string(model.ActionError),
+		string(model.ActionBulkQueued),
+		string(model.ActionBulkDone),
+		string(model.ActionBulkChapterErrored),
+	}
 }
 
 // activityRow is the view-model for one ActivityEntry, with Via pre-resolved
@@ -911,6 +1000,24 @@ type activityRow struct {
 type activityPageData struct {
 	Page  string
 	Items []activityRow
+
+	// Filter echo — re-renders the filter bar's current state.
+	FilterAction string
+	FilterSeries string
+	FilterTag    string
+	FilterRange  string // "", "24h", "7d", "30d", "all"
+	AllTags      []string
+	Actions      []string // distinct action values for the dropdown
+
+	// Pagination.
+	CurPage     int
+	TotalPages  int
+	TotalCount  int
+	HasPrev     bool
+	HasNext     bool
+	PrevPage    int
+	NextPage    int
+	FilterQuery string // filter params WITHOUT page, for nav links (e.g. "action=filed&range=7d")
 }
 
 // buildActivityRows resolves the Via field of every entry to a display label.
@@ -1702,6 +1809,13 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	settings.BulkAutoErrorEmptyChaptersDisabled = r.FormValue("bulk_auto_error_empty_chapters_disabled") == "on"
+
+	// --- Activity-log retention (Sonarr-port #11) ---
+	if v := r.FormValue("activity_retention_days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			settings.ActivityRetentionDays = n
+		}
+	}
 
 	// Parse override rows. Form fields come as override_category_<idx> +
 	// override_binding_<idx> pairs (idx is the JS counter, not stable).

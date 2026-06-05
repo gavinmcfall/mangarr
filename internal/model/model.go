@@ -192,6 +192,10 @@ type Settings struct {
 	// Read sites should derive the effective flag as:
 	//   autoError := !set.BulkAutoErrorEmptyChaptersDisabled
 	BulkAutoErrorEmptyChaptersDisabled bool `json:"bulk_auto_error_empty_chapters_disabled,omitempty"`
+
+	// ActivityRetentionDays controls the activity-gc task: rows older than
+	// this many days are deleted. Default 90 (applied at GetSettings read).
+	ActivityRetentionDays int `json:"activity_retention_days"`
 }
 
 // Binding is one library destination the user has defined. Replaces the

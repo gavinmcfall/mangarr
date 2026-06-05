@@ -248,6 +248,35 @@ func main() {
 		log.Fatalf("tasks: register poll-scan: %v", err)
 	}
 
+	// activity-gc: prune activity rows past the configured retention. Daily
+	// interval is UI metadata; it also runs on the metrics-sweep ticker below
+	// and is runnable on demand from the Tasks page.
+	if err := reg.Register(tasks.Task{
+		ID:       "activity-gc",
+		Name:     "Activity GC",
+		Interval: 24 * time.Hour,
+		RunFn: func(ctx context.Context) error {
+			set, err := st.GetSettings()
+			if err != nil {
+				return err
+			}
+			if set.ActivityRetentionDays <= 0 {
+				return nil // retention disabled
+			}
+			cutoff := time.Now().AddDate(0, 0, -set.ActivityRetentionDays)
+			n, err := st.DeleteActivityOlderThan(cutoff)
+			if err != nil {
+				return err
+			}
+			if n > 0 {
+				log.Printf("activity-gc: pruned %d activity rows older than %d days", n, set.ActivityRetentionDays)
+			}
+			return nil
+		},
+	}); err != nil {
+		log.Fatalf("tasks: register activity-gc: %v", err)
+	}
+
 	// ---- health registry ----
 	healthReg := health.NewRegistry()
 	settingsLoader := func() (model.Settings, error) { return st.GetSettings() }
@@ -319,6 +348,10 @@ func main() {
 	// Individual step errors are logged and skipped — never abort the sweep.
 	metricsTicker := time.NewTicker(30 * time.Second)
 	go func() {
+		// activity-gc is daily-scale; the metrics sweep ticks every 30s, so
+		// gate the prune to at most hourly rather than running the DELETE on
+		// every sweep. zero value runs it on the first sweep after startup.
+		var lastActivityGC time.Time
 		sweep := func() {
 			// 1. Series counts by category.
 			if seriesList, err := st.ListSeries(); err != nil {
@@ -389,6 +422,15 @@ func main() {
 				metricsReg.SetBackupCount(len(entries))
 				if len(entries) > 0 {
 					metricsReg.SetBackupLastModTime(entries[0].ModTime)
+				}
+			}
+
+			// 6. Activity retention GC — at most hourly. Best-effort; errors
+			// are surfaced via the task's LastErr on the Tasks page.
+			if time.Since(lastActivityGC) >= time.Hour {
+				lastActivityGC = time.Now()
+				if _, err := reg.RunNow(ctx, "activity-gc"); err != nil {
+					log.Printf("metrics sweeper: activity-gc: %v", err)
 				}
 			}
 		}

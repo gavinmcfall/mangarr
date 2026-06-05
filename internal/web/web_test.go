@@ -99,6 +99,35 @@ func (f *fakeStore) AddActivity(e model.ActivityEntry) error {
 	f.activity = append([]model.ActivityEntry{e}, f.activity...)
 	return nil
 }
+
+// ListActivityFiltered is a minimal in-memory filter honoring Action,
+// SeriesLike (case-insensitive substring), Limit, and Offset — enough to
+// exercise the handler's filtering + pagination. Tag/After are not modeled
+// (the store-layer tests cover those).
+func (f *fakeStore) ListActivityFiltered(flt model.ActivityFilter) (model.ActivityPage, error) {
+	var matched []model.ActivityEntry
+	for _, e := range f.activity {
+		if flt.Action != "" && e.Action != flt.Action {
+			continue
+		}
+		if flt.SeriesLike != "" && !strings.Contains(strings.ToLower(e.SeriesTitle), strings.ToLower(flt.SeriesLike)) {
+			continue
+		}
+		matched = append(matched, e)
+	}
+	total := len(matched)
+	if flt.Offset > 0 {
+		if flt.Offset >= len(matched) {
+			matched = nil
+		} else {
+			matched = matched[flt.Offset:]
+		}
+	}
+	if flt.Limit > 0 && flt.Limit < len(matched) {
+		matched = matched[:flt.Limit]
+	}
+	return model.ActivityPage{Items: matched, Total: total}, nil
+}
 func (f *fakeStore) GetSettings() (model.Settings, error)     { return f.settings, nil }
 func (f *fakeStore) SaveSettings(s model.Settings) error      { f.settings = s; return f.saveErr }
 func (f *fakeStore) SetSeriesType(id int64, ct model.ContentType) error {
@@ -988,6 +1017,43 @@ func TestPageSeriesRendersTagPills(t *testing.T) {
 	}
 }
 
+// TestPageActivityFiltersAndPaginates pins the server-side Activity filter:
+// ?action=filed keeps only filed rows, the filter bar renders the controls,
+// and the pagination summary + page nav appear.
+func TestPageActivityFiltersAndPaginates(t *testing.T) {
+	h, st, _ := newTestHandler()
+	st.activity = []model.ActivityEntry{
+		{ID: 4, SeriesTitle: "Dandadan", Action: model.ActionUnmatched},
+		{ID: 3, SeriesTitle: "Berserk", Action: model.ActionError},
+		{ID: 2, SeriesTitle: "Solo Leveling", Action: model.ActionFiled},
+		{ID: 1, SeriesTitle: "Berserk", Action: model.ActionFiled},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/activity?action=filed&page=1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`class="activity-filter-bar"`, `name="action"`, `name="series"`, `name="range"`,
+		"Solo Leveling", "Berserk",
+		"Page 1 of", "total",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("activity page missing %q", want)
+		}
+	}
+	// action=filed must exclude the Unmatched row.
+	if strings.Contains(body, "Dandadan") {
+		t.Error("action=filed should exclude the Unmatched Dandadan row")
+	}
+	// The selected action should be pre-selected in the dropdown.
+	if !strings.Contains(body, `<option value="filed" selected>`) {
+		t.Error("action dropdown should pre-select the active filter")
+	}
+}
+
 // TestReclassifyBulkPersistsTags pins that the single Set submit also saves
 // tags from tags_<id> fields, parsed comma-separated with blanks trimmed.
 func TestReclassifyBulkPersistsTags(t *testing.T) {
@@ -1202,6 +1268,32 @@ func TestSaveSettingsRoundTripsStallDetectorFields(t *testing.T) {
 	}
 	if st.settings.BulkAutoErrorEmptyChaptersDisabled {
 		t.Errorf("BulkAutoErrorEmptyChaptersDisabled: want false when checkbox absent, got true")
+	}
+}
+
+// TestSaveSettingsRoundTripsActivityRetention pins that the activity_retention_days
+// form field round-trips through the saveSettings POST handler into Settings.ActivityRetentionDays.
+func TestSaveSettingsRoundTripsActivityRetention(t *testing.T) {
+	h, st, _ := newTestHandler()
+	stub := kavitaStubServer(t, nil, 0, 0)
+	defer stub.Close()
+	form := url.Values{
+		"file_mode":               {"hardlink"},
+		"rename_scheme":           {"{series}/{series} - Ch.{chapter}.cbz"},
+		"poll_minutes":            {"15"},
+		"kavita_base_url":         {stub.URL},
+		"kavita_api_key":          {"k"},
+		"activity_retention_days": {"30"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("want 303, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if st.settings.ActivityRetentionDays != 30 {
+		t.Fatalf("retention not saved: %d", st.settings.ActivityRetentionDays)
 	}
 }
 
