@@ -205,7 +205,7 @@ func TestRunOnceRoutesByBindingFromV2Classifier(t *testing.T) {
 		}
 	}
 	if !sawFiled {
-		t.Errorf("expected at least one ActionFiled activity entry")
+		t.Errorf("expected at least one ActionFiled activity entry (RunOnce)")
 	}
 }
 
@@ -1110,3 +1110,79 @@ func TestRunOnceWritesViaIntoActivity(t *testing.T) {
 		t.Errorf("expected at least one ActionFiled activity entry")
 	}
 }
+
+// ---- PreviewOne tests ----
+
+// TestPreviewOneResolvesBindingAndPlans: PreviewOne looks up the series by ID,
+// classifies it, and returns a PreviewEntry with Status=="matched" and the
+// expected BindingName, DstRoot, and ChapterPlans.
+func TestPreviewOneResolvesBindingAndPlans(t *testing.T) {
+	srcDir := t.TempDir()
+	st := &fakeSeriesStore{
+		series: map[int64]model.Series{
+			7: {ID: 7, Title: "Berserk", SourcePath: srcDir, Source: "tranga"},
+		},
+	}
+	clf := &fakeClassifier{decision: model.Decision{BindingID: 1, Via: "rule:1"}}
+	bs := &fakeBindingStore{bindings: []model.Binding{
+		{ID: 1, Name: "Manga", LibraryRoot: "/lib/Manga", KavitaLibID: 0},
+	}}
+	planner := &fakePlanner{plans: []filer.PlanEntry{
+		{SrcPath: srcDir + "/c1.cbz", DstPath: "/lib/Manga/Berserk/c1.cbz", Action: filer.PlanFile},
+	}}
+	p := &Poller{
+		Scanner:    fakeScanner{},
+		Classifier: clf,
+		Planner:    planner,
+		Filer:      &recorder{},
+		Kavita:     &recorder{},
+		Unmatched:  &recorder{},
+		Activity:   &recorder{},
+		Bindings:   bs,
+		Store:      st,
+	}
+
+	entry, err := p.PreviewOne(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("PreviewOne: %v", err)
+	}
+	if entry.Status != "matched" {
+		t.Errorf("Status: want matched, got %q", entry.Status)
+	}
+	if entry.BindingName != "Manga" {
+		t.Errorf("BindingName: want Manga, got %q", entry.BindingName)
+	}
+	if entry.DstRoot != "/lib/Manga" {
+		t.Errorf("DstRoot: want /lib/Manga, got %q", entry.DstRoot)
+	}
+	if len(entry.ChapterPlans) != 1 {
+		t.Fatalf("ChapterPlans: want 1, got %d", len(entry.ChapterPlans))
+	}
+	if entry.ChapterPlans[0].DstPath != "/lib/Manga/Berserk/c1.cbz" {
+		t.Errorf("ChapterPlans[0].DstPath: want /lib/Manga/Berserk/c1.cbz, got %q", entry.ChapterPlans[0].DstPath)
+	}
+}
+
+// TestPreviewOneUnknownSeries: when the store has no such ID, PreviewOne must
+// return a non-nil error.
+func TestPreviewOneUnknownSeries(t *testing.T) {
+	st := &fakeSeriesStore{
+		series: map[int64]model.Series{},
+	}
+	p := &Poller{
+		Scanner:    fakeScanner{},
+		Classifier: &fakeClassifier{},
+		Filer:      &recorder{},
+		Kavita:     &recorder{},
+		Unmatched:  &recorder{},
+		Activity:   &recorder{},
+		Bindings:   &fakeBindingStore{},
+		Store:      st,
+	}
+
+	_, err := p.PreviewOne(context.Background(), 999)
+	if err == nil {
+		t.Fatal("expected non-nil error for unknown series ID, got nil")
+	}
+}
+
