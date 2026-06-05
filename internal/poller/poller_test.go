@@ -1186,3 +1186,112 @@ func TestPreviewOneUnknownSeries(t *testing.T) {
 	}
 }
 
+// ---- RefileOne tests ----
+
+// recordingFiler captures File calls for RefileOne tests.
+type recordingFiler struct {
+	fileCalls []struct {
+		series  model.Series
+		dstRoot string
+	}
+	err error
+}
+
+func (f *recordingFiler) File(s model.Series, dstRoot string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.fileCalls = append(f.fileCalls, struct {
+		series  model.Series
+		dstRoot string
+	}{s, dstRoot})
+	return nil
+}
+
+// TestRefileOneFilesViaResolvedBinding: RefileOne classifies the series,
+// resolves the binding, and calls Filer.File with the correct dstRoot.
+func TestRefileOneFilesViaResolvedBinding(t *testing.T) {
+	st := &fakeSeriesStore{
+		series: map[int64]model.Series{
+			7: {ID: 7, Title: "Berserk", SourcePath: "/dl/berserk"},
+		},
+	}
+	clf := &fakeClassifier{decision: model.Decision{BindingID: 1, Via: "rule:5"}}
+	bs := &fakeBindingStore{bindings: []model.Binding{
+		{ID: 1, Name: "Manga", LibraryRoot: "/lib/Manga", KavitaLibID: 0},
+	}}
+	rf := &recordingFiler{}
+	rec := &recorder{}
+	p := &Poller{
+		Scanner:    fakeScanner{},
+		Classifier: clf,
+		Filer:      rf,
+		Kavita:     rec,
+		Unmatched:  rec,
+		Activity:   rec,
+		Bindings:   bs,
+		Store:      st,
+	}
+
+	if err := p.RefileOne(context.Background(), 7); err != nil {
+		t.Fatalf("RefileOne: %v", err)
+	}
+	if len(rf.fileCalls) != 1 {
+		t.Fatalf("expected exactly 1 File call, got %d", len(rf.fileCalls))
+	}
+	if rf.fileCalls[0].dstRoot != "/lib/Manga" {
+		t.Errorf("dstRoot: want /lib/Manga, got %q", rf.fileCalls[0].dstRoot)
+	}
+}
+
+// TestRefileOneUnknownSeries: when the store has no such ID, RefileOne must
+// return a non-nil error.
+func TestRefileOneUnknownSeries(t *testing.T) {
+	st := &fakeSeriesStore{
+		series: map[int64]model.Series{},
+	}
+	p := &Poller{
+		Scanner:    fakeScanner{},
+		Classifier: &fakeClassifier{},
+		Filer:      &recordingFiler{},
+		Kavita:     &recorder{},
+		Unmatched:  &recorder{},
+		Activity:   &recorder{},
+		Bindings:   &fakeBindingStore{},
+		Store:      st,
+	}
+
+	if err := p.RefileOne(context.Background(), 999); err == nil {
+		t.Fatal("expected non-nil error for unknown series ID, got nil")
+	}
+}
+
+// TestRefileOneUnmatchedReturnsError: when the classifier returns BindingID==0,
+// RefileOne must return a non-nil error without calling the filer.
+func TestRefileOneUnmatchedReturnsError(t *testing.T) {
+	st := &fakeSeriesStore{
+		series: map[int64]model.Series{
+			5: {ID: 5, Title: "Unknown Series", SourcePath: "/dl/unknown"},
+		},
+	}
+	clf := &fakeClassifier{decision: model.Decision{BindingID: 0, Via: "unmatched"}}
+	rf := &recordingFiler{}
+	rec := &recorder{}
+	p := &Poller{
+		Scanner:    fakeScanner{},
+		Classifier: clf,
+		Filer:      rf,
+		Kavita:     rec,
+		Unmatched:  rec,
+		Activity:   rec,
+		Bindings:   &fakeBindingStore{},
+		Store:      st,
+	}
+
+	if err := p.RefileOne(context.Background(), 5); err == nil {
+		t.Fatal("expected non-nil error for unmatched series, got nil")
+	}
+	if len(rf.fileCalls) != 0 {
+		t.Errorf("filer must not be called for unmatched series, got %d calls", len(rf.fileCalls))
+	}
+}

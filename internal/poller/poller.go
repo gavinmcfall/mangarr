@@ -622,3 +622,44 @@ func (p *Poller) PreviewOne(ctx context.Context, seriesID int64) (PreviewEntry, 
 	}
 	return p.previewSeries(ctx, s, bindingByID), nil
 }
+
+// RefileOne classifies one persisted series via the current classifier and
+// files it into the resolved binding's LibraryRoot. It records an ActionFiled
+// activity entry and updates the series' CurrentBindingID on success.
+//
+// Returns an error if the series cannot be found, the classifier returns
+// BindingID==0 (unmatched), the binding is missing or has no library_root, or
+// the filer fails.
+func (p *Poller) RefileOne(ctx context.Context, seriesID int64) error {
+	if p.Store == nil {
+		return fmt.Errorf("RefileOne: no store wired")
+	}
+	s, err := p.Store.GetSeriesByID(seriesID)
+	if err != nil {
+		return fmt.Errorf("RefileOne: series %d: %w", seriesID, err)
+	}
+	bindingByID, err := p.loadBindings()
+	if err != nil {
+		return fmt.Errorf("RefileOne: load bindings: %w", err)
+	}
+	d, err := p.Classifier.Classify(ctx, classifier.ScanItem{
+		Title: s.Title, ParentDir: s.SourcePath, ManualBindingID: p.resolveManualOverride(s),
+	})
+	if err != nil {
+		return fmt.Errorf("RefileOne: classify: %w", err)
+	}
+	if d.BindingID == 0 {
+		return fmt.Errorf("RefileOne: series %d is unmatched — nothing to file", seriesID)
+	}
+	binding, ok := bindingByID[d.BindingID]
+	if !ok || binding.LibraryRoot == "" {
+		return fmt.Errorf("RefileOne: binding %d missing or has no library_root", d.BindingID)
+	}
+	if err := p.Filer.File(s, binding.LibraryRoot); err != nil {
+		return fmt.Errorf("RefileOne: file: %w", err)
+	}
+	bid := binding.ID
+	_ = p.Store.SetSeriesCurrentBinding(s.ID, &bid)
+	p.recordActivityVia(s.Title, model.ActionFiled, d.Via, fmt.Sprintf("refiled into %s", binding.LibraryRoot))
+	return nil
+}
