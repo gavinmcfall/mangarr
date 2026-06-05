@@ -627,6 +627,10 @@ func (p *Poller) PreviewOne(ctx context.Context, seriesID int64) (PreviewEntry, 
 // files it into the resolved binding's LibraryRoot. It records an ActionFiled
 // activity entry and updates the series' CurrentBindingID on success.
 //
+// Unlike RunOnce, RefileOne does NOT trigger a Kavita library scan — it's an
+// operator-driven re-file from the detail page; the freshly filed chapters get
+// picked up by Kavita on the next poll tick's scan.
+//
 // Returns an error if the series cannot be found, the classifier returns
 // BindingID==0 (unmatched), the binding is missing or has no library_root, or
 // the filer fails.

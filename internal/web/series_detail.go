@@ -1,6 +1,8 @@
 package web
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -109,6 +111,13 @@ func (h *Handler) pageSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	entry, err := h.previewer.PreviewOne(r.Context(), id)
 	if err != nil {
+		// A missing series id is a 404, not a server error — the page is
+		// reached by following a /series row link, so a stale link should
+		// read as "gone", not "broken".
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "series not found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -215,7 +224,9 @@ func (h *Handler) apiSeriesChapterRemove(w http.ResponseWriter, r *http.Request)
 }
 
 // pathUnder reports whether target is the root itself or lies within it, after
-// cleaning both paths. An empty root fails closed (returns false).
+// cleaning both paths. An empty root fails closed (returns false). The check is
+// lexical only (no symlink resolution) — the same guarantee the filer makes
+// when it computes DstPath, which is the only value ever passed here.
 func pathUnder(root, target string) bool {
 	if root == "" {
 		return false

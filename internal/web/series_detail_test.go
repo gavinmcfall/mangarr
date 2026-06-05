@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -136,6 +138,19 @@ func TestSeriesDetailPage503WhenNoPreviewer(t *testing.T) {
 	}
 }
 
+func TestSeriesDetailPage404WhenSeriesMissing(t *testing.T) {
+	// PreviewOne wraps GetSeriesByID's sql.ErrNoRows for an unknown id; the
+	// handler must surface that as 404, not 500.
+	prev := &fakePreviewer{oneErr: fmt.Errorf("PreviewOne: series 7: %w", sql.ErrNoRows)}
+	h, _ := detailHandler(prev, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/series/7", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
 // --- Task 6: POST /api/series/{id}/refile ---
 
 type recordingRefiler struct {
@@ -246,6 +261,38 @@ func TestSeriesChapterRemoveRejectsUnknownName(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestSeriesChapterRemoveRejectsPlanOutsideRoot(t *testing.T) {
+	// Defence in depth: even if a plan's DstPath somehow resolves outside the
+	// destination root (the filer's own guard makes this near-impossible), the
+	// pathUnder check must reject it before anything is moved.
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "escape.cbz")
+	if err := os.WriteFile(outside, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prev := &fakePreviewer{one: poller.PreviewEntry{
+		Title:        "Berserk",
+		DstRoot:      root,
+		Status:       "matched",
+		ChapterPlans: []filer.PlanEntry{{DstPath: outside, Action: filer.PlanSkip}},
+	}}
+	bin := &recyclebin.Bin{Root: t.TempDir()}
+	h, _ := detailHandler(prev, nil, bin)
+
+	form := url.Values{"name": {"escape.cbz"}} // matches the plan basename
+	req := httptest.NewRequest(http.MethodPost, "/api/series/7/chapter/remove", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("file outside root was touched: %v", err)
 	}
 }
 
