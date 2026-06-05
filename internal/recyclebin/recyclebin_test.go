@@ -205,3 +205,45 @@ func TestGCIgnoresMalformedDateDirs(t *testing.T) {
 		t.Fatalf("malformed dir file should not be touched: %v", err)
 	}
 }
+
+// TestGCBoundaryTimezoneSafe reproduces the bug where, on a UTC+12/+13 host
+// in the early local morning, the retention boundary was computed in the
+// wrong frame: the local-date dir name was parsed as UTC midnight and
+// compared to cutoff.Truncate(24h) (UTC-aligned), collapsing an 8-day-old
+// dir onto the 7-day cutoff so it was wrongly kept. A calendar-date string
+// compare makes the boundary timezone-safe.
+func TestGCBoundaryTimezoneSafe(t *testing.T) {
+	loc := time.FixedZone("+12", 12*3600)
+	now := time.Date(2026, 6, 5, 8, 42, 0, 0, loc) // early local morning
+
+	tmp := t.TempDir()
+	binRoot := filepath.Join(tmp, "bin")
+
+	oldName := now.AddDate(0, 0, -8).Format(dateFmt) // 8 days old → remove
+	oldDir := filepath.Join(binRoot, oldName)
+	if err := os.MkdirAll(oldDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldDir, "x.cbz"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recentName := now.AddDate(0, 0, -3).Format(dateFmt) // 3 days old → keep
+	recentDir := filepath.Join(binRoot, recentName)
+	if err := os.MkdirAll(recentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(recentDir, "y.cbz"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := (&Bin{Root: binRoot, Retention: 7 * 24 * time.Hour}).GC(now); err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		t.Errorf("8-day-old dir %q must be GC'd (timezone boundary regression)", oldName)
+	}
+	if _, err := os.Stat(recentDir); err != nil {
+		t.Errorf("3-day-old dir %q must be kept, got %v", recentName, err)
+	}
+}
