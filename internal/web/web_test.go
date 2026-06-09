@@ -408,6 +408,47 @@ func (f *fakeStore) MarkBulkJobChapterFed(jobID, chapterID int64) error {
 	return nil
 }
 
+// --- Series lifecycle stubs (series-lifecycle-reconciliation) ---
+
+func (f *fakeStore) GetSeriesByID(id int64) (model.Series, error) {
+	for _, s := range f.series {
+		if s.ID == id {
+			return s, nil
+		}
+	}
+	return model.Series{}, sql.ErrNoRows
+}
+
+func (f *fakeStore) DeleteSeries(id int64) error {
+	for i, s := range f.series {
+		if s.ID == id {
+			f.series = append(f.series[:i], f.series[i+1:]...)
+			return nil
+		}
+	}
+	return nil // idempotent
+}
+
+func (f *fakeStore) SetSeriesMissingSince(id int64, t *time.Time) error {
+	for i := range f.series {
+		if f.series[i].ID == id {
+			f.series[i].MissingSince = t
+			return nil
+		}
+	}
+	return nil
+}
+
+func (f *fakeStore) SetSeriesStatus(id int64, st model.Status) error {
+	for i := range f.series {
+		if f.series[i].ID == id {
+			f.series[i].Status = st
+			return nil
+		}
+	}
+	return nil
+}
+
 // fakeSuwayomi implements web.SuwayomiClient for tests. Per-manga chapter
 // IDs are configured via chaptersForManga; ListChapters returns each as
 // a Chapter{IsDownloaded:false}. A nil/empty slice for a manga ID models

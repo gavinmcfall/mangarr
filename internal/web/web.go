@@ -141,6 +141,17 @@ type Store interface {
 	// DeleteBulkJob removes a job + cascades its chapter rows — used by
 	// POST /api/downloads/{id}/delete.
 	DeleteBulkJob(id int64) error
+
+	// --- Series lifecycle (series-lifecycle-reconciliation) ---
+	// GetSeriesByID returns the series with the given primary key.
+	// Returns sql.ErrNoRows (wrapped) when the series does not exist.
+	GetSeriesByID(id int64) (model.Series, error)
+	// DeleteSeries removes the series row and its tags. Idempotent.
+	DeleteSeries(id int64) error
+	// SetSeriesMissingSince sets (or clears, when t is nil) series.missing_since.
+	SetSeriesMissingSince(id int64, t *time.Time) error
+	// SetSeriesStatus updates series.status.
+	SetSeriesStatus(id int64, st model.Status) error
 }
 
 // SuwayomiClient is the subset of *suwayomi.Client the web package needs.
@@ -388,6 +399,11 @@ func NewHandler(opts HandlerOpts) *Handler {
 	// series, and move a single filed chapter into the recycle bin.
 	h.mux.HandleFunc("POST /api/series/{id}/refile", h.apiSeriesRefile)
 	h.mux.HandleFunc("POST /api/series/{id}/chapter/remove", h.apiSeriesChapterRemove)
+
+	// Series lifecycle: durable delete (with optional recycle-bin file removal)
+	// and restore (clear orphaned flag, reset to pending).
+	h.mux.HandleFunc("POST /api/series/{id}/delete", h.apiSeriesDelete)
+	h.mux.HandleFunc("POST /api/series/{id}/restore", h.apiSeriesRestore)
 
 	// Backup API
 	h.mux.HandleFunc("GET /api/backups", h.apiListBackups)
