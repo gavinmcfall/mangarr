@@ -708,6 +708,40 @@ func TestSeriesPageReturns200(t *testing.T) {
 	}
 }
 
+func TestSeriesPageShowsOrphanedBanner(t *testing.T) {
+	st := &fakeStore{
+		series: []model.Series{
+			{ID: 1, Title: "Gone", SourcePath: "/d/Gone", Status: model.StatusOrphaned},
+		},
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{
+		Store:                   st,
+		Runner:                  &fakeRunner{},
+		RecycleBinPath:          "/config/recycle-bin",
+		RecycleBinRetentionDays: 7,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/series", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		"Removed from source",
+		"/api/series/1/restore",
+		"/api/series/1/delete",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in /series response body", want)
+		}
+	}
+}
+
 func TestUnmatchedPageReturns200(t *testing.T) {
 	h, _, _ := newTestHandler()
 	req := httptest.NewRequest(http.MethodGet, "/unmatched", nil)

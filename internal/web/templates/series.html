@@ -79,6 +79,20 @@
       </select>
     </td>
   </tr>
+  {{if eq (printf "%s" .Status) "orphaned"}}
+  <tr class="series-orphaned-row">
+    <td colspan="7" class="series-orphaned-banner" role="alert">
+      Removed from source — confirm removal?
+      <form method="post" action="/api/series/{{.ID}}/restore" style="display:inline">
+        <button type="submit" class="btn btn-secondary btn-sm">Keep / Restore</button>
+      </form>
+      <button type="button" class="btn btn-danger btn-sm"
+              data-delete-url="/api/series/{{.ID}}/delete"
+              data-title="{{.Title}}"
+              onclick="openDeleteModal(this)">Remove…</button>
+    </td>
+  </tr>
+  {{end}}
   {{end}}
   </tbody>
 </table>
@@ -94,6 +108,39 @@
 {{end}}
   </div>
 </div>
+<dialog id="delete-series-modal">
+  <form method="post" id="delete-series-form" action="">
+    <h3 id="delete-series-title"></h3>
+    <p>How should this series be removed?</p>
+    <label><input type="radio" name="delete_files" value="false" checked> Remove from Mangarr only (keep files on disk)</label><br>
+    <label><input type="radio" name="delete_files" value="true"> Remove from Mangarr <strong>and delete files</strong> (downloads + Kavita)</label>
+    <menu>
+      <button type="button" onclick="document.getElementById('delete-series-modal').close()">Cancel</button>
+      <button type="submit" id="delete-series-submit">Continue</button>
+    </menu>
+  </form>
+</dialog>
+<script>
+function openDeleteModal(btn) {
+  var url = btn.getAttribute('data-delete-url');
+  var title = btn.getAttribute('data-title');
+  var f = document.getElementById('delete-series-form');
+  f.action = url;
+  f.removeAttribute('data-confirmed');
+  document.getElementById('delete-series-title').textContent = 'Delete: ' + title;
+  document.getElementById('delete-series-modal').showModal();
+}
+document.getElementById('delete-series-form').addEventListener('submit', function (e) {
+  var wantFiles = this.querySelector('input[name=delete_files]:checked').value === 'true';
+  if (wantFiles && !this.dataset.confirmed) {
+    e.preventDefault();
+    if (confirm('This will move the downloaded files AND the Kavita library copy to the recycle bin. Continue?')) {
+      this.dataset.confirmed = '1';
+      this.submit();
+    }
+  }
+});
+</script>
 <script>
 (function () {
   var tagFilter = document.getElementById('series-tag-filter');
