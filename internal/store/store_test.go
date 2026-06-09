@@ -737,7 +737,10 @@ func TestSetSeriesMissingSinceAndStatusRoundTrip(t *testing.T) {
 	if err := s.SetSeriesMissingSince(id, nil); err != nil {
 		t.Fatal(err)
 	}
-	lite, _ = s.ListSeriesLite()
+	lite, err = s.ListSeriesLite()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, l := range lite {
 		if l.ID == id && l.MissingSince != nil {
 			t.Errorf("missing_since not cleared: %v", l.MissingSince)
@@ -747,10 +750,13 @@ func TestSetSeriesMissingSinceAndStatusRoundTrip(t *testing.T) {
 
 func TestDeleteSeriesRemovesRowAndTags(t *testing.T) {
 	s := newTestStore(t)
-	id, _ := s.UpsertSeries(model.Series{
+	id, err := s.UpsertSeries(model.Series{
 		Title: "Y", SourcePath: "/d/Y", Source: "suwayomi",
 		Type: model.TypeUnknown, Status: model.StatusPending,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := s.SetSeriesTags(id, []string{"a", "b"}); err != nil {
 		t.Fatal(err)
 	}

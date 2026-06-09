@@ -668,7 +668,7 @@ type SeriesLite struct {
 // ListSeriesLite returns id, source_path, status, missing_since for every
 // series. Cheap projection used by the reconcile pass.
 func (s *Store) ListSeriesLite() ([]SeriesLite, error) {
-	rows, err := s.db.Query(`SELECT id, source_path, status, missing_since FROM series`)
+	rows, err := s.db.Query(`SELECT id,source_path,status,missing_since FROM series`)
 	if err != nil {
 		return nil, err
 	}
@@ -692,6 +692,10 @@ func (s *Store) ListSeriesLite() ([]SeriesLite, error) {
 }
 
 // SetSeriesMissingSince sets (or clears, when t is nil) series.missing_since.
+//
+// Deliberately does not touch updated_at: missing_since is an internal
+// reconcile grace-timer, not a content change. The user-visible orphan flip
+// (SetSeriesStatus) is what bumps updated_at.
 func (s *Store) SetSeriesMissingSince(id int64, t *time.Time) error {
 	if t == nil {
 		_, err := s.db.Exec(`UPDATE series SET missing_since=NULL WHERE id=?`, id)
