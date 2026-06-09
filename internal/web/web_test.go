@@ -408,6 +408,47 @@ func (f *fakeStore) MarkBulkJobChapterFed(jobID, chapterID int64) error {
 	return nil
 }
 
+// --- Series lifecycle stubs (series-lifecycle-reconciliation) ---
+
+func (f *fakeStore) GetSeriesByID(id int64) (model.Series, error) {
+	for _, s := range f.series {
+		if s.ID == id {
+			return s, nil
+		}
+	}
+	return model.Series{}, sql.ErrNoRows
+}
+
+func (f *fakeStore) DeleteSeries(id int64) error {
+	for i, s := range f.series {
+		if s.ID == id {
+			f.series = append(f.series[:i], f.series[i+1:]...)
+			return nil
+		}
+	}
+	return nil // idempotent
+}
+
+func (f *fakeStore) SetSeriesMissingSince(id int64, t *time.Time) error {
+	for i := range f.series {
+		if f.series[i].ID == id {
+			f.series[i].MissingSince = t
+			return nil
+		}
+	}
+	return nil
+}
+
+func (f *fakeStore) SetSeriesStatus(id int64, st model.Status) error {
+	for i := range f.series {
+		if f.series[i].ID == id {
+			f.series[i].Status = st
+			return nil
+		}
+	}
+	return nil
+}
+
 // fakeSuwayomi implements web.SuwayomiClient for tests. Per-manga chapter
 // IDs are configured via chaptersForManga; ListChapters returns each as
 // a Chapter{IsDownloaded:false}. A nil/empty slice for a manga ID models
@@ -664,6 +705,49 @@ func TestSeriesPageReturns200(t *testing.T) {
 	body := rr.Body.String()
 	if !strings.Contains(body, "Solo Leveling") {
 		t.Fatalf("series title not in response body")
+	}
+}
+
+func TestSeriesPageShowsOrphanedBanner(t *testing.T) {
+	st := &fakeStore{
+		series: []model.Series{
+			{ID: 1, Title: "Gone", SourcePath: "/d/Gone", Status: model.StatusOrphaned},
+			{ID: 2, Title: "Here", Status: model.StatusFiled},
+		},
+		settings: model.Settings{
+			LibraryRoots:       map[model.ContentType]string{},
+			KavitaLibIDsByType: map[model.ContentType]int64{},
+		},
+	}
+	h := NewHandler(HandlerOpts{
+		Store:                   st,
+		Runner:                  &fakeRunner{},
+		RecycleBinPath:          "/config/recycle-bin",
+		RecycleBinRetentionDays: 7,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/series", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		"Removed from source",
+		"/api/series/1/restore",
+		"/api/series/1/delete",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in /series response body", want)
+		}
+	}
+	// The orphaned banner must appear exactly once, and the non-orphaned
+	// series (id 2) must NOT get banner actions.
+	if n := strings.Count(body, "Removed from source"); n != 1 {
+		t.Errorf("want banner copy exactly once, got %d", n)
+	}
+	if strings.Contains(body, "/api/series/2/restore") {
+		t.Errorf("non-orphaned series 2 should not render a restore action")
 	}
 }
 
@@ -2095,6 +2179,10 @@ type fakePreviewer struct {
 	// one is returned by PreviewOne; oneErr overrides it when non-nil.
 	one    poller.PreviewEntry
 	oneErr error
+	// resolvedLibDir is returned by ResolveLibraryDir; resolveLibDirErr
+	// overrides the return error when non-nil.
+	resolvedLibDir    string
+	resolveLibDirErr  error
 }
 
 func (f *fakePreviewer) Preview(ctx context.Context) ([]poller.PreviewEntry, error) {
@@ -2103,6 +2191,10 @@ func (f *fakePreviewer) Preview(ctx context.Context) ([]poller.PreviewEntry, err
 
 func (f *fakePreviewer) PreviewOne(ctx context.Context, seriesID int64) (poller.PreviewEntry, error) {
 	return f.one, f.oneErr
+}
+
+func (f *fakePreviewer) ResolveLibraryDir(ctx context.Context, seriesID int64) (string, error) {
+	return f.resolvedLibDir, f.resolveLibDirErr
 }
 
 // newPreviewHandler builds a Handler wired with a fakePreviewer seeded with

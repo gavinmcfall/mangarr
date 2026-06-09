@@ -50,6 +50,10 @@ const (
 	StatusUnmatched Status = "unmatched" // classification failed, awaiting manual
 	StatusFiled     Status = "filed"     // placed into a library
 	StatusError     Status = "error"
+	// StatusOrphaned marks a series whose source folder vanished from disk
+	// (confirmed by the reconcile grace timer). Excluded from classify/file;
+	// retained in the DB and surfaced in the UI for confirm-removal.
+	StatusOrphaned Status = "orphaned"
 )
 
 type Series struct {
@@ -61,6 +65,10 @@ type Series struct {
 	Status       Status
 	ChapterCount int
 	UpdatedAt    time.Time
+	// MissingSince is set by the reconcile pass when the series' source
+	// folder is first observed absent; nil when present on disk. When the
+	// gap exceeds the reconcile grace, Status flips to StatusOrphaned.
+	MissingSince *time.Time
 	// ManualBindingID is a user-set override added by the v2 Series-page
 	// reclassify control. When non-nil, the classifier short-circuits its
 	// six-step flow at step 0 and routes straight to this binding with
@@ -196,6 +204,16 @@ type Settings struct {
 	// ActivityRetentionDays controls the activity-gc task: rows older than
 	// this many days are deleted. Default 90 (applied at GetSettings read).
 	ActivityRetentionDays int `json:"activity_retention_days"`
+
+	// ReconcileGraceMinutes is how long a series' source folder must be
+	// continuously absent before reconcile flags it orphaned. Default 10.
+	ReconcileGraceMinutes int `json:"reconcile_grace_minutes,omitempty"`
+	// ReconcileMassVanishPercent and ReconcileMassVanishMinCount form the
+	// sanity floor: a single reconcile aborts (logs an alert, writes
+	// nothing) when the newly-absent count is BOTH > Percent% of active
+	// series AND >= MinCount. Defaults 25 and 5.
+	ReconcileMassVanishPercent  int `json:"reconcile_mass_vanish_percent,omitempty"`
+	ReconcileMassVanishMinCount int `json:"reconcile_mass_vanish_min_count,omitempty"`
 }
 
 // Binding is one library destination the user has defined. Replaces the

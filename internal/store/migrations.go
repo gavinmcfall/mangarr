@@ -27,6 +27,7 @@ var migrations = []migration{
 	{6, "bulk-chapter-tries", migration6BulkChapterTries},
 	{7, "series-current-binding", migrateSeriesCurrentBinding},
 	{8, "series-tags", migrateSeriesTags},
+	{9, "series-missing-since", migrateSeriesMissingSince},
 }
 
 // migrateSeriesManualBinding adds the manual_binding_id column to the
@@ -141,6 +142,34 @@ func runMigrations(db *sql.DB) error {
 			return fmt.Errorf("commit migration %d %q: %w", m.version, m.name, err)
 		}
 		log.Printf("store: applied migration %d %q", m.version, m.name)
+	}
+	return nil
+}
+
+// migrateSeriesMissingSince adds series.missing_since (unix seconds, NULL =
+// present on disk). The reconcile pass sets it when a series' source folder
+// first goes absent and uses it as the grace timer before flagging the
+// series 'orphaned'. Idempotent under the schema_versions gate; tolerant of
+// a missing series table (migration-only test fixtures).
+func migrateSeriesMissingSince(tx *sql.Tx) error {
+	var seriesTable string
+	err := tx.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='series'`).Scan(&seriesTable)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("probe series table: %w", err)
+	}
+	var name string
+	err = tx.QueryRow(`SELECT name FROM pragma_table_info('series') WHERE name = 'missing_since'`).Scan(&name)
+	if err == nil {
+		return nil // already present
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("probe missing_since column: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE series ADD COLUMN missing_since INTEGER`); err != nil {
+		return fmt.Errorf("add series.missing_since: %w", err)
 	}
 	return nil
 }

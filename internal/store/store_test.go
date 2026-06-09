@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
 )
@@ -653,6 +654,20 @@ func TestGetSettingsAppliesNewBulkDefaults(t *testing.T) {
 // TestSaveSettingsRoundTripsNewBulkFields verifies that explicit non-default
 // values for the stalled-job detector knobs survive a SaveSettings /
 // GetSettings round-trip without loss.
+func TestApplySettingsDefaultsReconcile(t *testing.T) {
+	var s model.Settings
+	applySettingsDefaults(&s)
+	if s.ReconcileGraceMinutes != 10 {
+		t.Errorf("grace = %d, want 10", s.ReconcileGraceMinutes)
+	}
+	if s.ReconcileMassVanishPercent != 25 {
+		t.Errorf("percent = %d, want 25", s.ReconcileMassVanishPercent)
+	}
+	if s.ReconcileMassVanishMinCount != 5 {
+		t.Errorf("minCount = %d, want 5", s.ReconcileMassVanishMinCount)
+	}
+}
+
 func TestSaveSettingsRoundTripsNewBulkFields(t *testing.T) {
 	s := newTestStore(t)
 	want := model.Settings{
@@ -678,5 +693,84 @@ func TestSaveSettingsRoundTripsNewBulkFields(t *testing.T) {
 	}
 	if !got.BulkAutoErrorEmptyChaptersDisabled {
 		t.Errorf("BulkAutoErrorEmptyChaptersDisabled round-trip: want true, got false")
+	}
+}
+
+func TestSetSeriesMissingSinceAndStatusRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.UpsertSeries(model.Series{
+		Title: "X", SourcePath: "/d/X", Source: "suwayomi",
+		Type: model.TypeUnknown, Status: model.StatusPending,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1700000000, 0).UTC()
+	if err := s.SetSeriesMissingSince(id, &now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSeriesStatus(id, model.StatusOrphaned); err != nil {
+		t.Fatal(err)
+	}
+	lite, err := s.ListSeriesLite()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, l := range lite {
+		if l.ID == id {
+			found = true
+			if l.Status != model.StatusOrphaned {
+				t.Errorf("status = %q, want orphaned", l.Status)
+			}
+			if l.MissingSince == nil || !l.MissingSince.Equal(now) {
+				t.Errorf("missing_since = %v, want %v", l.MissingSince, now)
+			}
+			if l.SourcePath != "/d/X" {
+				t.Errorf("source_path = %q", l.SourcePath)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("series not returned by ListSeriesLite")
+	}
+	if err := s.SetSeriesMissingSince(id, nil); err != nil {
+		t.Fatal(err)
+	}
+	lite, err = s.ListSeriesLite()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range lite {
+		if l.ID == id && l.MissingSince != nil {
+			t.Errorf("missing_since not cleared: %v", l.MissingSince)
+		}
+	}
+}
+
+func TestDeleteSeriesRemovesRowAndTags(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.UpsertSeries(model.Series{
+		Title: "Y", SourcePath: "/d/Y", Source: "suwayomi",
+		Type: model.TypeUnknown, Status: model.StatusPending,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSeriesTags(id, []string{"a", "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSeries(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetSeriesByID(id); err == nil {
+		t.Fatal("series still present after delete")
+	}
+	tags, _ := s.tagsForSeries(id)
+	if len(tags) != 0 {
+		t.Errorf("tags not cascaded: %v", tags)
+	}
+	if err := s.DeleteSeries(id); err != nil {
+		t.Errorf("second delete should be no-op, got %v", err)
 	}
 }

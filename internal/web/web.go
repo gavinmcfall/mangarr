@@ -141,6 +141,17 @@ type Store interface {
 	// DeleteBulkJob removes a job + cascades its chapter rows — used by
 	// POST /api/downloads/{id}/delete.
 	DeleteBulkJob(id int64) error
+
+	// --- Series lifecycle (series-lifecycle-reconciliation) ---
+	// GetSeriesByID returns the series with the given primary key.
+	// Returns sql.ErrNoRows (wrapped) when the series does not exist.
+	GetSeriesByID(id int64) (model.Series, error)
+	// DeleteSeries removes the series row and its tags. Idempotent.
+	DeleteSeries(id int64) error
+	// SetSeriesMissingSince sets (or clears, when t is nil) series.missing_since.
+	SetSeriesMissingSince(id int64, t *time.Time) error
+	// SetSeriesStatus updates series.status.
+	SetSeriesStatus(id int64, st model.Status) error
 }
 
 // SuwayomiClient is the subset of *suwayomi.Client the web package needs.
@@ -191,11 +202,17 @@ type MetricsSink interface {
 }
 
 // Previewer can run the full pipeline dry-run without side effects.
-// poller.Poller satisfies this interface via its Preview and PreviewOne
-// methods. PreviewOne backs the per-series detail page.
+// poller.Poller satisfies this interface via its Preview, PreviewOne, and
+// ResolveLibraryDir methods. PreviewOne backs the per-series detail page;
+// ResolveLibraryDir backs the orphaned-series delete path.
 type Previewer interface {
 	Preview(ctx context.Context) ([]poller.PreviewEntry, error)
 	PreviewOne(ctx context.Context, seriesID int64) (poller.PreviewEntry, error)
+	// ResolveLibraryDir returns the Kavita library directory a series was
+	// filed into without reading the source folder — so it works for orphaned
+	// series whose source has vanished. Returns "" (no error) when the series
+	// has no binding.
+	ResolveLibraryDir(ctx context.Context, seriesID int64) (string, error)
 }
 
 // SeriesFiler can file a single series on demand.
@@ -388,6 +405,11 @@ func NewHandler(opts HandlerOpts) *Handler {
 	// series, and move a single filed chapter into the recycle bin.
 	h.mux.HandleFunc("POST /api/series/{id}/refile", h.apiSeriesRefile)
 	h.mux.HandleFunc("POST /api/series/{id}/chapter/remove", h.apiSeriesChapterRemove)
+
+	// Series lifecycle: durable delete (with optional recycle-bin file removal)
+	// and restore (clear orphaned flag, reset to pending).
+	h.mux.HandleFunc("POST /api/series/{id}/delete", h.apiSeriesDelete)
+	h.mux.HandleFunc("POST /api/series/{id}/restore", h.apiSeriesRestore)
 
 	// Backup API
 	h.mux.HandleFunc("GET /api/backups", h.apiListBackups)

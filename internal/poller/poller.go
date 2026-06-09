@@ -28,12 +28,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/classifier"
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
+	"github.com/gavinmcfall/mangarr/internal/store"
 	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
 
@@ -110,6 +112,11 @@ type SeriesStore interface {
 	// clears it on Unmatched. /series reads this to render the visible
 	// pill without bouncing to the activity log.
 	SetSeriesCurrentBinding(id int64, bindingID *int64) error
+	// The three reconcile methods below form the reconcileStore seam; the
+	// reconcile pass calls them via that narrower interface.
+	ListSeriesLite() ([]store.SeriesLite, error)
+	SetSeriesMissingSince(id int64, t *time.Time) error
+	SetSeriesStatus(id int64, st model.Status) error
 }
 
 // Planner returns a dry-run plan for a series without touching the
@@ -204,6 +211,29 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	series, err := p.Scanner.ScanAll()
 	if err != nil {
 		return err
+	}
+
+	// Reconcile: soft-delete series whose source folder vanished. Guarded by
+	// the sanity floor; skipped entirely when Store/Settings are nil.
+	if p.Store != nil && p.Settings != nil {
+		set, serr := p.Settings.GetSettings()
+		if serr != nil {
+			log.Printf("poller: reconcile: get settings: %v", serr)
+		} else {
+			onDisk := make(map[string]bool, len(series))
+			for _, s := range series {
+				onDisk[s.SourcePath] = true
+			}
+			rcfg := reconcileConfig{
+				Grace:              time.Duration(set.ReconcileGraceMinutes) * time.Minute,
+				MassVanishPercent:  set.ReconcileMassVanishPercent,
+				MassVanishMinCount: set.ReconcileMassVanishMinCount,
+			}
+			if res := reconcile(p.Store, onDisk, rcfg, time.Now()); res.Aborted {
+				p.recordActivityVia("", model.ActionError, "reconcile",
+					"reconcile aborted: mass series disappearance — likely a mount or Suwayomi failure, not real deletions")
+			}
+		}
 	}
 
 	// Load bindings once per tick and build a lookup map. Cheap (handful
@@ -666,4 +696,48 @@ func (p *Poller) RefileOne(ctx context.Context, seriesID int64) error {
 	_ = p.Store.SetSeriesCurrentBinding(s.ID, &bid)
 	p.recordActivityVia(s.Title, model.ActionFiled, d.Via, fmt.Sprintf("refiled into %s", binding.LibraryRoot))
 	return nil
+}
+
+// ResolveLibraryDir returns the Kavita library directory a series was filed
+// into, WITHOUT reading the source folder — so it works for orphaned series
+// whose source has vanished. It uses the series' persisted binding
+// (ManualBindingID preferred, else CurrentBindingID) and the rename scheme to
+// compute filepath.Dir of the rendered destination. Returns "" (no error) when
+// the series has no binding (never filed) or the binding is unknown.
+func (p *Poller) ResolveLibraryDir(ctx context.Context, seriesID int64) (string, error) {
+	if p.Store == nil {
+		return "", nil
+	}
+	s, err := p.Store.GetSeriesByID(seriesID)
+	if err != nil {
+		return "", err
+	}
+	var bindingID int64
+	if s.ManualBindingID != nil {
+		bindingID = *s.ManualBindingID
+	} else if s.CurrentBindingID != nil {
+		bindingID = *s.CurrentBindingID
+	}
+	if bindingID == 0 {
+		return "", nil
+	}
+	bindings, err := p.loadBindings()
+	if err != nil {
+		return "", err
+	}
+	b, ok := bindings[bindingID]
+	if !ok {
+		return "", nil
+	}
+	scheme := ""
+	if p.Settings != nil {
+		if set, serr := p.Settings.GetSettings(); serr == nil {
+			scheme = set.RenameScheme
+		}
+	}
+	if scheme == "" {
+		return "", nil
+	}
+	rendered := filer.RenderName(scheme, s.Title, "1.cbz")
+	return filepath.Dir(filepath.Join(b.LibraryRoot, rendered)), nil
 }

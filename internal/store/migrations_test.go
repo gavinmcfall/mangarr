@@ -460,6 +460,23 @@ func TestMigration2EmptySettingsRowIsNoOp(t *testing.T) {
 	}
 }
 
+func TestMigration9AddsMissingSinceColumn(t *testing.T) {
+	// newTestStore calls Open() which runs migrate() (creates series table)
+	// then runMigrations() (applies all numbered migrations). This mirrors
+	// production boot and ensures migration 9 runs against a real series table.
+	s := newTestStore(t)
+	var name string
+	err := s.DB().QueryRow(
+		`SELECT name FROM pragma_table_info('series') WHERE name='missing_since'`,
+	).Scan(&name)
+	if err != nil {
+		t.Fatalf("missing_since column not present after migrations: %v", err)
+	}
+	if name != "missing_since" {
+		t.Fatalf("got column %q, want missing_since", name)
+	}
+}
+
 func TestMigration2CorruptSettingsJSONReturnsErrorWithoutRecording(t *testing.T) {
 	// Corrupt JSON in the settings row → migration fails → schema_versions
 	// does NOT record version 2 → next boot retries (idempotent recovery).
