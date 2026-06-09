@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
 	_ "modernc.org/sqlite"
@@ -654,4 +655,72 @@ func (s *Store) SaveRules(in []model.ClassificationRule) error {
 	}
 	committed = true
 	return nil
+}
+
+// SeriesLite is the minimal projection the reconcile pass needs.
+type SeriesLite struct {
+	ID           int64
+	SourcePath   string
+	Status       model.Status
+	MissingSince *time.Time
+}
+
+// ListSeriesLite returns id, source_path, status, missing_since for every
+// series. Cheap projection used by the reconcile pass.
+func (s *Store) ListSeriesLite() ([]SeriesLite, error) {
+	rows, err := s.db.Query(`SELECT id, source_path, status, missing_since FROM series`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SeriesLite
+	for rows.Next() {
+		var l SeriesLite
+		var status string
+		var ms sql.NullInt64
+		if err := rows.Scan(&l.ID, &l.SourcePath, &status, &ms); err != nil {
+			return nil, err
+		}
+		l.Status = model.Status(status)
+		if ms.Valid {
+			t := time.Unix(ms.Int64, 0).UTC()
+			l.MissingSince = &t
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// SetSeriesMissingSince sets (or clears, when t is nil) series.missing_since.
+func (s *Store) SetSeriesMissingSince(id int64, t *time.Time) error {
+	if t == nil {
+		_, err := s.db.Exec(`UPDATE series SET missing_since=NULL WHERE id=?`, id)
+		return err
+	}
+	_, err := s.db.Exec(`UPDATE series SET missing_since=? WHERE id=?`, t.Unix(), id)
+	return err
+}
+
+// SetSeriesStatus updates series.status.
+func (s *Store) SetSeriesStatus(id int64, st model.Status) error {
+	_, err := s.db.Exec(`UPDATE series SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, string(st), id)
+	return err
+}
+
+// DeleteSeries removes the series row and its tags. Idempotent: deleting a
+// non-existent id is a no-op, not an error. Does NOT touch files on disk;
+// file removal is the caller's concern (web binSeriesFiles).
+func (s *Store) DeleteSeries(id int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM series_tags WHERE series_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM series WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
