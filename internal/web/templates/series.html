@@ -79,13 +79,14 @@
       </select>
     </td>
   </tr>
-  {{if eq (printf "%s" .Status) "orphaned"}}
+  {{if eq (.Status | lower) "orphaned"}}
   <tr class="series-orphaned-row">
     <td colspan="7" class="series-orphaned-banner" role="alert">
       Removed from source — confirm removal?
-      <form method="post" action="/api/series/{{.ID}}/restore" style="display:inline">
-        <button type="submit" class="btn btn-secondary btn-sm">Keep / Restore</button>
-      </form>
+      <button type="button" class="btn btn-secondary btn-sm"
+              hx-post="/api/series/{{.ID}}/restore"
+              hx-swap="none"
+              hx-on::after-request="if(event.detail.successful){window.location.reload();}">Keep / Restore</button>
       <button type="button" class="btn btn-danger btn-sm"
               data-delete-url="/api/series/{{.ID}}/delete"
               data-title="{{.Title}}"
@@ -151,6 +152,10 @@ document.getElementById('delete-series-form').addEventListener('submit', functio
       var tags = (row.getAttribute('data-tags') || '').toLowerCase();
       var hit = !q || tags.split(' ').some(function (t) { return t && t.indexOf(q) !== -1; });
       row.style.display = hit ? '' : 'none';
+      var next = row.nextElementSibling;
+      if (next && next.classList.contains('series-orphaned-row')) {
+        next.style.display = row.style.display;
+      }
     });
   });
 })();

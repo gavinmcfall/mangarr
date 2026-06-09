@@ -712,6 +712,7 @@ func TestSeriesPageShowsOrphanedBanner(t *testing.T) {
 	st := &fakeStore{
 		series: []model.Series{
 			{ID: 1, Title: "Gone", SourcePath: "/d/Gone", Status: model.StatusOrphaned},
+			{ID: 2, Title: "Here", Status: model.StatusFiled},
 		},
 		settings: model.Settings{
 			LibraryRoots:       map[model.ContentType]string{},
@@ -739,6 +740,14 @@ func TestSeriesPageShowsOrphanedBanner(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in /series response body", want)
 		}
+	}
+	// The orphaned banner must appear exactly once, and the non-orphaned
+	// series (id 2) must NOT get banner actions.
+	if n := strings.Count(body, "Removed from source"); n != 1 {
+		t.Errorf("want banner copy exactly once, got %d", n)
+	}
+	if strings.Contains(body, "/api/series/2/restore") {
+		t.Errorf("non-orphaned series 2 should not render a restore action")
 	}
 }
 
