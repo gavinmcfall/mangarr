@@ -202,11 +202,17 @@ type MetricsSink interface {
 }
 
 // Previewer can run the full pipeline dry-run without side effects.
-// poller.Poller satisfies this interface via its Preview and PreviewOne
-// methods. PreviewOne backs the per-series detail page.
+// poller.Poller satisfies this interface via its Preview, PreviewOne, and
+// ResolveLibraryDir methods. PreviewOne backs the per-series detail page;
+// ResolveLibraryDir backs the orphaned-series delete path.
 type Previewer interface {
 	Preview(ctx context.Context) ([]poller.PreviewEntry, error)
 	PreviewOne(ctx context.Context, seriesID int64) (poller.PreviewEntry, error)
+	// ResolveLibraryDir returns the Kavita library directory a series was
+	// filed into without reading the source folder — so it works for orphaned
+	// series whose source has vanished. Returns "" (no error) when the series
+	// has no binding.
+	ResolveLibraryDir(ctx context.Context, seriesID int64) (string, error)
 }
 
 // SeriesFiler can file a single series on demand.

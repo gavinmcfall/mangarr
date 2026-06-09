@@ -2179,6 +2179,10 @@ type fakePreviewer struct {
 	// one is returned by PreviewOne; oneErr overrides it when non-nil.
 	one    poller.PreviewEntry
 	oneErr error
+	// resolvedLibDir is returned by ResolveLibraryDir; resolveLibDirErr
+	// overrides the return error when non-nil.
+	resolvedLibDir    string
+	resolveLibDirErr  error
 }
 
 func (f *fakePreviewer) Preview(ctx context.Context) ([]poller.PreviewEntry, error) {
@@ -2187,6 +2191,10 @@ func (f *fakePreviewer) Preview(ctx context.Context) ([]poller.PreviewEntry, err
 
 func (f *fakePreviewer) PreviewOne(ctx context.Context, seriesID int64) (poller.PreviewEntry, error) {
 	return f.one, f.oneErr
+}
+
+func (f *fakePreviewer) ResolveLibraryDir(ctx context.Context, seriesID int64) (string, error) {
+	return f.resolvedLibDir, f.resolveLibDirErr
 }
 
 // newPreviewHandler builds a Handler wired with a fakePreviewer seeded with

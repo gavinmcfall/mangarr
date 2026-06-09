@@ -131,15 +131,16 @@ func (h *Handler) apiSeriesRestore(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveSeriesDestDir returns the Kavita library directory for a series by
-// taking the parent dir of the first chapter plan from the previewer, or ""
-// if the series cannot be planned (unmatched/misconfigured/no previewer).
+// asking the previewer to resolve it from the persisted binding — no source
+// folder read, so it works for orphaned series whose source has vanished.
+// Returns "" when the previewer is not wired or the series has no binding.
 func (h *Handler) resolveSeriesDestDir(ctx context.Context, id int64) string {
 	if h.previewer == nil {
 		return ""
 	}
-	pe, err := h.previewer.PreviewOne(ctx, id)
-	if err != nil || len(pe.ChapterPlans) == 0 {
+	dir, err := h.previewer.ResolveLibraryDir(ctx, id)
+	if err != nil {
 		return ""
 	}
-	return filepath.Dir(pe.ChapterPlans[0].DstPath)
+	return dir
 }
