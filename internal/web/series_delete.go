@@ -2,10 +2,14 @@ package web
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
@@ -16,10 +20,25 @@ import (
 // then removes the now-empty dirs. recyclebin.Send rejects directories, so we
 // recurse and send files individually. A dir that does not exist is a no-op
 // (common: the source was already deleted upstream).
+//
+// Partial-failure contract: if a bin.Send fails mid-walk, the files already
+// binned stay binned and the dir is NOT removed — the conservative outcome,
+// since the operator can recover a half-binned dir but not a wrongly-removed
+// one. Symlinked subdirs are visited as non-dir entries, so Send errors out on
+// them rather than following the link — nothing outside the tree is moved.
 func binSeriesFiles(bin *recyclebin.Bin, dirs []string, now time.Time) error {
 	for _, dir := range dirs {
 		if dir == "" {
 			continue
+		}
+		// Catastrophe backstop: refuse to act on a shallow path so a corrupt DB
+		// row or a scanner bug that sets SourcePath to a root can't nuke a huge
+		// subtree. Defense-in-depth only — both dirs are trustworthy by
+		// construction (scanner-derived source under configured roots;
+		// plan-derived dest) — so a simple segment-count check suffices.
+		clean := filepath.Clean(dir)
+		if clean == "/" || clean == "." || len(strings.Split(strings.Trim(clean, string(filepath.Separator)), string(filepath.Separator))) < 3 {
+			return fmt.Errorf("binSeriesFiles: refusing to act on shallow path %q", dir)
 		}
 		info, err := os.Stat(dir)
 		if os.IsNotExist(err) {
@@ -59,12 +78,16 @@ func binSeriesFiles(bin *recyclebin.Bin, dirs []string, now time.Time) error {
 func (h *Handler) apiSeriesDelete(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
+		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
 	series, err := h.store.GetSeriesByID(id)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		http.Redirect(w, r, "/series", http.StatusSeeOther) // already gone
+		return
+	}
+	if err != nil {
+		http.Error(w, "get series: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if r.FormValue("delete_files") == "true" {
@@ -93,12 +116,18 @@ func (h *Handler) apiSeriesDelete(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiSeriesRestore(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
+		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	_ = h.store.SetSeriesMissingSince(id, nil)
-	_ = h.store.SetSeriesStatus(id, model.StatusPending)
-	http.Redirect(w, r, "/series", http.StatusSeeOther)
+	if err := h.store.SetSeriesMissingSince(id, nil); err != nil {
+		http.Error(w, "restore (clear missing_since): "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := h.store.SetSeriesStatus(id, model.StatusPending); err != nil {
+		http.Error(w, "restore (set status): "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/series/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
 // resolveSeriesDestDir returns the Kavita library directory for a series by

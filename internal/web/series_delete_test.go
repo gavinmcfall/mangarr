@@ -40,3 +40,12 @@ func TestBinSeriesFilesMissingDirIsNoOp(t *testing.T) {
 		t.Errorf("missing dir should be a no-op, got %v", err)
 	}
 }
+
+func TestBinSeriesFilesRefusesShallowPath(t *testing.T) {
+	bin := &recyclebin.Bin{Root: t.TempDir(), Retention: time.Hour}
+	for _, p := range []string{"/", "/home", "."} {
+		if err := binSeriesFiles(bin, []string{p}, time.Unix(1700000000, 0)); err == nil {
+			t.Errorf("expected error for shallow path %q, got nil", p)
+		}
+	}
+}
