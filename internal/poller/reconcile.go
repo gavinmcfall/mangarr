@@ -69,6 +69,8 @@ func reconcile(st reconcileStore, onDisk map[string]bool, cfg reconcileConfig, n
 	}
 
 	res := reconcileResult{}
+	// Writes are best-effort: a failed Set* leaves the series in its prior
+	// state; the next reconcile tick re-evaluates it.
 	for _, l := range lite {
 		present := onDisk[l.SourcePath]
 		switch {
@@ -91,6 +93,9 @@ func reconcile(st reconcileStore, onDisk map[string]bool, cfg reconcileConfig, n
 			// Grace period exhausted — soft-delete by flipping to orphaned.
 			_ = st.SetSeriesStatus(l.ID, model.StatusOrphaned)
 			res.Flagged++
+		default:
+			// Absent, non-orphaned, still within the grace window — no action
+			// this tick; the clock is already running.
 		}
 	}
 	return res

@@ -68,9 +68,24 @@ func TestReconcileGraceExceededFlipsOrphaned(t *testing.T) {
 	old := time.Unix(1000, 0).UTC()
 	f := newFake([]store.SeriesLite{{ID: 1, SourcePath: "/d/A", Status: model.StatusPending, MissingSince: &old}})
 	// onDisk is non-empty (scanner ran successfully) but /d/A is absent.
-	reconcile(f, map[string]bool{"/d/SENTINEL": true}, cfg(), old.Add(11*time.Minute))
+	res := reconcile(f, map[string]bool{"/d/SENTINEL": true}, cfg(), old.Add(11*time.Minute))
 	if f.statusSet[1] != model.StatusOrphaned {
 		t.Errorf("status = %v, want orphaned", f.statusSet[1])
+	}
+	if res.Flagged != 1 {
+		t.Errorf("Flagged = %d, want 1", res.Flagged)
+	}
+}
+
+func TestReconcileWithinGraceDoesNothing(t *testing.T) {
+	start := time.Unix(1000, 0).UTC()
+	f := newFake([]store.SeriesLite{
+		{ID: 1, SourcePath: "/d/A", Status: model.StatusPending, MissingSince: &start},
+	})
+	// 5 minutes in, grace is 10 — must be a no-op
+	reconcile(f, map[string]bool{"/d/SENTINEL": true}, cfg(), start.Add(5*time.Minute))
+	if len(f.missingSet) != 0 || len(f.statusSet) != 0 {
+		t.Error("series within grace window must not be touched")
 	}
 }
 
