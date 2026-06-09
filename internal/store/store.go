@@ -292,6 +292,15 @@ func applySettingsDefaults(s *model.Settings) {
 	if s.ActivityRetentionDays == 0 {
 		s.ActivityRetentionDays = 90
 	}
+	if s.ReconcileGraceMinutes == 0 {
+		s.ReconcileGraceMinutes = 10
+	}
+	if s.ReconcileMassVanishPercent == 0 {
+		s.ReconcileMassVanishPercent = 25
+	}
+	if s.ReconcileMassVanishMinCount == 0 {
+		s.ReconcileMassVanishMinCount = 5
+	}
 }
 
 // ListUnmatched returns all series with StatusUnmatched.

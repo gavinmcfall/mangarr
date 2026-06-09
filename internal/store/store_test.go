@@ -653,6 +653,20 @@ func TestGetSettingsAppliesNewBulkDefaults(t *testing.T) {
 // TestSaveSettingsRoundTripsNewBulkFields verifies that explicit non-default
 // values for the stalled-job detector knobs survive a SaveSettings /
 // GetSettings round-trip without loss.
+func TestApplySettingsDefaultsReconcile(t *testing.T) {
+	var s model.Settings
+	applySettingsDefaults(&s)
+	if s.ReconcileGraceMinutes != 10 {
+		t.Errorf("grace = %d, want 10", s.ReconcileGraceMinutes)
+	}
+	if s.ReconcileMassVanishPercent != 25 {
+		t.Errorf("percent = %d, want 25", s.ReconcileMassVanishPercent)
+	}
+	if s.ReconcileMassVanishMinCount != 5 {
+		t.Errorf("minCount = %d, want 5", s.ReconcileMassVanishMinCount)
+	}
+}
+
 func TestSaveSettingsRoundTripsNewBulkFields(t *testing.T) {
 	s := newTestStore(t)
 	want := model.Settings{
