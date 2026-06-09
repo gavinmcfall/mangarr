@@ -34,6 +34,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
+	"github.com/gavinmcfall/mangarr/internal/store"
 	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
 
@@ -101,6 +102,7 @@ type Cache interface {
 // it can enrich Scanner output (which builds fresh in-memory rows from
 // disk and so never carries DB-side fields like ManualBindingID) with the
 // persisted manual-override the operator set via the Series-page UI.
+// The reconcile pass also writes through this interface.
 type SeriesStore interface {
 	GetSeriesByID(id int64) (model.Series, error)
 	GetSeriesByPath(path string) (model.Series, error)
@@ -110,6 +112,11 @@ type SeriesStore interface {
 	// clears it on Unmatched. /series reads this to render the visible
 	// pill without bouncing to the activity log.
 	SetSeriesCurrentBinding(id int64, bindingID *int64) error
+	// The three methods below are used by the reconcile pass to implement
+	// the floor+grace soft-delete lifecycle.
+	ListSeriesLite() ([]store.SeriesLite, error)
+	SetSeriesMissingSince(id int64, t *time.Time) error
+	SetSeriesStatus(id int64, st model.Status) error
 }
 
 // Planner returns a dry-run plan for a series without touching the
@@ -204,6 +211,26 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	series, err := p.Scanner.ScanAll()
 	if err != nil {
 		return err
+	}
+
+	// Reconcile: soft-delete series whose source folder vanished. Guarded by
+	// the sanity floor; skipped entirely when Store/Settings are nil.
+	if p.Store != nil && p.Settings != nil {
+		if set, serr := p.Settings.GetSettings(); serr == nil {
+			onDisk := make(map[string]bool, len(series))
+			for _, s := range series {
+				onDisk[s.SourcePath] = true
+			}
+			rcfg := reconcileConfig{
+				Grace:              time.Duration(set.ReconcileGraceMinutes) * time.Minute,
+				MassVanishPercent:  set.ReconcileMassVanishPercent,
+				MassVanishMinCount: set.ReconcileMassVanishMinCount,
+			}
+			if res := reconcile(p.Store, onDisk, rcfg, time.Now()); res.Aborted {
+				p.recordActivityVia("", model.ActionError, "reconcile",
+					"reconcile aborted: mass series disappearance — likely a mount or Suwayomi failure, not real deletions")
+			}
+		}
 	}
 
 	// Load bindings once per tick and build a lookup map. Cheap (handful

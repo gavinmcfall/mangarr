@@ -16,6 +16,7 @@ import (
 	"github.com/gavinmcfall/mangarr/internal/filer"
 	"github.com/gavinmcfall/mangarr/internal/model"
 	"github.com/gavinmcfall/mangarr/internal/recyclebin"
+	"github.com/gavinmcfall/mangarr/internal/store"
 	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
 
@@ -809,6 +810,14 @@ func (f *fakeSeriesStore) SetSeriesCurrentBinding(id int64, bindingID *int64) er
 	}
 	return nil
 }
+
+// Stub implementations for the reconcile-pass methods added to SeriesStore.
+// FileOne tests don't exercise the reconcile path, so these are no-ops.
+func (f *fakeSeriesStore) ListSeriesLite() ([]store.SeriesLite, error) {
+	return nil, nil
+}
+func (f *fakeSeriesStore) SetSeriesMissingSince(_ int64, _ *time.Time) error { return nil }
+func (f *fakeSeriesStore) SetSeriesStatus(_ int64, _ model.Status) error     { return nil }
 
 // fakeCache satisfies poller.Cache for FileOne tests.
 type fakeCache struct {
