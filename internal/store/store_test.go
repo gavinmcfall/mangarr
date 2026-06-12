@@ -774,3 +774,27 @@ func TestDeleteSeriesRemovesRowAndTags(t *testing.T) {
 		t.Errorf("second delete should be no-op, got %v", err)
 	}
 }
+
+func TestSetAndGetSeriesByMangaID(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.UpsertSeries(model.Series{
+		Title: "Z", SourcePath: "/d/Z", Source: "suwayomi",
+		Type: model.TypeUnknown, Status: model.StatusPending,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSeriesMangaID(id, 4242); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetSeriesByMangaID(4242)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != id || got.Title != "Z" {
+		t.Fatalf("got id=%d title=%q, want id=%d Z", got.ID, got.Title, id)
+	}
+	if _, err := s.GetSeriesByMangaID(999999); err == nil {
+		t.Error("want error for unknown manga id, got nil")
+	}
+}

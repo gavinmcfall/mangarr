@@ -378,16 +378,18 @@ func (s *Store) DeleteBulkJob(id int64) error {
 // a Suwayomi roundtrip.
 func (s *Store) SaveLibraryCacheEntry(in model.LibraryCacheEntry) error {
 	_, err := s.db.Exec(`
-INSERT INTO library_cache (manga_id, title, source_id, source_name, total_chapters, downloaded)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO library_cache (manga_id, title, source_id, source_name, total_chapters, downloaded, dud_count, filed_count)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(manga_id) DO UPDATE SET
 	title          = excluded.title,
 	source_id      = excluded.source_id,
 	source_name    = excluded.source_name,
 	total_chapters = excluded.total_chapters,
 	downloaded     = excluded.downloaded,
+	dud_count      = excluded.dud_count,
+	filed_count    = excluded.filed_count,
 	refreshed_at   = strftime('%s','now')`,
-		in.MangaID, in.Title, in.SourceID, in.SourceName, in.TotalChapters, in.Downloaded,
+		in.MangaID, in.Title, in.SourceID, in.SourceName, in.TotalChapters, in.Downloaded, in.DudCount, in.FiledCount,
 	)
 	if err != nil {
 		return fmt.Errorf("SaveLibraryCacheEntry: %w", err)
@@ -400,9 +402,9 @@ ON CONFLICT(manga_id) DO UPDATE SET
 func (s *Store) GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry, error) {
 	var e model.LibraryCacheEntry
 	var refreshedAt int64
-	err := s.db.QueryRow(`SELECT manga_id, title, source_id, source_name, total_chapters, downloaded, refreshed_at
+	err := s.db.QueryRow(`SELECT manga_id, title, source_id, source_name, total_chapters, downloaded, dud_count, filed_count, refreshed_at
 		FROM library_cache WHERE manga_id = ?`, mangaID,
-	).Scan(&e.MangaID, &e.Title, &e.SourceID, &e.SourceName, &e.TotalChapters, &e.Downloaded, &refreshedAt)
+	).Scan(&e.MangaID, &e.Title, &e.SourceID, &e.SourceName, &e.TotalChapters, &e.Downloaded, &e.DudCount, &e.FiledCount, &refreshedAt)
 	if err != nil {
 		return e, fmt.Errorf("GetLibraryCacheEntry: %w", err)
 	}
@@ -413,7 +415,7 @@ func (s *Store) GetLibraryCacheEntry(mangaID int64) (model.LibraryCacheEntry, er
 // ListLibraryCacheEntries returns all rows, ordered by title COLLATE
 // NOCASE for stable, case-insensitive UI rendering on the Library page.
 func (s *Store) ListLibraryCacheEntries() ([]model.LibraryCacheEntry, error) {
-	rows, err := s.db.Query(`SELECT manga_id, title, source_id, source_name, total_chapters, downloaded, refreshed_at
+	rows, err := s.db.Query(`SELECT manga_id, title, source_id, source_name, total_chapters, downloaded, dud_count, filed_count, refreshed_at
 		FROM library_cache ORDER BY title COLLATE NOCASE ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("ListLibraryCacheEntries: %w", err)
@@ -423,7 +425,7 @@ func (s *Store) ListLibraryCacheEntries() ([]model.LibraryCacheEntry, error) {
 	for rows.Next() {
 		var e model.LibraryCacheEntry
 		var refreshedAt int64
-		if err := rows.Scan(&e.MangaID, &e.Title, &e.SourceID, &e.SourceName, &e.TotalChapters, &e.Downloaded, &refreshedAt); err != nil {
+		if err := rows.Scan(&e.MangaID, &e.Title, &e.SourceID, &e.SourceName, &e.TotalChapters, &e.Downloaded, &e.DudCount, &e.FiledCount, &refreshedAt); err != nil {
 			return nil, fmt.Errorf("ListLibraryCacheEntries scan: %w", err)
 		}
 		e.RefreshedAt = time.Unix(refreshedAt, 0).UTC()

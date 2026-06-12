@@ -408,3 +408,34 @@ func TestMarkBulkJobChapterErroredSkipsAlreadyDone(t *testing.T) {
 		t.Errorf("ErroredChapters should stay 0, got %d", job.ErroredChapters)
 	}
 }
+
+func TestLibraryCacheEntryCarriesDudAndFiled(t *testing.T) {
+	s := newTestStore(t)
+	in := model.LibraryCacheEntry{
+		MangaID: 5, Title: "X", SourceID: "1", SourceName: "src",
+		TotalChapters: 100, Downloaded: 90, DudCount: 2, FiledCount: 88,
+	}
+	if err := s.SaveLibraryCacheEntry(in); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetLibraryCacheEntry(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DudCount != 2 || got.FiledCount != 88 {
+		t.Fatalf("dud=%d filed=%d, want 2/88", got.DudCount, got.FiledCount)
+	}
+	list, _ := s.ListLibraryCacheEntries()
+	var found bool
+	for _, e := range list {
+		if e.MangaID == 5 {
+			found = true
+			if e.DudCount != 2 || e.FiledCount != 88 {
+				t.Errorf("list dud=%d filed=%d, want 2/88", e.DudCount, e.FiledCount)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("entry not in ListLibraryCacheEntries")
+	}
+}

@@ -69,5 +69,10 @@ type LibraryCacheEntry struct {
 	SourceName    string
 	TotalChapters int
 	Downloaded    int
-	RefreshedAt   time.Time
+	// DudCount is the number of not-downloaded chapters Suwayomi reports with
+	// pageCount==0 (permanent source duds). FiledCount is the number of .cbz
+	// files present in the series' Kavita library dir. Both written at Sync.
+	DudCount   int
+	FiledCount int
+	RefreshedAt time.Time
 }
