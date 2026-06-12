@@ -116,9 +116,16 @@
   (function () {
     var bar = document.getElementById('mangarr-progress');
     var inflight = 0;
+    var showTimer = null;
 
-    // Periodic background pollers (e.g. the 5s downloads badge) must not
-    // flicker the bar or raise toasts. They carry hx-trigger="... every Ns".
+    // Only requests still in flight after this delay show the bar. Fast
+    // background polls (e.g. the 5s downloads badge, ~instant in-cluster)
+    // complete well under it, so they can never flash the bar — no fragile
+    // per-request attribute matching required.
+    var BAR_DELAY_MS = 150;
+
+    // Background pollers carry hx-trigger="... every Ns". Used only to suppress
+    // error toasts for them — a flaky badge poll shouldn't nag the user.
     function isBackgroundPoll(elt) {
       if (!elt || !elt.getAttribute) return false;
       return (elt.getAttribute('hx-trigger') || '').indexOf('every') !== -1;
@@ -130,17 +137,27 @@
       bar.classList.remove('is-loading');
       window.setTimeout(function () { bar.classList.remove('is-done'); }, 350);
     }
+    function scheduleBar() {
+      if (showTimer === null && bar && !bar.classList.contains('is-loading')) {
+        showTimer = window.setTimeout(function () { showTimer = null; showBar(); }, BAR_DELAY_MS);
+      }
+    }
+    function settleBar() {
+      if (inflight !== 0) return;
+      if (showTimer !== null) { window.clearTimeout(showTimer); showTimer = null; }
+      // Only run the finish animation if the bar actually became visible —
+      // otherwise endBar's is-done flash would itself be the flicker.
+      if (bar && bar.classList.contains('is-loading')) endBar();
+    }
 
-    document.body.addEventListener('htmx:beforeRequest', function (evt) {
-      if (isBackgroundPoll(evt.detail.elt)) return;
+    document.body.addEventListener('htmx:beforeRequest', function () {
       inflight++;
-      showBar();
+      scheduleBar();
     });
     document.body.addEventListener('htmx:afterRequest', function (evt) {
-      if (isBackgroundPoll(evt.detail.elt)) return;
       inflight = Math.max(0, inflight - 1);
-      if (inflight === 0) endBar();
-      if (evt.detail && evt.detail.successful === false) {
+      settleBar();
+      if (evt.detail && evt.detail.successful === false && !isBackgroundPoll(evt.detail.elt)) {
         var xhr = evt.detail.xhr;
         var msg = (xhr && xhr.responseText && xhr.responseText.length > 0 && xhr.responseText.length < 140)
           ? xhr.responseText.trim() : 'Something went wrong';
