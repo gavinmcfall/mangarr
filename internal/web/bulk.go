@@ -150,6 +150,7 @@ func (h *Handler) apiLibrarySync(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	setFlash(w, "success", fmt.Sprintf("Synced %d series", len(entries)))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_, _ = fmt.Fprintf(w, `{"synced":%d}`, len(entries))
 }
@@ -259,6 +260,7 @@ func (h *Handler) apiBulkCreate(w http.ResponseWriter, r *http.Request) {
 	confirm := r.FormValue("confirm") == "1"
 
 	var previews []bulkPreview
+	queued := 0 // chapters actually queued on the confirm path (for the toast)
 
 	for _, mIDStr := range mangaIDStrs {
 		mID, err := strconv.ParseInt(mIDStr, 10, 64)
@@ -319,10 +321,12 @@ func (h *Handler) apiBulkCreate(w http.ResponseWriter, r *http.Request) {
 				Detail:      fmt.Sprintf("queued %d chapters", len(missingIDs)),
 				Via:         "bulk:" + entry.SourceName,
 			})
+			queued += len(missingIDs)
 		}
 	}
 
 	if confirm {
+		setFlash(w, "success", fmt.Sprintf("Queued %d chapters", queued))
 		// HTMX-driven submits land here from the confirmation modal's
 		// "Queue downloads" button. With hx-swap="none" a plain 303
 		// would be intercepted but never produce a navigation, leaving

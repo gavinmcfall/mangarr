@@ -90,7 +90,8 @@ func (h *Handler) apiSeriesDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "get series: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if r.FormValue("delete_files") == "true" {
+	deletedFiles := r.FormValue("delete_files") == "true"
+	if deletedFiles {
 		if h.recycleBin == nil {
 			http.Error(w, "recycle bin not configured", http.StatusServiceUnavailable)
 			return
@@ -107,6 +108,11 @@ func (h *Handler) apiSeriesDelete(w http.ResponseWriter, r *http.Request) {
 	if err := h.store.DeleteSeries(id); err != nil {
 		http.Error(w, "delete series: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if deletedFiles {
+		setFlash(w, "success", "Removed series + files")
+	} else {
+		setFlash(w, "success", "Removed series")
 	}
 	http.Redirect(w, r, "/series", http.StatusSeeOther)
 }
@@ -127,6 +133,7 @@ func (h *Handler) apiSeriesRestore(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "restore (set status): "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	setFlash(w, "success", "Restored series")
 	http.Redirect(w, r, "/series/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
