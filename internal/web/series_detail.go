@@ -154,6 +154,7 @@ func (h *Handler) apiSeriesRefile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	setFlash(w, "success", "Re-filed series")
 	http.Redirect(w, r, "/series/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
