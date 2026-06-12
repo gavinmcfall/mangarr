@@ -195,7 +195,7 @@ func (s *Store) SetSeriesMangaID(id, mangaID int64) error {
 }
 
 // GetSeriesByMangaID returns the series linked to a Suwayomi manga id. Returns
-// (wrapped) sql.ErrNoRows when no series carries that manga_id.
+// sql.ErrNoRows when no series carries that manga_id (detect with errors.Is).
 func (s *Store) GetSeriesByMangaID(mangaID int64) (model.Series, error) {
 	var m model.Series
 	var typ, status string

@@ -794,7 +794,7 @@ func TestSetAndGetSeriesByMangaID(t *testing.T) {
 	if got.ID != id || got.Title != "Z" {
 		t.Fatalf("got id=%d title=%q, want id=%d Z", got.ID, got.Title, id)
 	}
-	if _, err := s.GetSeriesByMangaID(999999); err == nil {
-		t.Error("want error for unknown manga id, got nil")
+	if _, err := s.GetSeriesByMangaID(999999); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("want sql.ErrNoRows for unknown manga id, got %v", err)
 	}
 }
