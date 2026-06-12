@@ -682,6 +682,26 @@ func TestGetChapterMetaNotInQueue(t *testing.T) {
 	}
 }
 
+// ----- ListChapters pageCount -----
+
+func TestListChaptersParsesPageCount(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"data":{"chapters":{"nodes":[
+			{"id":1,"name":"Ch 1","chapterNumber":1,"isDownloaded":true,"sourceOrder":0,"pageCount":18},
+			{"id":2,"name":"Ch 2","chapterNumber":2,"isDownloaded":false,"sourceOrder":1,"pageCount":0}
+		]}}}`)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, NoAuth{})
+	chs, err := c.ListChapters(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chs) != 2 || chs[0].PageCount != 18 || chs[1].PageCount != 0 {
+		t.Fatalf("page counts = %v, want [18 0]", []int{chs[0].PageCount, chs[1].PageCount})
+	}
+}
+
 // TestGetChapterMetaQueueWithMultipleChapters verifies that when the queue
 // contains several entries only the one matching the requested chapterID
 // contributes to QueueState and Tries. The other entries must be ignored.
