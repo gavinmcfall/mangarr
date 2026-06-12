@@ -146,6 +146,10 @@ type Store interface {
 	// GetSeriesByID returns the series with the given primary key.
 	// Returns sql.ErrNoRows (wrapped) when the series does not exist.
 	GetSeriesByID(id int64) (model.Series, error)
+	// GetSeriesByMangaID returns the series linked to a Suwayomi manga ID.
+	// Returns sql.ErrNoRows (wrapped) when no series matches — used by
+	// apiLibrarySync to resolve the Kavita destination dir for FiledCount.
+	GetSeriesByMangaID(mangaID int64) (model.Series, error)
 	// DeleteSeries removes the series row and its tags. Idempotent.
 	DeleteSeries(id int64) error
 	// SetSeriesMissingSince sets (or clears, when t is nil) series.missing_since.

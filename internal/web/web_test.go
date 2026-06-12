@@ -55,6 +55,11 @@ type fakeStore struct {
 	// so tests can assert ordering matches the slice the Suwayomi client
 	// returned.
 	savedLibraryEntries []model.LibraryCacheEntry
+	// Task 5: last-write map keyed by MangaID so tests can check the final
+	// saved state of each entry without scanning the append-only slice.
+	savedLibraryCache map[int64]model.LibraryCacheEntry
+	// Task 5: series seeded by manga ID for GetSeriesByMangaID lookups.
+	seriesByMangaID map[int64]model.Series
 	// callOrder records the sequence of Store mutations for tests that
 	// pin ordering invariants (e.g. "ClearBulkJobBackoff must run BEFORE
 	// UpdateBulkJobStatus on resume from errored"). Append-only.
@@ -261,15 +266,31 @@ func (f *fakeStore) ListLibraryCacheEntries() ([]model.LibraryCacheEntry, error)
 }
 
 // SaveLibraryCacheEntry appends the entry to savedLibraryEntries (for
-// ordering assertions) and upserts into libraryCache (so subsequent
-// GetLibraryCacheEntry calls see the write).
+// ordering assertions), upserts into libraryCache (so subsequent
+// GetLibraryCacheEntry calls see the write), and records the latest
+// entry in savedLibraryCache keyed by MangaID (for per-manga assertions).
 func (f *fakeStore) SaveLibraryCacheEntry(in model.LibraryCacheEntry) error {
 	f.savedLibraryEntries = append(f.savedLibraryEntries, in)
 	if f.libraryCache == nil {
 		f.libraryCache = map[int64]model.LibraryCacheEntry{}
 	}
 	f.libraryCache[in.MangaID] = in
+	if f.savedLibraryCache == nil {
+		f.savedLibraryCache = map[int64]model.LibraryCacheEntry{}
+	}
+	f.savedLibraryCache[in.MangaID] = in
 	return nil
+}
+
+// GetSeriesByMangaID returns a series seeded in seriesByMangaID, or
+// sql.ErrNoRows when no match — mirrors the real store's behaviour.
+func (f *fakeStore) GetSeriesByMangaID(mangaID int64) (model.Series, error) {
+	if f.seriesByMangaID != nil {
+		if s, ok := f.seriesByMangaID[mangaID]; ok {
+			return s, nil
+		}
+	}
+	return model.Series{}, sql.ErrNoRows
 }
 
 // --- Plan A T14: pause/resume/delete mutation surfaces ---
@@ -470,6 +491,9 @@ type fakeSuwayomi struct {
 	inFlight map[string]int
 	// chapterMetas is keyed by chapterID; returned by GetChapterMeta.
 	chapterMetas map[int64]suwayomi.ChapterMeta
+	// Task 5: per-chapter page count for dud detection. Looked up by
+	// chapter ID; missing entries leave PageCount at its zero value.
+	chapterPages map[int64]int
 }
 
 func (f *fakeSuwayomi) ListChapters(_ context.Context, mangaID int64) ([]suwayomi.Chapter, error) {
@@ -478,7 +502,7 @@ func (f *fakeSuwayomi) ListChapters(_ context.Context, mangaID int64) ([]suwayom
 	}
 	out := make([]suwayomi.Chapter, 0)
 	for _, id := range f.chaptersForManga[mangaID] {
-		out = append(out, suwayomi.Chapter{ID: id, IsDownloaded: f.chaptersDownloaded[id]})
+		out = append(out, suwayomi.Chapter{ID: id, IsDownloaded: f.chaptersDownloaded[id], PageCount: f.chapterPages[id]})
 	}
 	return out, nil
 }
