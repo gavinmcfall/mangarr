@@ -146,6 +146,10 @@ type Store interface {
 	// GetSeriesByID returns the series with the given primary key.
 	// Returns sql.ErrNoRows (wrapped) when the series does not exist.
 	GetSeriesByID(id int64) (model.Series, error)
+	// GetSeriesByMangaID returns the series linked to a Suwayomi manga ID.
+	// Returns sql.ErrNoRows (wrapped) when no series matches — used by
+	// apiLibrarySync to resolve the Kavita destination dir for FiledCount.
+	GetSeriesByMangaID(mangaID int64) (model.Series, error)
 	// DeleteSeries removes the series row and its tags. Idempotent.
 	DeleteSeries(id int64) error
 	// SetSeriesMissingSince sets (or clears, when t is nil) series.missing_since.
@@ -1245,9 +1249,10 @@ type libraryPageData struct {
 	Entries            []libraryRow
 }
 
-// libraryRow is the view-model for one row on /library. JobStatus is
-// the most-recent bulk_job status for this manga (running/paused/
-// completed/errored), or empty when no job exists yet.
+// libraryRow is the view-model for one row on /library. Status is derived
+// from real completeness via honestLibraryStatus — not a stale bulk-job
+// state. DudCount/Undownloaded/FilingGap drive breakdown sub-lines under
+// the Missing cell. SeriesID backs the inline Re-run filer button.
 type libraryRow struct {
 	MangaID       int64
 	Title         string
@@ -1257,7 +1262,11 @@ type libraryRow struct {
 	Downloaded    int
 	Missing       int
 	Cached        bool // false when TotalChapters==0 — counts not yet populated
-	JobStatus     string
+	DudCount      int
+	Undownloaded  int
+	FilingGap     int
+	Status        string
+	SeriesID      int64
 }
 
 func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
@@ -1280,11 +1289,46 @@ func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Hoist the per-manga job lookup: load all jobs once and index the newest
+	// per manga, so the row loop is a map read instead of an O(N) scan each.
+	allJobs, _ := h.store.ListBulkJobs("")
+	newestJob := map[int64]*model.BulkJob{}
+	for i := range allJobs {
+		j := &allJobs[i]
+		if cur, ok := newestJob[j.MangaID]; !ok || j.CreatedAt.After(cur.CreatedAt) {
+			newestJob[j.MangaID] = j
+		}
+	}
+
 	rows := make([]libraryRow, 0, len(entries))
 	for _, e := range entries {
 		missing := e.TotalChapters - e.Downloaded
 		if missing < 0 {
 			missing = 0
+		}
+		undownloaded := missing - e.DudCount
+		if undownloaded < 0 {
+			undownloaded = 0
+		}
+		filingGap := e.Downloaded - e.FiledCount
+		if filingGap < 0 {
+			filingGap = 0
+		}
+		job := newestJob[e.MangaID] // nil when this manga has no job yet
+		var jobStatus model.BulkJobStatus
+		done, jt := 0, 0
+		if job != nil {
+			jobStatus = job.Status
+			done, jt = job.CompletedChapters, job.TotalChapters
+		}
+		var seriesID int64
+		if s, err := h.store.GetSeriesByMangaID(e.MangaID); err == nil {
+			seriesID = s.ID
+		}
+		status := honestLibraryStatus(e.TotalChapters, e.Downloaded, e.DudCount, jobStatus, done, jt)
+		if e.TotalChapters == 0 {
+			// Not yet synced — counts are "—", so don't claim "Complete".
+			status = "—"
 		}
 		rows = append(rows, libraryRow{
 			MangaID:       e.MangaID,
@@ -1294,8 +1338,12 @@ func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
 			TotalChapters: e.TotalChapters,
 			Downloaded:    e.Downloaded,
 			Missing:       missing,
+			DudCount:      e.DudCount,
+			Undownloaded:  undownloaded,
+			FilingGap:     filingGap,
 			Cached:        e.TotalChapters > 0,
-			JobStatus:     h.mostRecentBulkJobStatus(e.MangaID),
+			Status:        status,
+			SeriesID:      seriesID,
 		})
 	}
 	h.render(w, "library.html", libraryPageData{
@@ -1305,28 +1353,39 @@ func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// mostRecentBulkJobStatus returns the status of the most-recent bulk_job
-// row for this manga (by created_at), or "" when no job exists. Cheap —
-// the typical operator has at most a handful of jobs per manga, and
-// ListBulkJobs("") is already O(N) over the bulk_jobs table.
-func (h *Handler) mostRecentBulkJobStatus(mangaID int64) string {
-	jobs, err := h.store.ListBulkJobs("")
-	if err != nil {
-		return ""
-	}
-	var newest *model.BulkJob
-	for i := range jobs {
-		if jobs[i].MangaID != mangaID {
-			continue
+// honestLibraryStatus renders the Library "Status" cell from real completeness,
+// not a stale bulk-job state. Job state wins by precedence (running → errored →
+// paused); otherwise the status is derived from counts: undownloaded chapters →
+// Incomplete; only-dud gap → Complete with an "unavailable" note; nothing
+// missing → Complete.
+func honestLibraryStatus(total, downloaded, dud int, jobStatus model.BulkJobStatus, jobDone, jobTotal int) string {
+	switch jobStatus {
+	case model.BulkJobRunning:
+		if jobTotal > 0 {
+			return fmt.Sprintf("Downloading · %d/%d", jobDone, jobTotal)
 		}
-		if newest == nil || jobs[i].CreatedAt.After(newest.CreatedAt) {
-			newest = &jobs[i]
-		}
+		return "Downloading"
+	case model.BulkJobErrored:
+		return "Download errored"
+	case model.BulkJobPaused:
+		return "Paused"
 	}
-	if newest == nil {
-		return ""
+	missing := total - downloaded
+	if missing < 0 {
+		missing = 0
 	}
-	return string(newest.Status)
+	undownloaded := missing - dud
+	if undownloaded < 0 {
+		undownloaded = 0
+	}
+	switch {
+	case undownloaded > 0:
+		return fmt.Sprintf("Incomplete · %d to download", undownloaded)
+	case missing > 0:
+		return fmt.Sprintf("Complete · %d unavailable", missing)
+	default:
+		return "Complete"
+	}
 }
 
 // downloadsPageData drives the /downloads dashboard. Page is consumed by

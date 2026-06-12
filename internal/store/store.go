@@ -187,6 +187,36 @@ func (s *Store) GetSeriesByID(id int64) (model.Series, error) {
 	return m, err
 }
 
+// SetSeriesMangaID records the Suwayomi manga id this disk series corresponds
+// to (the durable join key for the Library page). 0 is a valid "unknown".
+func (s *Store) SetSeriesMangaID(id, mangaID int64) error {
+	_, err := s.db.Exec(`UPDATE series SET manga_id=? WHERE id=?`, mangaID, id)
+	return err
+}
+
+// GetSeriesByMangaID returns the series linked to a Suwayomi manga id. Returns
+// sql.ErrNoRows when no series carries that manga_id (detect with errors.Is).
+func (s *Store) GetSeriesByMangaID(mangaID int64) (model.Series, error) {
+	var m model.Series
+	var typ, status string
+	var manual, current sql.NullInt64
+	err := s.db.QueryRow(`SELECT id,title,source_path,source,type,status,chapter_count,manual_binding_id,current_binding_id FROM series WHERE manga_id=?`, mangaID).
+		Scan(&m.ID, &m.Title, &m.SourcePath, &m.Source, &typ, &status, &m.ChapterCount, &manual, &current)
+	if err != nil {
+		return m, err
+	}
+	m.Type, m.Status = model.ContentType(typ), model.Status(status)
+	if manual.Valid {
+		v := manual.Int64
+		m.ManualBindingID = &v
+	}
+	if current.Valid {
+		v := current.Int64
+		m.CurrentBindingID = &v
+	}
+	return m, nil
+}
+
 func (s *Store) ListSeries() ([]model.Series, error) {
 	rows, err := s.db.Query(`SELECT id,title,source_path,source,type,status,chapter_count,manual_binding_id,current_binding_id FROM series ORDER BY title`)
 	if err != nil {

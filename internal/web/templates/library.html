@@ -60,7 +60,7 @@
           data-total="{{.TotalChapters}}"
           data-downloaded="{{.Downloaded}}"
           data-missing="{{.Missing}}"
-          data-status="{{.JobStatus}}">
+          data-status="{{.Status}}">
         <td>
           <input type="checkbox" class="library-row-checkbox"
                  name="manga_id" value="{{.MangaID}}">
@@ -70,13 +70,27 @@
         {{if .Cached}}
         <td class="td-dim td-right">{{.TotalChapters}}</td>
         <td class="td-dim td-right">{{.Downloaded}}</td>
-        <td class="td-right">{{if gt .Missing 0}}<span class="pill pill-missing">{{.Missing}}</span>{{else}}<span class="td-dim">0</span>{{end}}</td>
+        <td class="td-right">
+          {{if gt .Missing 0}}<span class="pill pill-missing">{{.Missing}}</span>{{else}}<span class="td-dim">0</span>{{end}}
+          {{if gt .DudCount 0}}<div class="lib-sub lib-sub-muted">{{.DudCount}} dud at source (permanent)</div>{{end}}
+          {{if gt .Undownloaded 0}}<div class="lib-sub">{{.Undownloaded}} not downloaded</div>{{end}}
+          {{if gt .FilingGap 0}}
+          <div class="lib-sub lib-sub-warn">
+            &#9888; {{.FilingGap}} downloaded, not filed to Kavita
+            {{if gt .SeriesID 0}}
+            <button type="button" class="btn btn-sm btn-secondary"
+                    hx-post="/api/series/{{.SeriesID}}/refile" hx-swap="none"
+                    hx-on::after-request="if(event.detail.successful){window.location.reload();}">Re-run filer</button>
+            {{end}}
+          </div>
+          {{end}}
+        </td>
         {{else}}
         <td class="td-dim td-right">—</td>
         <td class="td-dim td-right">—</td>
         <td class="td-dim td-right">—</td>
         {{end}}
-        <td class="td-dim">{{.JobStatus}}</td>
+        <td class="td-dim">{{.Status}}</td>
       </tr>
       {{end}}
     </tbody>

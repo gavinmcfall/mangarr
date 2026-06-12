@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
+	"github.com/gavinmcfall/mangarr/internal/suwayomi"
 )
 
 // TestAPIBulkJobsReturnsJSONList covers the happy-path GET: every seeded
@@ -497,5 +498,37 @@ func TestAPIDownloadsResumeHXRequestReturnsRunningRow(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("row fragment missing %q. Body:\n%s", want, body)
 		}
+	}
+}
+
+// TestLibrarySyncComputesDudCount pins that POST /api/library/sync counts
+// not-downloaded chapters with PageCount==0 as duds and records the result
+// in DudCount on the saved cache entry.
+func TestLibrarySyncComputesDudCount(t *testing.T) {
+	h, st, sw, _ := newTestHandlerFull()
+	sw.libraryEntries = []suwayomi.Manga{{ID: 5, Title: "X", Source: "src", SourceID: "1"}}
+	sw.chaptersForManga = map[int64][]int64{5: {10, 11, 12}}
+	sw.chaptersDownloaded = map[int64]bool{10: true}
+	sw.chapterPages = map[int64]int{11: 0, 12: 5} // 11 dud (0 pages), 12 undownloaded
+	req := httptest.NewRequest(http.MethodPost, "/api/library/sync", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sync = %d, want 200", rec.Code)
+	}
+	got, ok := st.savedLibraryCache[5]
+	if !ok {
+		t.Fatal("manga 5 not saved to cache")
+	}
+	if got.DudCount != 1 {
+		t.Errorf("dud_count = %d, want 1 (chapter 11)", got.DudCount)
+	}
+	if got.Downloaded != 1 {
+		t.Errorf("downloaded = %d, want 1", got.Downloaded)
+	}
+	// No previewer in the test handler → dest dir unresolvable → filed_count
+	// must fall back to downloaded, never a spurious 0 (no false filing gap).
+	if got.FiledCount != 1 {
+		t.Errorf("filed_count = %d, want 1 (fallback to downloaded)", got.FiledCount)
 	}
 }

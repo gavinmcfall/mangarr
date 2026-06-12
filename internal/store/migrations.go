@@ -28,6 +28,7 @@ var migrations = []migration{
 	{7, "series-current-binding", migrateSeriesCurrentBinding},
 	{8, "series-tags", migrateSeriesTags},
 	{9, "series-missing-since", migrateSeriesMissingSince},
+	{10, "honest-counts-columns", migrateHonestCountsColumns},
 }
 
 // migrateSeriesManualBinding adds the manual_binding_id column to the
@@ -172,6 +173,61 @@ func migrateSeriesMissingSince(tx *sql.Tx) error {
 		return fmt.Errorf("add series.missing_since: %w", err)
 	}
 	return nil
+}
+
+// migrateHonestCountsColumns adds the columns the Library "honest counts"
+// feature needs: library_cache.dud_count and .filed_count (computed at Sync),
+// and series.manga_id (the durable Suwayomi-manga join key, populated by the
+// poller). Idempotent under the schema_versions gate; tolerant of a missing
+// table (migration-only test fixtures) and a duplicate column (manual replay).
+func migrateHonestCountsColumns(tx *sql.Tx) error {
+	add := func(table, col, decl string) error {
+		var t string
+		err := tx.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&t)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("probe %s: %w", table, err)
+		}
+		var c string
+		err = tx.QueryRow(`SELECT name FROM pragma_table_info('`+table+`') WHERE name=?`, col).Scan(&c)
+		if err == nil {
+			return nil
+		}
+		if err != sql.ErrNoRows {
+			return fmt.Errorf("probe %s.%s: %w", table, col, err)
+		}
+		if _, err := tx.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + decl); err != nil {
+			return fmt.Errorf("add %s.%s: %w", table, col, err)
+		}
+		return nil
+	}
+	if err := add("library_cache", "dud_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := add("library_cache", "filed_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := add("series", "manga_id", "INTEGER"); err != nil {
+		return err
+	}
+	// Index the new join column — but only when the series table exists
+	// (migration-only fixtures omit it). add() above already no-ops on a
+	// missing table; mirror that tolerance here so CREATE INDEX doesn't
+	// fail against a fixture DB without series.
+	var name string
+	switch err := tx.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='series'`,
+	).Scan(&name); err {
+	case sql.ErrNoRows:
+		return nil
+	case nil:
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_series_manga_id ON series(manga_id)`)
+		return err
+	default:
+		return fmt.Errorf("probe series for index: %w", err)
+	}
 }
 
 func loadAppliedVersions(db *sql.DB) (map[int]bool, error) {

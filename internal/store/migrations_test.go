@@ -477,6 +477,25 @@ func TestMigration9AddsMissingSinceColumn(t *testing.T) {
 	}
 }
 
+func TestMigration10AddsHonestCountsColumns(t *testing.T) {
+	s := newTestStore(t)
+	db := s.DB()
+	cases := []struct{ table, col string }{
+		{"library_cache", "dud_count"},
+		{"library_cache", "filed_count"},
+		{"series", "manga_id"},
+	}
+	for _, c := range cases {
+		var name string
+		err := db.QueryRow(
+			`SELECT name FROM pragma_table_info('`+c.table+`') WHERE name=?`, c.col,
+		).Scan(&name)
+		if err != nil {
+			t.Errorf("%s.%s missing after migrations: %v", c.table, c.col, err)
+		}
+	}
+}
+
 func TestMigration2CorruptSettingsJSONReturnsErrorWithoutRecording(t *testing.T) {
 	// Corrupt JSON in the settings row → migration fails → schema_versions
 	// does NOT record version 2 → next boot retries (idempotent recovery).

@@ -306,6 +306,7 @@ type Chapter struct {
 	Name          string
 	ChapterNumber float64
 	IsDownloaded  bool
+	PageCount     int
 	SourceOrder   int
 }
 
@@ -487,6 +488,7 @@ func (c *Client) ListChapters(ctx context.Context, mangaID int64) ([]Chapter, er
 				name
 				chapterNumber
 				isDownloaded
+				pageCount
 				sourceOrder
 			}
 		}
@@ -511,6 +513,7 @@ func (c *Client) ListChapters(ctx context.Context, mangaID int64) ([]Chapter, er
 					Name          string  `json:"name"`
 					ChapterNumber float64 `json:"chapterNumber"`
 					IsDownloaded  bool    `json:"isDownloaded"`
+					PageCount     int     `json:"pageCount"`
 					SourceOrder   int     `json:"sourceOrder"`
 				} `json:"nodes"`
 			} `json:"chapters"`
@@ -533,6 +536,7 @@ func (c *Client) ListChapters(ctx context.Context, mangaID int64) ([]Chapter, er
 			Name:          n.Name,
 			ChapterNumber: n.ChapterNumber,
 			IsDownloaded:  n.IsDownloaded,
+			PageCount:     n.PageCount,
 			SourceOrder:   n.SourceOrder,
 		}
 	}

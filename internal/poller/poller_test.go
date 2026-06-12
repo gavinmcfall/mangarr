@@ -748,12 +748,16 @@ func TestPreviewDoesNotCallKavita(t *testing.T) {
 // Task 11 will migrate FileOne to v2 bindings; until then these tests cover
 // the existing surface.
 
-// fakeSeriesStore satisfies poller.SeriesStore for FileOne tests.
+// fakeSeriesStore satisfies poller.SeriesStore for FileOne and RunOnce tests.
 type fakeSeriesStore struct {
 	series       map[int64]model.Series
 	setTypeCalls []struct {
 		id int64
 		ct model.ContentType
+	}
+	setMangaIDCalls []struct {
+		id      int64
+		mangaID int64
 	}
 	getErr error
 	setErr error
@@ -818,6 +822,16 @@ func (f *fakeSeriesStore) ListSeriesLite() ([]store.SeriesLite, error) {
 }
 func (f *fakeSeriesStore) SetSeriesMissingSince(_ int64, _ *time.Time) error { return nil }
 func (f *fakeSeriesStore) SetSeriesStatus(_ int64, _ model.Status) error     { return nil }
+
+// SetSeriesMangaID records calls so the Library-Map persistence test can
+// assert the right (seriesID, mangaID) pair was stored.
+func (f *fakeSeriesStore) SetSeriesMangaID(id, mangaID int64) error {
+	f.setMangaIDCalls = append(f.setMangaIDCalls, struct {
+		id      int64
+		mangaID int64
+	}{id, mangaID})
+	return nil
+}
 
 // fakeCache satisfies poller.Cache for FileOne tests.
 type fakeCache struct {
@@ -1084,6 +1098,66 @@ func TestRunOnceSkipsRefreshWhenSuwayomiURLEmpty(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&factoryCalls); got != 0 {
 		t.Errorf("factory must not be called when SuwayomiBaseURL is empty, got %d", got)
+	}
+}
+
+// TestRunOncePersistsMangaID: when a series' SourcePath hits the Suwayomi
+// path cache, RunOnce must call Store.SetSeriesMangaID with the cached
+// manga ID. The cache is pre-populated via Refresh before the poller runs;
+// SuwayomiClient and Settings are left nil so refreshSuwayomiCache is a
+// no-op and the pre-populated snapshot is preserved for the tick.
+func TestRunOncePersistsMangaID(t *testing.T) {
+	// Stub Suwayomi server: one manga — id=77, title="Title", source="Src (EN)".
+	// Refresh will derive DownloadDir = "Src (EN)/Title", so joined with
+	// download root "/dl" the cache key is "/dl/Src (EN)/Title".
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"mangas":{"nodes":[` +
+			`{"id":77,"title":"Title","sourceId":"100",` +
+			`"source":{"displayName":"Src (EN)"},"categories":{"nodes":[]}}` +
+			`]}}}`))
+	}))
+	defer srv.Close()
+
+	cache := suwayomi.NewPathCache()
+	if err := cache.Refresh(context.Background(), suwayomi.New(srv.URL, suwayomi.NoAuth{}), []string{"/dl"}); err != nil {
+		t.Fatalf("cache.Refresh: %v", err)
+	}
+
+	// Verify the path we expect to look up is actually in the cache.
+	if _, ok := cache.Lookup("/dl/Src (EN)/Title"); !ok {
+		t.Fatalf("pre-condition: cache miss for /dl/Src (EN)/Title; size=%d", cache.Size())
+	}
+
+	st := &fakeSeriesStore{series: map[int64]model.Series{}}
+	rec := &recorder{}
+
+	p := &Poller{
+		Scanner:    fakeScanner{out: []model.Series{{Title: "Title", SourcePath: "/dl/Src (EN)/Title"}}},
+		Classifier: &fakeClassifier{decision: model.Decision{BindingID: 0, Via: classifier.ViaUnmatched}},
+		Filer:      rec,
+		Kavita:     rec,
+		Unmatched:  rec,
+		Activity:   rec,
+		Bindings:   &fakeBindingStore{},
+		Store:      st,
+		// Pre-populated cache; SuwayomiClient/Settings nil → refreshSuwayomiCache is a no-op.
+		SuwayomiCache: cache,
+	}
+
+	if err := p.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if len(st.setMangaIDCalls) != 1 {
+		t.Fatalf("SetSeriesMangaID: want 1 call, got %d (calls=%+v)", len(st.setMangaIDCalls), st.setMangaIDCalls)
+	}
+	if got := st.setMangaIDCalls[0].mangaID; got != 77 {
+		t.Errorf("SetSeriesMangaID mangaID: want 77, got %d", got)
+	}
+	// UpsertSeries returns int64(len(r.upserted)) — first call → 1.
+	if got := st.setMangaIDCalls[0].id; got != 1 {
+		t.Errorf("SetSeriesMangaID series id: want 1, got %d", got)
 	}
 }
 
