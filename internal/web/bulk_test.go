@@ -526,9 +526,4 @@ func TestLibrarySyncComputesDudCount(t *testing.T) {
 	if got.Downloaded != 1 {
 		t.Errorf("downloaded = %d, want 1", got.Downloaded)
 	}
-	// No previewer in the test handler → dest dir unresolvable → filed_count
-	// must fall back to downloaded, never a spurious 0 (no false filing gap).
-	if got.FiledCount != 1 {
-		t.Errorf("filed_count = %d, want 1 (fallback to downloaded)", got.FiledCount)
-	}
 }

@@ -6,11 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -116,7 +113,6 @@ func (h *Handler) apiLibrarySync(w http.ResponseWriter, r *http.Request) {
 		total      int
 		downloaded int
 		dud        int
-		filed      int
 	}
 	counts := make([]countResult, len(entries))
 	sem := make(chan struct{}, 8)
@@ -136,15 +132,7 @@ func (h *Handler) apiLibrarySync(w http.ResponseWriter, r *http.Request) {
 				if c.IsDownloaded {
 					cr.downloaded++
 				} else if c.PageCount == 0 {
-					cr.dud++
-				}
-			}
-			cr.filed = cr.downloaded // fallback: no false gap on a series miss
-			if series, err := h.store.GetSeriesByMangaID(mangaID); err == nil {
-				if dir := h.resolveSeriesDestDir(r.Context(), series.ID); dir != "" {
-					if n, ok := countCBZ(dir); ok {
-						cr.filed = n
-					}
+					cr.dud++ // not downloaded AND zero pages = permanent source dud
 				}
 			}
 			counts[i] = cr
@@ -161,7 +149,6 @@ func (h *Handler) apiLibrarySync(w http.ResponseWriter, r *http.Request) {
 			TotalChapters: counts[i].total,
 			Downloaded:    counts[i].downloaded,
 			DudCount:      counts[i].dud,
-			FiledCount:    counts[i].filed,
 		}); err != nil {
 			http.Error(w, "library_cache write: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -170,23 +157,6 @@ func (h *Handler) apiLibrarySync(w http.ResponseWriter, r *http.Request) {
 	setFlash(w, "success", fmt.Sprintf("Synced %d series", len(entries)))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_, _ = fmt.Fprintf(w, `{"synced":%d}`, len(entries))
-}
-
-// countCBZ returns the number of .cbz files directly under dir. The bool is
-// false when dir cannot be read (caller keeps its fallback rather than
-// recording a spurious 0).
-func countCBZ(dir string) (int, bool) {
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return 0, false
-	}
-	n := 0
-	for _, e := range ents {
-		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".cbz") {
-			n++
-		}
-	}
-	return n, true
 }
 
 // apiLibraryRowMissing handles GET /api/library/{mangaId}/missing.
