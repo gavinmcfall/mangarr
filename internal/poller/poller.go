@@ -117,6 +117,9 @@ type SeriesStore interface {
 	ListSeriesLite() ([]store.SeriesLite, error)
 	SetSeriesMissingSince(id int64, t *time.Time) error
 	SetSeriesStatus(id int64, st model.Status) error
+	// SetSeriesMangaID persists the Suwayomi manga id for a series so the
+	// Library page can join against it as a durable key.
+	SetSeriesMangaID(id, mangaID int64) error
 }
 
 // Planner returns a dry-run plan for a series without touching the
@@ -275,6 +278,15 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		// on poll-driven routing — without this, an operator-set override
 		// would only take effect after a UI-triggered FileOne.
 		s.ManualBindingID = p.resolveManualOverride(s)
+
+		// Persist the Suwayomi manga id for this series (durable join key for
+		// the Library page). Best-effort: a cache miss leaves manga_id NULL and
+		// self-heals on a later tick once the path cache covers it.
+		if p.Store != nil && p.SuwayomiCache != nil {
+			if ce, ok := p.SuwayomiCache.Lookup(s.SourcePath); ok && ce.MangaID != 0 {
+				_ = p.Store.SetSeriesMangaID(sid, ce.MangaID)
+			}
+		}
 
 		d, classifyErr := p.Classifier.Classify(ctx, classifier.ScanItem{
 			Title:           s.Title,
