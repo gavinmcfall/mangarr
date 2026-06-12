@@ -2996,17 +2996,19 @@ func TestLibraryStatusIsHonest(t *testing.T) {
 	cases := []struct {
 		name                          string
 		total, downloaded, dud, filed int
-		runningJob                    bool
+		jobStatus                     model.BulkJobStatus
 		wantStatus                    string
 	}{
-		{"complete", 100, 100, 0, 100, false, "Complete"},
-		{"all-dud", 181, 180, 1, 180, false, "Complete · 1 unavailable"},
-		{"undownloaded", 1184, 1, 0, 1, false, "Incomplete · 1183 to download"},
-		{"running", 100, 40, 0, 40, true, "Downloading"},
+		{"complete", 100, 100, 0, 100, "", "Complete"},
+		{"all-dud", 181, 180, 1, 180, "", "Complete · 1 unavailable"},
+		{"undownloaded", 1184, 1, 0, 1, "", "Incomplete · 1183 to download"},
+		{"running", 100, 40, 0, 40, model.BulkJobRunning, "Downloading"},
+		{"errored", 181, 180, 1, 180, model.BulkJobErrored, "Download errored"},
+		{"paused", 100, 40, 0, 40, model.BulkJobPaused, "Paused"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := honestLibraryStatus(c.total, c.downloaded, c.dud, c.runningJob, 40, 100)
+			got := honestLibraryStatus(c.total, c.downloaded, c.dud, c.jobStatus, 40, 100)
 			if c.name == "running" {
 				if !strings.HasPrefix(got, "Downloading") {
 					t.Errorf("status = %q, want prefix Downloading", got)

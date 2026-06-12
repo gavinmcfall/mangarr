@@ -209,7 +209,25 @@ func migrateHonestCountsColumns(tx *sql.Tx) error {
 	if err := add("library_cache", "filed_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	return add("series", "manga_id", "INTEGER")
+	if err := add("series", "manga_id", "INTEGER"); err != nil {
+		return err
+	}
+	// Index the new join column — but only when the series table exists
+	// (migration-only fixtures omit it). add() above already no-ops on a
+	// missing table; mirror that tolerance here so CREATE INDEX doesn't
+	// fail against a fixture DB without series.
+	var name string
+	switch err := tx.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='series'`,
+	).Scan(&name); err {
+	case sql.ErrNoRows:
+		return nil
+	case nil:
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_series_manga_id ON series(manga_id)`)
+		return err
+	default:
+		return fmt.Errorf("probe series for index: %w", err)
+	}
 }
 
 func loadAppliedVersions(db *sql.DB) (map[int]bool, error) {
