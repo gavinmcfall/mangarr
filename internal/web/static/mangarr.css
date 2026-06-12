@@ -1198,3 +1198,7 @@ button.htmx-request::after,
 .toast-success { background: #3ea75e; }
 .toast-error { background: #b3433a; }
 .toast-out { opacity: 0; transform: translateY(8px); }
+
+.lib-sub { font-size: 0.8rem; margin-top: 2px; }
+.lib-sub-muted { color: #8a8d93; }
+.lib-sub-warn { color: #d8a657; }

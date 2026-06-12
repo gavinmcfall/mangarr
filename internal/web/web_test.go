@@ -2991,3 +2991,29 @@ func TestSeriesPageManualBindingAtDeletedIDRendersFallback(t *testing.T) {
 			excerpt(body, "Orphaned", 400))
 	}
 }
+
+func TestLibraryStatusIsHonest(t *testing.T) {
+	cases := []struct {
+		name                          string
+		total, downloaded, dud, filed int
+		runningJob                    bool
+		wantStatus                    string
+	}{
+		{"complete", 100, 100, 0, 100, false, "Complete"},
+		{"all-dud", 181, 180, 1, 180, false, "Complete · 1 unavailable"},
+		{"undownloaded", 1184, 1, 0, 1, false, "Incomplete · 1183 to download"},
+		{"running", 100, 40, 0, 40, true, "Downloading"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := honestLibraryStatus(c.total, c.downloaded, c.dud, c.runningJob, 40, 100)
+			if c.name == "running" {
+				if !strings.HasPrefix(got, "Downloading") {
+					t.Errorf("status = %q, want prefix Downloading", got)
+				}
+			} else if got != c.wantStatus {
+				t.Errorf("status = %q, want %q", got, c.wantStatus)
+			}
+		})
+	}
+}

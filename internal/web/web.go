@@ -1249,9 +1249,10 @@ type libraryPageData struct {
 	Entries            []libraryRow
 }
 
-// libraryRow is the view-model for one row on /library. JobStatus is
-// the most-recent bulk_job status for this manga (running/paused/
-// completed/errored), or empty when no job exists yet.
+// libraryRow is the view-model for one row on /library. Status is derived
+// from real completeness via honestLibraryStatus — not a stale bulk-job
+// state. DudCount/Undownloaded/FilingGap drive breakdown sub-lines under
+// the Missing cell. SeriesID backs the inline Re-run filer button.
 type libraryRow struct {
 	MangaID       int64
 	Title         string
@@ -1261,7 +1262,11 @@ type libraryRow struct {
 	Downloaded    int
 	Missing       int
 	Cached        bool // false when TotalChapters==0 — counts not yet populated
-	JobStatus     string
+	DudCount      int
+	Undownloaded  int
+	FilingGap     int
+	Status        string
+	SeriesID      int64
 }
 
 func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
@@ -1290,6 +1295,24 @@ func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
 		if missing < 0 {
 			missing = 0
 		}
+		undownloaded := missing - e.DudCount
+		if undownloaded < 0 {
+			undownloaded = 0
+		}
+		filingGap := e.Downloaded - e.FiledCount
+		if filingGap < 0 {
+			filingGap = 0
+		}
+		job := h.mostRecentBulkJob(e.MangaID)
+		running := job != nil && job.Status == model.BulkJobRunning
+		done, jt := 0, 0
+		if job != nil {
+			done, jt = job.CompletedChapters, job.TotalChapters
+		}
+		var seriesID int64
+		if s, err := h.store.GetSeriesByMangaID(e.MangaID); err == nil {
+			seriesID = s.ID
+		}
 		rows = append(rows, libraryRow{
 			MangaID:       e.MangaID,
 			Title:         e.Title,
@@ -1298,8 +1321,12 @@ func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
 			TotalChapters: e.TotalChapters,
 			Downloaded:    e.Downloaded,
 			Missing:       missing,
+			DudCount:      e.DudCount,
+			Undownloaded:  undownloaded,
+			FilingGap:     filingGap,
 			Cached:        e.TotalChapters > 0,
-			JobStatus:     h.mostRecentBulkJobStatus(e.MangaID),
+			Status:        honestLibraryStatus(e.TotalChapters, e.Downloaded, e.DudCount, running, done, jt),
+			SeriesID:      seriesID,
 		})
 	}
 	h.render(w, "library.html", libraryPageData{
@@ -1309,14 +1336,13 @@ func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// mostRecentBulkJobStatus returns the status of the most-recent bulk_job
-// row for this manga (by created_at), or "" when no job exists. Cheap —
-// the typical operator has at most a handful of jobs per manga, and
-// ListBulkJobs("") is already O(N) over the bulk_jobs table.
-func (h *Handler) mostRecentBulkJobStatus(mangaID int64) string {
+// mostRecentBulkJob returns the most-recent bulk_job row for this manga
+// (by created_at), or nil when no job exists. Used by pageLibrary to derive
+// running state and progress for honestLibraryStatus.
+func (h *Handler) mostRecentBulkJob(mangaID int64) *model.BulkJob {
 	jobs, err := h.store.ListBulkJobs("")
 	if err != nil {
-		return ""
+		return nil
 	}
 	var newest *model.BulkJob
 	for i := range jobs {
@@ -1327,10 +1353,36 @@ func (h *Handler) mostRecentBulkJobStatus(mangaID int64) string {
 			newest = &jobs[i]
 		}
 	}
-	if newest == nil {
-		return ""
+	return newest
+}
+
+// honestLibraryStatus renders the Library "Status" cell from real completeness,
+// not a stale bulk-job state. A running job wins (with progress); otherwise the
+// status is derived: undownloaded chapters → Incomplete; only-dud gap → Complete
+// with an "unavailable" note; nothing missing → Complete.
+func honestLibraryStatus(total, downloaded, dud int, jobRunning bool, jobDone, jobTotal int) string {
+	if jobRunning {
+		if jobTotal > 0 {
+			return fmt.Sprintf("Downloading · %d/%d", jobDone, jobTotal)
+		}
+		return "Downloading"
 	}
-	return string(newest.Status)
+	missing := total - downloaded
+	if missing < 0 {
+		missing = 0
+	}
+	undownloaded := missing - dud
+	if undownloaded < 0 {
+		undownloaded = 0
+	}
+	switch {
+	case undownloaded > 0:
+		return fmt.Sprintf("Incomplete · %d to download", undownloaded)
+	case missing > 0:
+		return fmt.Sprintf("Complete · %d unavailable", missing)
+	default:
+		return "Complete"
+	}
 }
 
 // downloadsPageData drives the /downloads dashboard. Page is consumed by
