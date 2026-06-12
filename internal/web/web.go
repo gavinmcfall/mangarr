@@ -1251,8 +1251,8 @@ type libraryPageData struct {
 
 // libraryRow is the view-model for one row on /library. Status is derived
 // from real completeness via honestLibraryStatus — not a stale bulk-job
-// state. DudCount/Undownloaded/FilingGap drive breakdown sub-lines under
-// the Missing cell. SeriesID backs the inline Re-run filer button.
+// state. DudCount/Undownloaded drive the breakdown sub-lines under the
+// Missing cell.
 type libraryRow struct {
 	MangaID       int64
 	Title         string
@@ -1264,9 +1264,7 @@ type libraryRow struct {
 	Cached        bool // false when TotalChapters==0 — counts not yet populated
 	DudCount      int
 	Undownloaded  int
-	FilingGap     int
 	Status        string
-	SeriesID      int64
 }
 
 func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
@@ -1310,20 +1308,12 @@ func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
 		if undownloaded < 0 {
 			undownloaded = 0
 		}
-		filingGap := e.Downloaded - e.FiledCount
-		if filingGap < 0 {
-			filingGap = 0
-		}
 		job := newestJob[e.MangaID] // nil when this manga has no job yet
 		var jobStatus model.BulkJobStatus
 		done, jt := 0, 0
 		if job != nil {
 			jobStatus = job.Status
 			done, jt = job.CompletedChapters, job.TotalChapters
-		}
-		var seriesID int64
-		if s, err := h.store.GetSeriesByMangaID(e.MangaID); err == nil {
-			seriesID = s.ID
 		}
 		status := honestLibraryStatus(e.TotalChapters, e.Downloaded, e.DudCount, jobStatus, done, jt)
 		if e.TotalChapters == 0 {
@@ -1340,10 +1330,8 @@ func (h *Handler) pageLibrary(w http.ResponseWriter, r *http.Request) {
 			Missing:       missing,
 			DudCount:      e.DudCount,
 			Undownloaded:  undownloaded,
-			FilingGap:     filingGap,
 			Cached:        e.TotalChapters > 0,
 			Status:        status,
-			SeriesID:      seriesID,
 		})
 	}
 	h.render(w, "library.html", libraryPageData{
