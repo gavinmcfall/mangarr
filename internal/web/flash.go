@@ -15,13 +15,15 @@ import (
 const flashCookie = "mangarr_flash"
 
 // setFlash queues a one-shot toast for the next page load. kind is "success"
-// or "error"; msg is the human message. The value is "kind|msg", URL-encoded.
-// MaxAge is short so a stale flash never re-appears on an unrelated later load.
-// Must be called before the response status/body is written.
+// or "error"; msg is the human message. The value is "kind|msg", encoded with
+// url.PathEscape so spaces become %20 — NOT url.QueryEscape, whose "+"-for-space
+// encoding the browser's decodeURIComponent does not reverse (it would render
+// "Synced+3+series"). MaxAge is short so a stale flash never re-appears on an
+// unrelated later load. Must be called before the response status/body is written.
 func setFlash(w http.ResponseWriter, kind, msg string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     flashCookie,
-		Value:    url.QueryEscape(kind + "|" + msg),
+		Value:    url.PathEscape(kind + "|" + msg),
 		Path:     "/",
 		MaxAge:   10,
 		SameSite: http.SameSiteLaxMode,

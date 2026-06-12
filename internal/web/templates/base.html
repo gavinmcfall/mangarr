@@ -147,6 +147,12 @@
         window.mangarrToast(msg, 'error');
       }
     });
+    // Network-level failure (connection refused/abort/timeout): htmx:afterRequest
+    // fires with successful=undefined, so the branch above won't catch it.
+    document.body.addEventListener('htmx:sendError', function (evt) {
+      if (isBackgroundPoll(evt.detail.elt)) return;
+      window.mangarrToast('Network error — could not reach the server', 'error');
+    });
 
     window.mangarrToast = function (message, kind) {
       var c = document.getElementById('toast-container');
@@ -154,7 +160,10 @@
       var t = document.createElement('div');
       t.className = 'toast toast-' + (kind === 'error' ? 'error' : 'success');
       t.textContent = message;
-      t.addEventListener('click', function () { t.remove(); });
+      t.addEventListener('click', function () {
+        t.classList.add('toast-out');
+        window.setTimeout(function () { if (t.parentNode) t.remove(); }, 300);
+      });
       c.appendChild(t);
       window.setTimeout(function () { t.classList.add('toast-out'); }, 3600);
       window.setTimeout(function () { if (t.parentNode) t.remove(); }, 4000);
