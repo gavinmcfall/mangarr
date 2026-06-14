@@ -526,6 +526,22 @@ func parsePageTemplates() map[string]*template.Template {
 // helper that takes interface{} was previously broken because non-nil slices
 // boxed in interface{} fall to a default-return-false branch, silently
 // hiding the empty-state.
+// realSource derives the human-facing source of a series from its on-disk
+// path. Every Suwayomi-managed series is labelled Source="suwayomi" (the
+// integration), which isn't useful when several series come from different
+// scanlation sites. The layout is <root>/mangas/<Source> (EN)/<Title>, so the
+// series folder's PARENT dir is the actual source (e.g. "Asura Scans (EN)").
+// Falls back to the integration name when the path has no usable source
+// segment (e.g. a flat layout directly under a download root).
+func realSource(sourcePath, integration string) string {
+	parent := filepath.Base(filepath.Dir(sourcePath))
+	switch parent {
+	case "", ".", string(filepath.Separator), "mangas", "downloads", "Downloads":
+		return integration
+	}
+	return parent
+}
+
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
 		// lower converts any string-like value to lowercase.
@@ -541,6 +557,10 @@ func templateFuncs() template.FuncMap {
 		// baseName returns the final path element of a path. Used by the
 		// series detail page to show source file names compactly.
 		"baseName": baseName,
+		// realSource shows the actual scanlation source (e.g. "Asura Scans
+		// (EN)") derived from the on-disk path, instead of the generic
+		// integration label ("suwayomi"). Used in the /series Source column.
+		"realSource": realSource,
 		// formatInterval renders a task IntervalMs as a short string, e.g. "15m".
 		"formatInterval": formatInterval,
 		// kavitaLibInList returns true if the given ID exists in the Library slice.

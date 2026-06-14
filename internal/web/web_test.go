@@ -3019,3 +3019,20 @@ func TestLibraryStatusIsHonest(t *testing.T) {
 		})
 	}
 }
+
+func TestRealSource(t *testing.T) {
+	cases := []struct {
+		path, integration, want string
+	}{
+		{"/media/Downloads/suwayomi/mangas/Asura Scans (EN)/Return of the Disaster-Class Hero", "suwayomi", "Asura Scans (EN)"},
+		{"/media/Downloads/suwayomi/mangas/FlameScans.lol (EN)/Kill The Hero", "suwayomi", "FlameScans.lol (EN)"},
+		{"/media/Downloads/suwayomi/mangas/Weeb Central (EN)/Berserk", "suwayomi", "Weeb Central (EN)"},
+		{"/media/Downloads/suwayomi/mangas/Solo", "suwayomi", "suwayomi"}, // directly under mangas/ → fall back
+		{"", "suwayomi", "suwayomi"},
+	}
+	for _, c := range cases {
+		if got := realSource(c.path, c.integration); got != c.want {
+			t.Errorf("realSource(%q,%q) = %q, want %q", c.path, c.integration, got, c.want)
+		}
+	}
+}
