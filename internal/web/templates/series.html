@@ -62,7 +62,7 @@
       {{else}}<span class="pill pill-unknown">unknown</span>
       {{end}}
     </td>
-    <td class="td-dim">{{.Source}}</td>
+    <td class="td-dim">{{realSource .SourcePath .Source}}</td>
     <td class="td-dim">{{.ChapterCount}}</td>
     <td><span class="pill pill-{{.Status | lower}}">{{.Status}}</span></td>
     <td class="series-tags-cell">
