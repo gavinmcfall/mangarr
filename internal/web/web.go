@@ -125,6 +125,9 @@ type Store interface {
 	// title — drives the /library page (Plan B T5). *store.Store satisfies
 	// this from Plan A T5.
 	ListLibraryCacheEntries() ([]model.LibraryCacheEntry, error)
+	// PruneLibraryCacheExcept deletes cache rows whose manga_id is not in keep,
+	// so a Sync drops mangas removed from the Suwayomi library.
+	PruneLibraryCacheExcept(keep []int64) (int, error)
 
 	// --- Bulk-download mutation surfaces (Plan A T14) ---
 	// UpdateBulkJobStatus flips a job's status — used by the

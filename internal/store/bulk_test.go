@@ -439,3 +439,30 @@ func TestLibraryCacheEntryCarriesDudAndFiled(t *testing.T) {
 		t.Fatal("entry not in ListLibraryCacheEntries")
 	}
 }
+
+func TestPruneLibraryCacheExcept(t *testing.T) {
+	s := newTestStore(t)
+	for _, id := range []int64{1, 2, 3} {
+		if err := s.SaveLibraryCacheEntry(model.LibraryCacheEntry{MangaID: id, Title: "M", SourceID: "x", SourceName: "y", TotalChapters: 1, Downloaded: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.PruneLibraryCacheExcept([]int64{2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("pruned %d, want 2", n)
+	}
+	list, _ := s.ListLibraryCacheEntries()
+	if len(list) != 1 || list[0].MangaID != 2 {
+		t.Errorf("kept = %v, want only manga 2", list)
+	}
+	// Empty keep must be a no-op — never wipe the whole cache.
+	if n, _ := s.PruneLibraryCacheExcept(nil); n != 0 {
+		t.Errorf("empty keep pruned %d, want 0", n)
+	}
+	if list, _ := s.ListLibraryCacheEntries(); len(list) != 1 {
+		t.Errorf("empty keep changed cache: %v", list)
+	}
+}
