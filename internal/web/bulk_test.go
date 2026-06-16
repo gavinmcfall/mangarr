@@ -527,3 +527,22 @@ func TestLibrarySyncComputesDudCount(t *testing.T) {
 		t.Errorf("downloaded = %d, want 1", got.Downloaded)
 	}
 }
+
+func TestLibrarySyncPrunesRemovedManga(t *testing.T) {
+	h, st, sw, _ := newTestHandlerFull()
+	// A stale cache row for a manga no longer in the Suwayomi library.
+	st.libraryCache = map[int64]model.LibraryCacheEntry{999: {MangaID: 999, Title: "Gone", SourceName: "Old"}}
+	sw.libraryEntries = []suwayomi.Manga{{ID: 10, Title: "Keeper", Source: "src", SourceID: "1"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/library/sync", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sync = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := st.libraryCache[999]; ok {
+		t.Error("stale manga 999 not pruned from cache after sync")
+	}
+	if _, ok := st.libraryCache[10]; !ok {
+		t.Error("kept manga 10 missing from cache after sync")
+	}
+}
