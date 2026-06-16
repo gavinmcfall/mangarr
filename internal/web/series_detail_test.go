@@ -111,7 +111,7 @@ func TestSeriesDetailPageRendersChapterRows(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"Berserk", "Manga", "/lib/Manga", "Berserk - Ch.001.cbz", "Re-run filer"} {
+	for _, want := range []string{"Berserk", "Manga", "/lib/Manga", "Berserk - Ch.001.cbz", "Re-run filer", "Delete series", `action="/api/series/7/delete"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q", want)
 		}
