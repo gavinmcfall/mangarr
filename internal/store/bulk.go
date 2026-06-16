@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/model"
@@ -432,6 +433,30 @@ func (s *Store) ListLibraryCacheEntries() ([]model.LibraryCacheEntry, error) {
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// PruneLibraryCacheExcept deletes every library_cache row whose manga_id is NOT
+// in keep, and returns how many rows it removed. Called after a Sync upserts
+// the current Suwayomi-library set so mangas removed from the Suwayomi library
+// stop appearing on /library (the cache, like the old series scan, otherwise
+// only ever grows). Callers MUST NOT pass an empty keep — that would wipe the
+// whole cache; Sync guards on a non-empty library fetch.
+func (s *Store) PruneLibraryCacheExcept(keep []int64) (int, error) {
+	if len(keep) == 0 {
+		return 0, nil
+	}
+	ph := make([]string, len(keep))
+	args := make([]any, len(keep))
+	for i, id := range keep {
+		ph[i] = "?"
+		args[i] = id
+	}
+	res, err := s.db.Exec(`DELETE FROM library_cache WHERE manga_id NOT IN (`+strings.Join(ph, ",")+`)`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("PruneLibraryCacheExcept: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 func scanBulkJob(sc sqlScanner) (model.BulkJob, error) {

@@ -154,6 +154,19 @@ func (h *Handler) apiLibrarySync(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Prune cache rows for mangas no longer in the Suwayomi library (e.g. a
+	// series removed/replaced). Guarded on a non-empty fetch so a transient
+	// empty library response can't wipe the whole cache.
+	if len(entries) > 0 {
+		keep := make([]int64, len(entries))
+		for i, e := range entries {
+			keep[i] = e.ID
+		}
+		if _, err := h.store.PruneLibraryCacheExcept(keep); err != nil {
+			http.Error(w, "library_cache prune: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	setFlash(w, "success", fmt.Sprintf("Synced %d series", len(entries)))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_, _ = fmt.Fprintf(w, `{"synced":%d}`, len(entries))

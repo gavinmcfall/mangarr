@@ -58,6 +58,8 @@ type fakeStore struct {
 	// Task 5: last-write map keyed by MangaID so tests can check the final
 	// saved state of each entry without scanning the append-only slice.
 	savedLibraryCache map[int64]model.LibraryCacheEntry
+	// prunedKeep records the keep-set passed to PruneLibraryCacheExcept.
+	prunedKeep []int64
 	// Task 5: series seeded by manga ID for GetSeriesByMangaID lookups.
 	seriesByMangaID map[int64]model.Series
 	// callOrder records the sequence of Store mutations for tests that
@@ -280,6 +282,27 @@ func (f *fakeStore) SaveLibraryCacheEntry(in model.LibraryCacheEntry) error {
 	}
 	f.savedLibraryCache[in.MangaID] = in
 	return nil
+}
+
+// PruneLibraryCacheExcept removes libraryCache entries whose manga_id is not in
+// keep, recording the kept set in prunedKeep for assertions.
+func (f *fakeStore) PruneLibraryCacheExcept(keep []int64) (int, error) {
+	f.prunedKeep = keep
+	if f.libraryCache == nil {
+		return 0, nil
+	}
+	want := map[int64]bool{}
+	for _, id := range keep {
+		want[id] = true
+	}
+	removed := 0
+	for id := range f.libraryCache {
+		if !want[id] {
+			delete(f.libraryCache, id)
+			removed++
+		}
+	}
+	return removed, nil
 }
 
 // GetSeriesByMangaID returns a series seeded in seriesByMangaID, or
