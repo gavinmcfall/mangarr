@@ -19,11 +19,12 @@ type Registry struct {
 	reg *prometheus.Registry
 
 	// Counters
-	filesFiled      *prometheus.CounterVec
-	kavitaScans     *prometheus.CounterVec
-	anilistLookups  *prometheus.CounterVec
-	unmatchedTotal  prometheus.Counter
-	fileErrorsTotal prometheus.Counter
+	filesFiled         *prometheus.CounterVec
+	kavitaScans        *prometheus.CounterVec
+	anilistLookups     *prometheus.CounterVec
+	unmatchedTotal     prometheus.Counter
+	fileErrorsTotal    prometheus.Counter
+	fileConflictsTotal prometheus.Counter
 
 	// Gauges
 	pollerLastRun        prometheus.Gauge
@@ -78,6 +79,12 @@ func NewRegistry() *Registry {
 		Help: "Total number of file errors encountered during filing.",
 	})
 	reg.MustRegister(r.fileErrorsTotal)
+
+	r.fileConflictsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mangarr_file_conflicts_total",
+		Help: "Total source files skipped because their destination belongs to a different file (see filer.ConflictError).",
+	})
+	reg.MustRegister(r.fileConflictsTotal)
 
 	// ---- gauges ----
 
@@ -165,6 +172,11 @@ func (r *Registry) IncUnmatched() {
 // IncFileError increments the file-errors counter.
 func (r *Registry) IncFileError() {
 	r.fileErrorsTotal.Inc()
+}
+
+// IncFileConflict increments the file-conflict counter by one.
+func (r *Registry) IncFileConflict() {
+	r.fileConflictsTotal.Inc()
 }
 
 // ---- gauge methods ----

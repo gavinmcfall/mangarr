@@ -143,9 +143,10 @@ func main() {
 
 	// ---- filer ----
 	filr := &filer.Filer{
-		Mode:       settings.FileMode,
-		Scheme:     settings.RenameScheme,
-		RecycleBin: bin,
+		Mode:         settings.FileMode,
+		Scheme:       settings.RenameScheme,
+		VolumeScheme: settings.VolumeRenameScheme,
+		RecycleBin:   bin,
 	}
 	if filr.Mode == "" {
 		filr.Mode = model.ModeHardlink
@@ -171,7 +172,7 @@ func main() {
 	// ---- filer adapter ----
 	// poller.Filer wants: File(s model.Series, dstRoot string) error
 	// filer.Filer has:    File(series string, srcDir string, dstRoot string) error
-	filerAdpt := &filerAdapter{inner: filr}
+	filerAdpt := &filerAdapter{inner: filr, settings: st}
 
 	// ---- build LibraryIDs map from Settings ----
 	libIDs := settings.KavitaLibIDsByType
@@ -188,8 +189,8 @@ func main() {
 		// store.Store.MarkUnmatched satisfies poller.UnmatchedSink directly.
 		Unmatched: st,
 		// store.Store.AddActivity satisfies poller.ActivityWriter directly.
-		Activity:     st,
-		Metrics:      metricsReg,
+		Activity: st,
+		Metrics:  metricsReg,
 		// store.Store satisfies poller.Cache, poller.SeriesStore, and
 		// poller.BindingLister directly.
 		Cache:        st,
@@ -595,13 +596,34 @@ func lastPathComponent(p string) string {
 
 // filerAdapter adapts *filer.Filer to the poller.Filer interface.
 //
-//   poller.Filer:  File(s model.Series, dstRoot string) error
-//   filer.Filer:   File(series string, srcDir string, dstRoot string) error
+//	poller.Filer:  File(s model.Series, dstRoot string) error
+//	filer.Filer:   File(series string, srcDir string, dstRoot string) error
+//
+// settings is re-read on every call (fresh-per-call, like the scanner and
+// Suwayomi adapters) so mode and rename-scheme edits in the UI take effect on
+// the next filing pass without a restart. The Filer is shared with the
+// preview Planner, which therefore sees the same refreshed schemes.
 type filerAdapter struct {
-	inner *filer.Filer
+	inner    *filer.Filer
+	settings interface {
+		GetSettings() (model.Settings, error)
+	}
 }
 
 func (a *filerAdapter) File(s model.Series, dstRoot string) error {
+	if a.settings != nil {
+		if set, err := a.settings.GetSettings(); err != nil {
+			log.Printf("filer: get settings: %v (keeping current schemes)", err)
+		} else {
+			if set.FileMode != "" {
+				a.inner.Mode = set.FileMode
+			}
+			if set.RenameScheme != "" {
+				a.inner.Scheme = set.RenameScheme
+			}
+			a.inner.VolumeScheme = set.VolumeRenameScheme
+		}
+	}
 	return a.inner.File(s.Title, s.SourcePath, dstRoot)
 }
 

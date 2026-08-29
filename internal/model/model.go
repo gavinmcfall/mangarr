@@ -50,6 +50,10 @@ const (
 	StatusUnmatched Status = "unmatched" // classification failed, awaiting manual
 	StatusFiled     Status = "filed"     // placed into a library
 	StatusError     Status = "error"
+	// StatusConflict marks a series whose last filing pass found files that
+	// render to a destination owned by a different file (see
+	// filer.ConflictError). Non-conflicting files were still filed.
+	StatusConflict Status = "conflict"
 	// StatusOrphaned marks a series whose source folder vanished from disk
 	// (confirmed by the reconcile grace timer). Excluded from classify/file;
 	// retained in the DB and surfaced in the UI for confirm-removal.
@@ -93,10 +97,13 @@ type Series struct {
 type ActivityAction string
 
 const (
-	ActionFiled              ActivityAction = "filed"
-	ActionUnmatched          ActivityAction = "unmatched"
-	ActionScanTriggered      ActivityAction = "scan-triggered"
-	ActionError              ActivityAction = "error"
+	ActionFiled         ActivityAction = "filed"
+	ActionUnmatched     ActivityAction = "unmatched"
+	ActionScanTriggered ActivityAction = "scan-triggered"
+	ActionError         ActivityAction = "error"
+	// ActionConflict records a filing pass that skipped files because their
+	// destination belongs to another file. Partial success: the rest filed.
+	ActionConflict           ActivityAction = "conflict"
 	ActionBulkQueued         ActivityAction = "bulk-queued"
 	ActionBulkDone           ActivityAction = "bulk-done"
 	ActionBulkChapterErrored ActivityAction = "bulk-chapter-errored"
@@ -136,10 +143,19 @@ const (
 )
 
 // Settings is the single mutable config row (id=1).
+// DefaultVolumeRenameScheme is applied when Settings.VolumeRenameScheme is
+// empty. It files volumes beside chapters in the same series directory.
+const DefaultVolumeRenameScheme = "{series}/{series} - Vol.{volume}.cbz"
+
 type Settings struct {
-	DownloadRoots      []string              `json:"download_roots"` // managed via UI; env seeds on first boot
-	FileMode           FileMode
-	RenameScheme       string // e.g. "{series}/{series} - Ch.{chapter}.cbz"
+	DownloadRoots []string `json:"download_roots"` // managed via UI; env seeds on first boot
+	FileMode      FileMode
+	RenameScheme  string // e.g. "{series}/{series} - Ch.{chapter}.cbz"
+	// VolumeRenameScheme names whole-volume archives (files whose name
+	// carries a "Vol."/"Volume" marker and no chapter marker). Must render
+	// into the same directory as RenameScheme. Empty = volumes fall back to
+	// RenameScheme (pre-volume behaviour); GetSettings applies the default.
+	VolumeRenameScheme string `json:"volume_rename_scheme,omitempty"` // e.g. "{series}/{series} - Vol.{volume}.cbz"
 	PollMinutes        int
 	LibraryRoots       map[ContentType]string // Manga -> /media/Library/Books/Manga, ...
 	KavitaBaseURL      string

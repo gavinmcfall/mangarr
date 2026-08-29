@@ -372,10 +372,14 @@ func TestPlanReturnsSkipForExistingDst(t *testing.T) {
 
 	f := &Filer{Mode: model.ModeHardlink, Scheme: "{series}/{series} - Ch.{chapter}.cbz"}
 
-	// Pre-create the destination file so it looks already filed.
+	// Pre-create the destination as a hardlink of the source so it IS
+	// already filed. (An unrelated file at dst is a conflict, not a skip —
+	// see conflict_test.go.)
 	dst := filepath.Join(dstRoot, "Berserk", "Berserk - Ch.001.cbz")
 	os.MkdirAll(filepath.Dir(dst), 0o755)
-	os.WriteFile(dst, []byte("existing"), 0o644)
+	if err := os.Link(filepath.Join(src, "Ch. 001.cbz"), dst); err != nil {
+		t.Fatal(err)
+	}
 
 	plans, err := f.Plan("Berserk", src, dstRoot)
 	if err != nil {

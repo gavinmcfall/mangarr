@@ -303,6 +303,9 @@ func defaultSettings() model.Settings {
 // so that rows stored before a new field was added get the correct default on
 // every read without a schema migration.
 func applySettingsDefaults(s *model.Settings) {
+	if s.VolumeRenameScheme == "" {
+		s.VolumeRenameScheme = model.DefaultVolumeRenameScheme
+	}
 	if s.BulkMaxInFlight == 0 {
 		s.BulkMaxInFlight = 5
 	}

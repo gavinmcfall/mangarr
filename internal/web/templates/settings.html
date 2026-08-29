@@ -467,6 +467,15 @@
           <p class="input-hint">Example: <code class="rename-example">{{.RenameExample}}</code></p>
         </div>
       </div>
+      <div class="settings-row">
+        <label class="settings-label">Volume rename scheme</label>
+        <div class="settings-input-wrap">
+          <input type="text" name="volume_rename_scheme" value="{{.Settings.VolumeRenameScheme}}"
+            placeholder="{series}/{series} - Vol.{volume}.cbz">
+          <p class="input-hint">Tokens: {series} {volume}. Applied to files named like "Vol. 001" with no chapter marker. Must file into the same folder as the rename scheme.</p>
+          <p class="input-hint">Example: <code class="rename-example">{{.VolumeRenameExample}}</code></p>
+        </div>
+      </div>
     </div>
   </div>
 
