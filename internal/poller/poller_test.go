@@ -36,6 +36,7 @@ type fakeMetrics struct {
 	kavitaScans map[string]int
 	unmatched   int
 	fileErrors  int
+	conflicts   int
 	lastRunSet  bool
 }
 
@@ -50,6 +51,7 @@ func (f *fakeMetrics) IncFilesFiled(category string) { f.filesFiled[category]++ 
 func (f *fakeMetrics) IncKavitaScan(result string)   { f.kavitaScans[result]++ }
 func (f *fakeMetrics) IncUnmatched()                 { f.unmatched++ }
 func (f *fakeMetrics) IncFileError()                 { f.fileErrors++ }
+func (f *fakeMetrics) IncFileConflict()              { f.conflicts++ }
 func (f *fakeMetrics) SetPollerLastRun(_ time.Time)  { f.lastRunSet = true }
 
 // ----- fakes -----
@@ -759,6 +761,10 @@ type fakeSeriesStore struct {
 		id      int64
 		mangaID int64
 	}
+	statusCalls []struct {
+		id int64
+		st model.Status
+	}
 	getErr error
 	setErr error
 }
@@ -821,7 +827,13 @@ func (f *fakeSeriesStore) ListSeriesLite() ([]store.SeriesLite, error) {
 	return nil, nil
 }
 func (f *fakeSeriesStore) SetSeriesMissingSince(_ int64, _ *time.Time) error { return nil }
-func (f *fakeSeriesStore) SetSeriesStatus(_ int64, _ model.Status) error     { return nil }
+func (f *fakeSeriesStore) SetSeriesStatus(id int64, st model.Status) error {
+	f.statusCalls = append(f.statusCalls, struct {
+		id int64
+		st model.Status
+	}{id, st})
+	return nil
+}
 
 // SetSeriesMangaID records calls so the Library-Map persistence test can
 // assert the right (seriesID, mangaID) pair was stored.
@@ -1011,13 +1023,13 @@ func TestRunOnceCallsSuwayomiRefreshWhenConfigured(t *testing.T) {
 	var factoryCalls int32
 
 	p := &Poller{
-		Scanner:    fakeScanner{out: nil},
-		Classifier: &fakeClassifier{decision: model.Decision{Via: classifier.ViaUnmatched}},
-		Filer:      &recorder{},
-		Kavita:     &recorder{},
-		Unmatched:  &recorder{},
-		Activity:   &recorder{},
-		Bindings:   &fakeBindingStore{},
+		Scanner:       fakeScanner{out: nil},
+		Classifier:    &fakeClassifier{decision: model.Decision{Via: classifier.ViaUnmatched}},
+		Filer:         &recorder{},
+		Kavita:        &recorder{},
+		Unmatched:     &recorder{},
+		Activity:      &recorder{},
+		Bindings:      &fakeBindingStore{},
 		SuwayomiCache: cache,
 		SuwayomiClient: func(set model.Settings) (*suwayomi.Client, error) {
 			atomic.AddInt32(&factoryCalls, 1)
@@ -1049,13 +1061,13 @@ func TestRunOnceContinuesWhenSuwayomiRefreshFails(t *testing.T) {
 	series := model.Series{Title: "Solo Leveling", SourcePath: "/dl/Solo Leveling"}
 	st, dec := manhwaBinding(filepath.FromSlash("/lib/Manhwa"), 2)
 	p := &Poller{
-		Scanner:    fakeScanner{out: []model.Series{series}},
-		Classifier: &fakeClassifier{decision: dec},
-		Filer:      rec,
-		Kavita:     rec,
-		Unmatched:  rec,
-		Activity:   rec,
-		Bindings:   st,
+		Scanner:       fakeScanner{out: []model.Series{series}},
+		Classifier:    &fakeClassifier{decision: dec},
+		Filer:         rec,
+		Kavita:        rec,
+		Unmatched:     rec,
+		Activity:      rec,
+		Bindings:      st,
 		SuwayomiCache: cache,
 		SuwayomiClient: func(set model.Settings) (*suwayomi.Client, error) {
 			return suwayomi.New(srv.URL, suwayomi.NoAuth{}), nil
@@ -1077,13 +1089,13 @@ func TestRunOnceSkipsRefreshWhenSuwayomiURLEmpty(t *testing.T) {
 	var factoryCalls int32
 	cache := suwayomi.NewPathCache()
 	p := &Poller{
-		Scanner:    fakeScanner{out: nil},
-		Classifier: &fakeClassifier{decision: model.Decision{Via: classifier.ViaUnmatched}},
-		Filer:      &recorder{},
-		Kavita:     &recorder{},
-		Unmatched:  &recorder{},
-		Activity:   &recorder{},
-		Bindings:   &fakeBindingStore{},
+		Scanner:       fakeScanner{out: nil},
+		Classifier:    &fakeClassifier{decision: model.Decision{Via: classifier.ViaUnmatched}},
+		Filer:         &recorder{},
+		Kavita:        &recorder{},
+		Unmatched:     &recorder{},
+		Activity:      &recorder{},
+		Bindings:      &fakeBindingStore{},
 		SuwayomiCache: cache,
 		SuwayomiClient: func(set model.Settings) (*suwayomi.Client, error) {
 			atomic.AddInt32(&factoryCalls, 1)

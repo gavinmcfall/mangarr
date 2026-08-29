@@ -274,11 +274,11 @@ type Handler struct {
 	tmpls                   map[string]*template.Template // one template set per page
 	store                   Store
 	runner                  Runner
-	previewer               Previewer                     // optional; /preview returns placeholder when nil
-	seriesFiler             SeriesFiler                   // optional; /api/series/{id}/assign returns 503 when nil
-	refiler                 SeriesRefiler                 // optional; /api/series/{id}/refile returns 503 when nil
-	recycleBin              *recyclebin.Bin               // optional; per-chapter remove returns 503 when nil
-	browseRoots             []string                      // allowlist for /api/browse (injected; tests can override)
+	previewer               Previewer       // optional; /preview returns placeholder when nil
+	seriesFiler             SeriesFiler     // optional; /api/series/{id}/assign returns 503 when nil
+	refiler                 SeriesRefiler   // optional; /api/series/{id}/refile returns 503 when nil
+	recycleBin              *recyclebin.Bin // optional; per-chapter remove returns 503 when nil
+	browseRoots             []string        // allowlist for /api/browse (injected; tests can override)
 	recycleBinPath          string
 	recycleBinRetentionDays int
 	backupDir               string
@@ -692,11 +692,11 @@ type seriesPageData struct {
 
 // previewPageData is passed to templates/preview.html.
 type previewPageData struct {
-	Page         string
-	Matched      []previewRow
-	Unmatched    []previewRow
+	Page          string
+	Matched       []previewRow
+	Unmatched     []previewRow
 	Misconfigured []previewRow
-	Placeholder  bool   // true when previewer is not wired
+	Placeholder   bool // true when previewer is not wired
 }
 
 // previewRow is the view-model for one series on the Preview page.
@@ -781,8 +781,9 @@ type settingsPageData struct {
 	// LibraryMap carries the override-card view-model shared with the
 	// HTMX fragment endpoint. Single source of truth for the override
 	// rows, library-name resolution, and configure-first prompts.
-	LibraryMap libraryMapData
+	LibraryMap              libraryMapData
 	RenameExample           string
+	VolumeRenameExample     string
 	DiskRows                []fsDiskRow
 	RecycleBinPath          string
 	RecycleBinRetentionDays int
@@ -825,8 +826,8 @@ type healthRow struct {
 
 // healthPageData is passed to templates/health.html.
 type healthPageData struct {
-	Page        string
-	Items       []healthRow
+	Page          string
+	Items         []healthRow
 	OverallStatus health.Status
 	Unregistered  bool // true when healthReg is nil
 }
@@ -843,6 +844,15 @@ func renameExample(scheme string) string {
 		return "(invalid scheme — fix to see preview)"
 	}
 	return filer.RenderName(scheme, "Berserk", "Ch. 350.cbz")
+}
+
+// volumeRenameExample mirrors renameExample for the volume scheme, rendering
+// a sample volume file name ("Berserk", "Vol. 3.cbz").
+func volumeRenameExample(scheme string) string {
+	if scheme == "" || filer.ValidateVolumeScheme(scheme) != nil {
+		return "(invalid scheme - fix to see preview)"
+	}
+	return filer.RenderVolumeName(scheme, "Berserk", "Vol. 3.cbz")
 }
 
 func (h *Handler) pageSeries(w http.ResponseWriter, r *http.Request) {
@@ -1062,6 +1072,7 @@ func activityActions() []string {
 		string(model.ActionUnmatched),
 		string(model.ActionScanTriggered),
 		string(model.ActionError),
+		string(model.ActionConflict),
 		string(model.ActionBulkQueued),
 		string(model.ActionBulkDone),
 		string(model.ActionBulkChapterErrored),
@@ -1605,6 +1616,7 @@ func (h *Handler) pageSettings(w http.ResponseWriter, r *http.Request) {
 		SuwayomiPassword:        settings.SuwayomiPassword,
 		LibraryMap:              libraryMap,
 		RenameExample:           renameExample(settings.RenameScheme),
+		VolumeRenameExample:     volumeRenameExample(settings.VolumeRenameScheme),
 		DiskRows:                diskRows,
 		RecycleBinPath:          h.recycleBinPath,
 		RecycleBinRetentionDays: h.recycleBinRetentionDays,
@@ -1675,6 +1687,7 @@ func (h *Handler) renderSettingsWithError(
 		SuwayomiPassword:        settings.SuwayomiPassword,
 		LibraryMap:              libraryMap,
 		RenameExample:           renameExample(settings.RenameScheme),
+		VolumeRenameExample:     volumeRenameExample(settings.VolumeRenameScheme),
 		DiskRows:                diskRows,
 		RecycleBinPath:          h.recycleBinPath,
 		RecycleBinRetentionDays: h.recycleBinRetentionDays,
@@ -1733,7 +1746,7 @@ func (h *Handler) buildDiskRows(settings model.Settings) []fsDiskRow {
 	// Stat each unique path and group by FSID.
 	// Errored paths get their own row (FSID is zero — isolate by path as key).
 	type fsKey struct {
-		fsid [2]int32
+		fsid    [2]int32
 		errPath string // non-empty for error rows; prevents collapsing errors
 	}
 	type fsGroup struct {
@@ -1863,6 +1876,10 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 
 	settings.FileMode = model.FileMode(r.FormValue("file_mode"))
 	settings.RenameScheme = r.FormValue("rename_scheme")
+	settings.VolumeRenameScheme = strings.TrimSpace(r.FormValue("volume_rename_scheme"))
+	if settings.VolumeRenameScheme == "" {
+		settings.VolumeRenameScheme = model.DefaultVolumeRenameScheme
+	}
 	if pm, err := strconv.Atoi(r.FormValue("poll_minutes")); err == nil && pm > 0 {
 		settings.PollMinutes = pm
 	}
@@ -1968,7 +1985,7 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
 	// Validate the rename scheme before persisting. On failure, re-render the
 	// Settings page with the error shown inline and all form values preserved
 	// so the user does not lose in-progress edits.
-	if err := filer.ValidateScheme(settings.RenameScheme); err != nil {
+	if err := filer.ValidateSchemePair(settings.RenameScheme, settings.VolumeRenameScheme); err != nil {
 		h.renderSettingsWithError(w, r, settings, bindings, rules, "Invalid rename scheme: "+err.Error())
 		return
 	}
@@ -2043,7 +2060,7 @@ func (h *Handler) apiListActivity(w http.ResponseWriter, r *http.Request) {
 
 // apiHealthResponse is the JSON shape for GET /api/health.
 type apiHealthResponse struct {
-	Status  health.Status  `json:"status"`
+	Status  health.Status   `json:"status"`
 	Results []health.Result `json:"results"`
 }
 
@@ -2114,7 +2131,10 @@ func (h *Handler) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, fmt.Errorf("invalid JSON: %w", err), http.StatusBadRequest)
 		return
 	}
-	if err := filer.ValidateScheme(settings.RenameScheme); err != nil {
+	if settings.VolumeRenameScheme == "" {
+		settings.VolumeRenameScheme = model.DefaultVolumeRenameScheme
+	}
+	if err := filer.ValidateSchemePair(settings.RenameScheme, settings.VolumeRenameScheme); err != nil {
 		jsonErr(w, fmt.Errorf("invalid rename scheme: %w", err), http.StatusBadRequest)
 		return
 	}

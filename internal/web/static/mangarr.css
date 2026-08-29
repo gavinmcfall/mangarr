@@ -332,6 +332,7 @@ tbody tr:hover td {
 .pill-pending  { background: #1f3756; color: #5d9cec; }
 .pill-unmatched { background: #4f3a1a; color: #e6a23c; }
 .pill-error    { background: #4d2424; color: #e15554; }
+.pill-conflict { background: #4d3418; color: #f0a04b; }
 
 /* Action pills (activity page) */
 .pill-scan-triggered { background: #1f3756; color: #5d9cec; }

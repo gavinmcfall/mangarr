@@ -7,9 +7,9 @@
 //     getting a Decision{BindingID, Via}.
 //     - BindingID == 0 (or unresolvable): routed to UnmatchedSink + ActionUnmatched.
 //     - BindingID present but no matching row: ActionError (binding deleted
-//       between save and tick — surfaces the race to the operator).
+//     between save and tick — surfaces the race to the operator).
 //     - BindingID resolved: filed into Binding.LibraryRoot via Filer.File +
-//       ActionFiled, then Kavita scan against Binding.KavitaLibID.
+//     ActionFiled, then Kavita scan against Binding.KavitaLibID.
 //  4. After filing, triggers a Kavita library scan (once per library per
 //     RunOnce call). The dedup map is marked only on success — a transient
 //     Kavita failure does not block a retry from a later same-binding series
@@ -26,9 +26,11 @@ package poller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gavinmcfall/mangarr/internal/classifier"
@@ -90,6 +92,7 @@ type MetricsSink interface {
 	IncKavitaScan(result string)
 	IncUnmatched()
 	IncFileError()
+	IncFileConflict()
 	SetPollerLastRun(t time.Time)
 }
 
@@ -171,7 +174,7 @@ type Poller struct {
 	// and resolves Decision.BindingID against it.
 	Bindings BindingLister
 
-	Cache Cache // optional; used by FileOne to persist manual type overrides
+	Cache Cache       // optional; used by FileOne to persist manual type overrides
 	Store SeriesStore // optional; used by FileOne to load and update series
 
 	// v1 ContentType→destination maps. Used by FileOne (manual classify
@@ -335,12 +338,18 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		}
 
 		if err := p.Filer.File(s, binding.LibraryRoot); err != nil {
-			p.recordActivityVia(s.Title, model.ActionError, d.Via,
-				fmt.Sprintf("file: %v", err))
-			if p.Metrics != nil {
-				p.Metrics.IncFileError()
+			var ce *filer.ConflictError
+			if !errors.As(err, &ce) {
+				p.recordActivityVia(s.Title, model.ActionError, d.Via,
+					fmt.Sprintf("file: %v", err))
+				if p.Metrics != nil {
+					p.Metrics.IncFileError()
+				}
+				continue
 			}
-			continue
+			// Partial success: every non-conflicting file landed. Record
+			// the conflicts and carry on with binding + scan for the rest.
+			p.recordConflicts(s, d.Via, ce)
 		}
 		// Record the auto-classifier's verdict so /series can render the
 		// resolved binding without having to query the activity log.
@@ -483,6 +492,34 @@ func (p *Poller) recordActivityVia(title string, action model.ActivityAction, vi
 	})
 }
 
+// recordConflicts turns a filer.ConflictError into the durable signals an
+// operator can see: a "conflict" activity row naming the colliding files, the
+// series status flipped to StatusConflict, and the conflict counter bumped.
+// The files that did NOT conflict have already been filed by the time this
+// runs, so callers continue with binding + Kavita scan as for a success.
+func (p *Poller) recordConflicts(s model.Series, via string, ce *filer.ConflictError) {
+	const maxNamed = 5
+	names := make([]string, 0, maxNamed)
+	for i, c := range ce.Conflicts {
+		if i == maxNamed {
+			break
+		}
+		names = append(names, filepath.Base(c.Src)+" vs "+filepath.Base(c.ClaimedBy))
+	}
+	detail := fmt.Sprintf("%d file(s) not filed: destination owned by another file: %s",
+		len(ce.Conflicts), strings.Join(names, "; "))
+	if extra := len(ce.Conflicts) - maxNamed; extra > 0 {
+		detail += fmt.Sprintf(" (+%d more)", extra)
+	}
+	p.recordActivityVia(s.Title, model.ActionConflict, via, detail)
+	if p.Store != nil && s.ID != 0 {
+		_ = p.Store.SetSeriesStatus(s.ID, model.StatusConflict)
+	}
+	if p.Metrics != nil {
+		p.Metrics.IncFileConflict()
+	}
+}
+
 // FileOne applies the classify-and-file pipeline to a single series
 // identified by its primary key (seriesID) and an explicitly supplied
 // ContentType (ct).
@@ -528,9 +565,13 @@ func (p *Poller) FileOne(ctx context.Context, seriesID int64, ct model.ContentTy
 	}
 
 	if err := p.Filer.File(series, root); err != nil {
-		p.recordActivityVia(series.Title, model.ActionError, classifier.ViaManual,
-			fmt.Sprintf("file: %v", err))
-		return fmt.Errorf("FileOne: filer: %w", err)
+		var ce *filer.ConflictError
+		if !errors.As(err, &ce) {
+			p.recordActivityVia(series.Title, model.ActionError, classifier.ViaManual,
+				fmt.Sprintf("file: %v", err))
+			return fmt.Errorf("FileOne: filer: %w", err)
+		}
+		p.recordConflicts(series, classifier.ViaManual, ce)
 	}
 	p.recordActivityVia(series.Title, model.ActionFiled, classifier.ViaManual,
 		fmt.Sprintf("filed into %s", root))
@@ -702,7 +743,11 @@ func (p *Poller) RefileOne(ctx context.Context, seriesID int64) error {
 		return fmt.Errorf("RefileOne: binding %d missing or has no library_root", d.BindingID)
 	}
 	if err := p.Filer.File(s, binding.LibraryRoot); err != nil {
-		return fmt.Errorf("RefileOne: file: %w", err)
+		var ce *filer.ConflictError
+		if !errors.As(err, &ce) {
+			return fmt.Errorf("RefileOne: file: %w", err)
+		}
+		p.recordConflicts(s, d.Via, ce)
 	}
 	bid := binding.ID
 	_ = p.Store.SetSeriesCurrentBinding(s.ID, &bid)

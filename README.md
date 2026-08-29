@@ -30,7 +30,7 @@ docker run --rm -p 8590:8590 \
   ghcr.io/gavinmcfall/mangarr:latest
 ```
 
-Then open `http://localhost:8590/settings`, set the per-type library roots and Kavita base URL + API key + library IDs, and click **Save settings**. The first scan runs on startup; subsequent scans run on the configured poll interval (default 15 min). Hit **Rescan now** from the Series or Activity page to trigger a scan on demand.
+Then open `http://localhost:8590/settings`, set the per-type library roots and Kavita base URL + API key + library IDs, and click **Save settings**. Two rename schemes are applied per file: the chapter scheme (`{series}`, `{chapter}`) and the volume scheme (`{series}`, `{volume}`, used for files named like `Vol. 001` with no chapter marker); both must file into the same series folder. Files whose destination is already owned by a different file are reported as **conflicts** (Activity page + series status) rather than skipped or overwritten. The first scan runs on startup; subsequent scans run on the configured poll interval (default 15 min). Hit **Rescan now** from the Series or Activity page to trigger a scan on demand.
 
 ## Why "organizer only"
 
