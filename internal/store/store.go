@@ -39,6 +39,10 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	
+	// SQLite does not support concurrent writers
+	db.SetMaxOpenConns(1)
+
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		return nil, err
